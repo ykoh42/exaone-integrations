@@ -24,7 +24,7 @@ npm run build --workspace=strands-exaone
 
 Set `EXAONE_API_KEY` in your environment before running an agent. See the package READMEs for examples and [CONTRIBUTING.md](CONTRIBUTING.md) for development checks.
 
-For runnable Strands CLI agents, see the [Python example](packages/strands-exaone-python/examples/strands-cli/) and the [TypeScript example](packages/strands-exaone-typescript/examples/strands-cli/).
+For runnable examples, see the Python [Harness](packages/strands-exaone-python/examples/harness/) and [CLI](packages/strands-exaone-python/examples/strands-cli/) examples, or the TypeScript [Harness](packages/strands-exaone-typescript/examples/harness/) and [CLI](packages/strands-exaone-typescript/examples/strands-cli/) examples.
 
 The providers adapt a single completion choice to Strands. EXAONE Tabular is a separate API and is outside this project's scope.
 

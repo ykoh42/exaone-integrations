@@ -9,6 +9,9 @@
     "examples/strands-cli/agent.ts",
     "examples/strands-cli/package.json",
     "examples/strands-cli/README.md",
+    "examples/harness/agent.ts",
+    "examples/harness/package.json",
+    "examples/harness/README.md",
     "LICENSE"
   ],
   "exports": {
