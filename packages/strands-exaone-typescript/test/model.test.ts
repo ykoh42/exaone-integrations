@@ -98,6 +98,31 @@ describe('ExaoneModel', () => {
     ])
   })
 
+  it('marks error results while preserving empty, text, JSON, and successful content', async () => {
+    const fetcher = vi.fn(async () => response(JSON.stringify(wire([{ index: 0, message: { content: 'ok' }, finish_reason: 'stop' }]))))
+    const model = new ExaoneModel({ apiKey: 'key', fetch: fetcher as typeof fetch, stream: false })
+    const blocks = [
+      { toolUseId: 'empty-error', status: 'error' as const, content: [] },
+      { toolUseId: 'text-error', status: 'error' as const, content: [{ text: '\n failure \n' }] },
+      { toolUseId: 'json-error', status: 'error' as const, content: [{ json: { value: 0, ok: false } }] },
+      { toolUseId: 'mixed-error', status: 'error' as const, content: [{ text: 'before' }, { json: { value: 1 } }, { text: 'after' }] },
+      { toolUseId: 'empty-success', status: 'success' as const, content: [] },
+      { toolUseId: 'text-success', status: 'success' as const, content: [{ text: '\n failure \n' }] },
+      { toolUseId: 'json-success', status: 'success' as const, content: [{ json: { value: 0, ok: false } }] },
+    ]
+    await collect(model, [Message.fromMessageData({ role: 'user', content: blocks.map(toolResult => ({ toolResult })) })])
+    const init = (fetcher.mock.calls as unknown as [string, RequestInit][])[0]![1]
+    expect(JSON.parse(String(init.body)).messages).toEqual([
+      { role: 'tool', tool_call_id: 'empty-error', content: '[ERROR] ' },
+      { role: 'tool', tool_call_id: 'text-error', content: '[ERROR] \n failure \n' },
+      { role: 'tool', tool_call_id: 'json-error', content: '[ERROR] {"value":0,"ok":false}' },
+      { role: 'tool', tool_call_id: 'mixed-error', content: '[ERROR] before\n{"value":1}\nafter' },
+      { role: 'tool', tool_call_id: 'empty-success', content: '' },
+      { role: 'tool', tool_call_id: 'text-success', content: '\n failure \n' },
+      { role: 'tool', tool_call_id: 'json-success', content: '{"value":0,"ok":false}' },
+    ])
+  })
+
   it('serializes interleaved streamed tool fragments into two complete SDK blocks', async () => {
     const data = sse([
       event({ reasoning_content: 'r' }),

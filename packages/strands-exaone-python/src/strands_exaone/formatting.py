@@ -18,10 +18,13 @@ def _text_of_result(result: ToolResult) -> str:
             parts.append(json.dumps(item["json"], ensure_ascii=False, separators=(",", ":")))
         else:
             raise ValueError("EXAONE supports text and JSON tool results only")
-    return "\n".join(parts)
+    text = "\n".join(parts)
+    return f"[ERROR] {text}" if result.get("status") == "error" else text
 
 
 def _tool_call(tool: ToolUse) -> dict[str, Any]:
+    if tool.get("reasoningSignature"):
+        raise ValueError("EXAONE does not support tool reasoning signatures")
     return {
         "id": tool["toolUseId"],
         "type": "function",

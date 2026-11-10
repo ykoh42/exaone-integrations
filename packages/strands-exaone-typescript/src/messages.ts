@@ -10,7 +10,7 @@ function toolResult(block: ToolResultBlock): WireMessage {
       default: throw new TypeError(`Unsupported EXAONE tool result content: ${part.type}`)
     }
   }).join('\n')
-  return { role: 'tool', tool_call_id: block.toolUseId, content }
+  return { role: 'tool', tool_call_id: block.toolUseId, content: block.status === 'error' ? `[ERROR] ${content}` : content }
 }
 
 function assistantMessage(message: Message): WireMessage {
