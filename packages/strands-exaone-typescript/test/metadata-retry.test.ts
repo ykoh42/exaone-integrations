@@ -164,6 +164,35 @@ describe('response metadata', () => {
 })
 
 describe('opt-in retry policy', () => {
+  it('waits for a server delay longer than the Node timer limit', async () => {
+    vi.useFakeTimers()
+    const delay = 2_147_483_648
+    let attempts = 0
+    const fetcher = fakeFetch(async () => ++attempts === 1
+      ? new Response('{}', { status: 429, headers: { 'retry-after-ms': String(delay) } })
+      : ok())
+    const result = collect(new ExaoneModel({ apiKey: 'key', fetch: fetcher, stream: false, maxRetries: 1, maxRetryDelayMs: delay }))
+    await vi.advanceTimersByTimeAsync(delay - 1)
+    expect(attempts).toBe(1)
+    await vi.advanceTimersByTimeAsync(1)
+    await result
+    expect(attempts).toBe(2)
+  })
+
+  it.each([0, 2_147_483_647])('cancels a long retry wait after %i ms without another request', async (elapsed) => {
+    vi.useFakeTimers()
+    const delay = 2_147_483_657
+    const fetcher = fakeFetch(async () => new Response('{}', { status: 429, headers: { 'retry-after-ms': String(delay) } }))
+    const signal = new AbortController()
+    const model = new ExaoneModel({ apiKey: 'key', fetch: fetcher, maxRetries: 1, maxRetryDelayMs: delay })
+    const result = collect(model, signal.signal)
+    const failure = expect(result).rejects.toThrow('cancelled')
+    await vi.advanceTimersByTimeAsync(elapsed)
+    signal.abort(new Error('cancelled'))
+    await failure
+    expect(fetcher).toHaveBeenCalledOnce()
+  })
+
   it('honors the longer of retry headers before emitting any result', async () => {
     vi.useFakeTimers()
     const cancel = vi.fn()

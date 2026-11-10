@@ -31,7 +31,7 @@ function retryAfterDelay(headers: Headers): number | undefined {
   return delays.length ? Math.max(...delays) : undefined
 }
 
-function waitForRetry(ms: number, signal: AbortSignal): Promise<void> {
+function waitForRetryChunk(ms: number, signal: AbortSignal): Promise<void> {
   if (signal.aborted) return Promise.reject(signal.reason)
   return new Promise((resolve, reject) => {
     const abort = () => {
@@ -44,6 +44,18 @@ function waitForRetry(ms: number, signal: AbortSignal): Promise<void> {
     }, ms)
     signal.addEventListener('abort', abort, { once: true })
   })
+}
+
+async function waitForRetry(ms: number, signal: AbortSignal): Promise<void> {
+  // Node clamps larger timeouts to 1 ms. Wait in bounded chunks so a long
+  // Retry-After value cannot cause an early request.
+  const maxTimeout = 2_147_483_647
+  let remaining = ms
+  while (remaining > maxTimeout) {
+    await waitForRetryChunk(maxTimeout, signal)
+    remaining -= maxTimeout
+  }
+  await waitForRetryChunk(remaining, signal)
 }
 
 /** Retry retryable HTTP responses, before exposing any events. */
