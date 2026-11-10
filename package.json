@@ -2,14 +2,24 @@
   "name": "exaone-integrations",
   "private": true,
   "type": "module",
-  "workspaces": ["typescript/*"],
-  "engines": { "node": ">=22" },
+  "workspaces": [
+    "typescript/*"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "build": "npm run build --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
-    "check": "npm run typecheck && npm run build"
+    "lint": "oxlint typescript --deny-warnings",
+    "check": "npm run lint && npm run typecheck && npm run build"
   },
   "devDependencies": {
+    "eslint-plugin-sonarjs": "^4.2.2",
+    "oxlint": "^1.93.0",
     "typescript": "^5.9.3"
+  },
+  "overrides": {
+    "minimatch": "11.0.1"
   }
 }

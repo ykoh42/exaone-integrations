@@ -24,6 +24,7 @@ jobs:
       - run: python -m pip install -e './python/strands-exaone[dev]'
       - run: ruff check python/strands-exaone
       - run: ruff format --check python/strands-exaone
+      - run: complexipy python/strands-exaone/src --max-complexity-allowed 15
       - run: python -c 'import strands_exaone'
       - run: python -m build python/strands-exaone
 
