@@ -1,0 +1,26 @@
+{
+  "name": "strands-exaone",
+  "version": "0.0.0",
+  "description": "EXAONE model provider for Strands Agents",
+  "type": "module",
+  "files": ["dist"],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "sideEffects": false,
+  "engines": { "node": ">=22" },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ykoh42/exaone-integrations.git",
+    "directory": "typescript/strands-exaone"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "peerDependencies": { "@strands-agents/sdk": ">=1.24.0 <2.0.0" },
+  "devDependencies": { "@strands-agents/sdk": "1.24.0" }
+}

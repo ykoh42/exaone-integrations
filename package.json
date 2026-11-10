@@ -1,0 +1,15 @@
+{
+  "name": "exaone-integrations",
+  "private": true,
+  "type": "module",
+  "workspaces": ["typescript/*"],
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "check": "npm run typecheck && npm run build"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  }
+}

@@ -1,0 +1,30 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "strands-exaone"
+version = "0.0.0"
+description = "EXAONE model provider for Strands Agents"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["strands-agents>=1.0.0,<2.0.0"]
+
+[project.optional-dependencies]
+dev = ["build>=1.0", "pytest>=8.0", "pytest-asyncio>=0.25", "ruff>=0.11"]
+
+[project.urls]
+Repository = "https://github.com/ykoh42/exaone-integrations"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/strands_exaone"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

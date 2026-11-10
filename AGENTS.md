@@ -1,0 +1,6 @@
+- Write simple, readable code with plain names and small functions.
+- Keep framework packages independently installable. Share code only when multiple packages need the same behavior.
+- Preserve EXAONE input, output, and reasoning history across framework boundaries; add only protocol-required transformations.
+- Distinguish API limitations, framework limitations, and adapter defects. Report unsupported or unverified behavior accurately.
+- Test protocol changes with representative request and response fixtures. Validate real EXAONE flows before claiming support; report skipped live checks.
+- Keep Python and TypeScript behavior aligned where their framework interfaces permit it.
