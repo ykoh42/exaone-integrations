@@ -25,8 +25,15 @@ jobs:
       - run: ruff check python/strands-exaone
       - run: ruff format --check python/strands-exaone
       - run: complexipy python/strands-exaone/src --max-complexity-allowed 15
+      - name: Run Python tests when present
+        run: |
+          if [ -d python/strands-exaone/tests ]; then
+            python -m pytest python/strands-exaone/tests
+          else
+            echo 'No Python tests yet.'
+          fi
       - run: python -c 'import strands_exaone'
-      - run: python -m build python/strands-exaone
+      - run: cd python/strands-exaone && hatch build
 
   typescript:
     runs-on: ubuntu-latest

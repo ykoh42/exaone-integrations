@@ -11,7 +11,16 @@ requires-python = ">=3.10"
 dependencies = ["strands-agents>=1.0.0,<2.0.0"]
 
 [project.optional-dependencies]
-dev = ["build>=1.0", "complexipy>=8.3,<9", "pytest>=8.0", "pytest-asyncio>=0.25", "ruff>=0.11"]
+dev = [
+    "hatch>=1.0.0,<2.0.0",
+    "complexipy>=8.3,<9",
+    "pytest>=9.0.0,<10.0.0",
+    "pytest-asyncio>=1.0.0,<1.5.0",
+    "pytest-cov>=7.0.0,<8.0.0",
+    "pytest-timeout>=2.0.0,<3.0.0",
+    "pytest-xdist>=3.0.0,<4.0.0",
+    "ruff>=0.16.0,<0.18.0",
+]
 
 [project.urls]
 Repository = "https://github.com/ykoh42/exaone-integrations"
@@ -28,3 +37,9 @@ select = ["E", "F", "I", "B"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+timeout = 90
+
+[tool.coverage.run]
+branch = true
+source = ["src"]

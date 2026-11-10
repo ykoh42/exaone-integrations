@@ -5,6 +5,10 @@
   "workspaces": [
     "typescript/*"
   ],
+  "allowScripts": {
+    "esbuild": true,
+    "fsevents": false
+  },
   "engines": {
     "node": ">=22"
   },
@@ -12,12 +16,17 @@
     "build": "npm run build --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "lint": "oxlint typescript --deny-warnings",
-    "check": "npm run lint && npm run typecheck && npm run build"
+    "test": "vitest run --passWithNoTests",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "check": "npm run lint && npm run typecheck && npm run test && npm run build"
   },
   "devDependencies": {
     "eslint-plugin-sonarjs": "^4.2.2",
     "oxlint": "^1.93.0",
-    "typescript": "^5.9.3"
+    "typescript": "^6.0.3",
+    "vitest": "^5.0.2",
+    "@vitest/coverage-v8": "^5.0.2"
   },
   "overrides": {
     "minimatch": "11.0.1"
