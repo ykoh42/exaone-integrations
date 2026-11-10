@@ -404,6 +404,17 @@ describe('ExaoneModel', () => {
 })
 
 describe('SSE parser', () => {
+  it.each(['\n', '\r', '\r\n'])('strips a split leading BOM, dispatches blank-line events and discards the incomplete tail (%j)', async (newline) => {
+    const bytes = new TextEncoder().encode(`\uFEFFdata: 안녕${newline}${newline}data: pending${newline}`)
+    const stream = new ReadableStream<Uint8Array>({ start(controller) {
+      for (const byte of bytes) controller.enqueue(Uint8Array.of(byte))
+      controller.close()
+    } })
+    const events = []
+    for await (const value of readSSE(stream)) events.push(value)
+    expect(events).toEqual(['안녕'])
+  })
+
   it('handles CR-only, split CRLF, empty data fields and multi-line data', async () => {
     const encoder = new TextEncoder()
     const stream = new ReadableStream<Uint8Array>({ start(controller) {

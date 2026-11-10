@@ -23,10 +23,7 @@ class SSEParser {
       this.line(line, result)
       newline = this.buffer.search(/[\r\n]/)
     }
-    if (end) {
-      if (this.buffer) this.line(this.buffer.replace(/\r$/, ''), result)
-      this.line('', result)
-    }
+    // EOF does not dispatch a pending event; the stream requires a blank line.
     return result
   }
 
@@ -61,7 +58,9 @@ export async function* readSSE(body: ReadableStream<Uint8Array>): AsyncGenerator
       if (chunk.done) break
     }
   } finally {
-    if (!complete) await reader.cancel().catch(() => undefined)
+    if (!complete) {
+      try { void reader.cancel().catch(() => undefined) } catch { /* custom transport cleanup may throw */ }
+    }
     reader.releaseLock()
   }
 }

@@ -426,3 +426,95 @@ async def test_harness_rejects_nontext_system_blocks_before_request(block: dict[
         with pytest.raises(ValueError, match="text-only system prompt blocks"):
             await agent.invoke_async("Hello.")
     assert request_count == 0
+
+
+async def test_harness_accepts_initial_split_utf8_bom() -> None:
+    """A synthetic UTF-8 BOM can span HTTP byte chunks."""
+    calls: list[bool] = []
+    requests: list[dict[str, Any]] = []
+
+    @tool
+    def get_number() -> str:
+        """Return a synthetic number."""
+        calls.append(True)
+        return "7"
+
+    class OneByteStream(httpx.AsyncByteStream):
+        def __init__(self, data: bytes) -> None:
+            self.data = data
+
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            for byte in self.data:
+                yield bytes([byte])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        data = (
+            b"\xef\xbb\xbf" + events(chunk(tool_delta("call_1", "get_number")), chunk(finish="tool_calls"))
+            if len(requests) == 1
+            else events(chunk({"content": "7"}), chunk(finish="stop"))
+        )
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=OneByteStream(data))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        await make_harness(ExaoneModel(api_key="test-only-key", http_client=client), [get_number]).invoke_async(
+            "Get a number."
+        )
+    assert calls == [True]
+    assert len(requests) == 2
+    assert any(message.get("tool_call_id") == "call_1" for message in requests[1]["messages"])
+
+
+@pytest.mark.parametrize("ending", [b"", b"\n", b"\r", b"\r\n"])
+async def test_harness_does_not_execute_tool_when_done_event_is_incomplete(ending: bytes) -> None:
+    """A synthetic EOF is not an SSE event delimiter."""
+    calls: list[bool] = []
+    requests = 0
+
+    @tool
+    def get_number() -> str:
+        """Return a synthetic number."""
+        calls.append(True)
+        return "7"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        if requests > 1:
+            return response(events(chunk({"content": "unexpected execution"}), chunk(finish="stop")))
+        data = events(chunk(tool_delta("call_1", "get_number")), chunk(finish="tool_calls"), done=False)
+        return response(data + b"data: [DONE]" + ending)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(ExaoneError, match=r"without \[DONE\]"):
+            await make_harness(ExaoneModel(api_key="test-only-key", http_client=client), [get_number]).invoke_async(
+                "Get a number."
+            )
+    assert requests == 1
+    assert calls == []
+
+
+@pytest.mark.parametrize("charset", ["utf-8", "iso-8859-1", "utf-16"])
+@pytest.mark.parametrize("ending", [b"\n", b"\r", b"\r\n"])
+@pytest.mark.parametrize("size", [1, 7])
+async def test_harness_sse_utf8_ignores_charset_and_keeps_unicode(charset: str, ending: bytes, size: int) -> None:
+    """Exercise synthetic SSE boundaries, including Unicode separators inside text."""
+    original = "한글\ufeffmiddle\u2028line\u2029next\u0085end"
+
+    class ByteChunks(httpx.AsyncByteStream):
+        def __init__(self, data: bytes) -> None:
+            self.data = data
+
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            for index in range(0, len(self.data), size):
+                yield self.data[index : index + size]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        data = events(chunk({"content": original}), chunk(finish="stop")).replace(b"\n", ending)
+        return httpx.Response(
+            200, headers={"content-type": f"text/event-stream; charset={charset}"}, stream=ByteChunks(data)
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await make_harness(ExaoneModel(api_key="test-only-key", http_client=client)).invoke_async("Say text.")
+    assert "".join(block.get("text", "") for block in result.message["content"]) == original

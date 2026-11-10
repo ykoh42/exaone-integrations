@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import codecs
 import json
+import re
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass, field
 from typing import Any
@@ -12,10 +14,35 @@ import httpx
 from .errors import ExaoneError, redact
 
 
+async def _sse_lines(response: httpx.Response) -> AsyncIterator[str]:
+    """Split UTF-8 text only at SSE CR, LF and CRLF line endings."""
+    decoder = codecs.getincrementaldecoder("utf-8-sig")(errors="replace")
+    pending: list[str] = []
+    skip_lf = False
+    async for chunk in response.aiter_bytes():
+        text = decoder.decode(chunk)
+        start = 0
+        for match in re.finditer(r"[\r\n]", text):
+            end = match.start()
+            char = text[end]
+            if skip_lf and end == start and char == "\n":
+                skip_lf = False
+                start = end + 1
+                continue
+            pending.append(text[start:end])
+            yield "".join(pending)
+            pending.clear()
+            skip_lf = char == "\r"
+            start = end + 1
+        if start < len(text):
+            skip_lf = False
+            pending.append(text[start:])
+
+
 async def sse_data(response: httpx.Response) -> AsyncIterator[str]:
     """Read SSE records across byte, UTF-8, line and event boundaries."""
     data: list[str] = []
-    async for line in response.aiter_lines():
+    async for line in _sse_lines(response):
         if not line:
             if data:
                 yield "\n".join(data)
@@ -25,8 +52,6 @@ async def sse_data(response: httpx.Response) -> AsyncIterator[str]:
             data.append(value[1:] if value.startswith(" ") else value)
         elif line == "data":
             data.append("")
-    if data:
-        yield "\n".join(data)
 
 
 @dataclass

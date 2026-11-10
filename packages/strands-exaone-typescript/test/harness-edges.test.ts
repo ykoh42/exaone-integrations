@@ -24,6 +24,56 @@ const streamed = (data: string, splitBytes = false) => {
 
 /** Synthetic wire data through a real SDK agent and harness. */
 describe('Strands harness transport and persistence', () => {
+  it.each(['pending', 'reject', 'throw'] as const)('finishes after DONE when transport cancellation is %s', async (mode) => {
+    const cancelled = vi.fn(() => {
+      if (mode === 'throw') throw new Error('synthetic cleanup failure')
+      if (mode === 'reject') return Promise.reject(new Error('synthetic cleanup failure'))
+      return new Promise<void>(() => {})
+    })
+    let body: ReadableStream<Uint8Array> | undefined
+    let signal: AbortSignal | null | undefined
+    const fetcher: typeof fetch = async (_url, init) => {
+      signal = init?.signal
+      body = new ReadableStream<Uint8Array>({
+        start(controller) { controller.enqueue(new TextEncoder().encode(sse([chunk({ content: 'complete' }, 'stop')]))) },
+        cancel: cancelled,
+      })
+      return new Response(body)
+    }
+    const agent = await createHarness({ model: new ExaoneModel({ apiKey: 'test-key', fetch: fetcher }), builtinTools: [], builtinPlugins: [], session: false, memory: false, skills: false, caching: false, retryStrategy: null, printer: false })
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      const timeout = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('synthetic cancellation did not finish')), 1000) })
+      const result = await Promise.race([agent.invoke('Hello'), timeout])
+      expect(result.lastMessage.content).toContainEqual(expect.objectContaining({ text: 'complete' }))
+      expect(cancelled).toHaveBeenCalledOnce()
+      expect(body?.locked).toBe(false)
+      expect(signal?.aborted).toBe(true)
+    } finally { clearTimeout(timer) }
+  })
+
+  it('allows harness cancellation while transport cleanup is pending', async () => {
+    let body: ReadableStream<Uint8Array> | undefined
+    let agent: Awaited<ReturnType<typeof createHarness>>
+    const cancelled = vi.fn(() => { agent.cancel(); return new Promise<void>(() => {}) })
+    const fetcher: typeof fetch = async () => {
+      body = new ReadableStream<Uint8Array>({
+        start(controller) { controller.enqueue(new TextEncoder().encode(sse([chunk({ content: 'partial' }, 'stop')]))) },
+        cancel: cancelled,
+      })
+      return new Response(body)
+    }
+    agent = await createHarness({ model: new ExaoneModel({ apiKey: 'test-key', fetch: fetcher }), builtinTools: [], builtinPlugins: [], session: false, memory: false, skills: false, caching: false, retryStrategy: null, printer: false })
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      const timeout = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('synthetic cancellation did not finish')), 1000) })
+      const result = await Promise.race([agent.invoke('Hello'), timeout])
+      expect(result.stopReason).toBe('cancelled')
+      expect(cancelled).toHaveBeenCalledOnce()
+      expect(body?.locked).toBe(false)
+    } finally { clearTimeout(timer) }
+  })
+
   it('does not feed malformed token counts into harness metrics', async () => {
     let requests = 0
     const onMetadata = vi.fn()

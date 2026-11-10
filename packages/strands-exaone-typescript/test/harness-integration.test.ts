@@ -13,6 +13,50 @@ const response = (text: string) => new Response(text, { headers: { 'content-type
 
 /** A short synthetic conversation; no EXAONE requests are made. */
 describe('Strands harness integration', () => {
+  it('executes a tool when a byte-split BOM stream has complete event delimiters', async () => {
+    const callback = vi.fn(() => 'synthetic result')
+    const lookup = tool({ name: 'lookup', description: 'Synthetic lookup', inputSchema: z.object({}), callback })
+    let requests = 0
+    const fetcher: typeof fetch = async () => {
+      requests++
+      if (requests !== 1) return response(sse([chunk({ content: 'Done.' }), chunk({}, 'stop')]))
+      const data = new TextEncoder().encode('\uFEFF' + sse([
+        chunk({ reasoning_content: 'synthetic reasoning' }),
+        chunk({ tool_calls: [{ index: 0, id: 'call', type: 'function', function: { name: 'lookup', arguments: '{}' } }] }),
+        chunk({}, 'tool_calls'),
+      ]))
+      return new Response(new ReadableStream<Uint8Array>({ start(controller) {
+        for (const byte of data) controller.enqueue(Uint8Array.of(byte))
+        controller.close()
+      } }))
+    }
+    const model = new ExaoneModel({ apiKey: 'test-key', fetch: fetcher })
+    const agent = await createHarness({ model, tools: [lookup], builtinTools: [], builtinPlugins: [], session: false, memory: false, skills: false, caching: false, retryStrategy: null, printer: false })
+    const result = await agent.invoke('Use the tool')
+    expect(result.lastMessage.content).toContainEqual(expect.objectContaining({ text: 'Done.' }))
+    expect(callback).toHaveBeenCalledOnce()
+    expect(requests).toBe(2)
+  })
+
+  it.each(['', '\n', '\r', '\r\n'])('does not execute a tool when the DONE event is unterminated at EOF (%j)', async (suffix) => {
+    const callback = vi.fn(() => 'unexpected')
+    const lookup = tool({ name: 'lookup', description: 'Synthetic lookup', inputSchema: z.object({}), callback })
+    let requests = 0
+    const fetcher: typeof fetch = async () => {
+      requests++
+      if (requests === 1) return response(sse([
+        chunk({ tool_calls: [{ index: 0, id: 'call', type: 'function', function: { name: 'lookup', arguments: '{}' } }] }),
+        chunk({}, 'tool_calls'),
+      ], false) + `data: [DONE]${suffix}`)
+      return response(sse([chunk({ content: 'unexpected' }), chunk({}, 'stop')]))
+    }
+    const model = new ExaoneModel({ apiKey: 'test-key', fetch: fetcher })
+    const agent = await createHarness({ model, tools: [lookup], builtinTools: [], builtinPlugins: [], session: false, memory: false, skills: false, caching: false, retryStrategy: null, printer: false })
+    await expect(agent.invoke('Use the tool')).rejects.toThrow(/before \[DONE\]/)
+    expect(callback).not.toHaveBeenCalled()
+    expect(requests).toBe(1)
+  })
+
   it('preserves interleaved reasoning, fragmented text and tool history across a later user turn', async () => {
     const requests: Record<string, unknown>[] = []
     const replies = [
