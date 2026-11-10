@@ -2,6 +2,8 @@
 
 Model providers for using the EXAONE Chat Completions API with [Strands Agents](https://strandsagents.com/). This is a community-maintained project and is not affiliated with LG AI Research or the Strands Agents project.
 
+Use of the EXAONE API is subject to the [EXAONE API Platform terms](https://docs.exaone.ai/en/terms/terms-of-service), including non-commercial use and restrictions on third-party access through products or services.
+
 | Language | Package | Status |
 | --- | --- | --- |
 | Python | [`strands-exaone`](packages/strands-exaone-python/) | Implemented; not published |
