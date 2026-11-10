@@ -1,13 +1,23 @@
+/**
+ * EXAONE Chat Completions model provider implementation.
+ *
+ * @see https://docs.exaone.ai/en/docs/k-exaone-2.5
+ */
 import { Model, ModelError, ModelNetworkError, ModelThrottledError, ContextWindowOverflowError } from '@strands-agents/sdk'
 import type { Message, ModelStreamEvent, StreamOptions, StopReason } from '@strands-agents/sdk'
 import { z } from 'zod'
 import { formatMessages } from './messages.js'
 import { redactMetadata, ResponseMetadataCollector } from './metadata.js'
 import { sendWithRetry, validateRetryConfig } from './retry.js'
-import { readSSE } from './sse.js'
+import { readSSE, ResponseReadError } from './sse.js'
 import type { ExaoneMetadata, ExaoneModelConfig } from './types.js'
 
-type WireCall = { index?: number; id?: string; function?: { name?: string; arguments?: string } }
+type WireCall = {
+  index?: number
+  id?: string | null
+  type?: string | null
+  function?: { name?: string | null; arguments?: string | null } | null
+}
 type WireMessage = { content?: string | null; reasoning_content?: string | null; tool_calls?: WireCall[] | null }
 type WireChoice = { index?: number; delta?: WireMessage; message?: WireMessage; finish_reason?: string | null }
 type WireResponse = { choices?: WireChoice[]; usage?: Record<string, unknown> | null; error?: unknown } & Record<string, unknown>
@@ -30,12 +40,31 @@ export class ExaoneAPIError extends ModelError {
   }
 }
 
-const rateHeaderNames = ['retry-after', 'retry-after-ms', 'x-second-rate-limit', 'x-second-rate-limit-remaining', 'x-minute-rate-limit', 'x-minute-rate-limit-remaining', 'x-day-rate-limit', 'x-day-rate-limit-remaining']
+/** An error returned in a successful HTTP response body or event stream. */
+export class ExaoneResponseError extends ModelError {
+  readonly body: unknown
+  readonly code: unknown
+
+  constructor(body: unknown) {
+    super('EXAONE returned an error in the response body')
+    this.name = 'ExaoneResponseError'
+    this.body = body
+    const nested = body && typeof body === 'object' && 'error' in body ? body.error : undefined
+    this.code = nested && typeof nested === 'object' && 'code' in nested ? nested.code : undefined
+  }
+}
+
+const RATE_LIMIT_HEADERS = [
+  'retry-after', 'retry-after-ms',
+  'x-second-rate-limit', 'x-second-rate-limit-remaining',
+  'x-minute-rate-limit', 'x-minute-rate-limit-remaining',
+  'x-day-rate-limit', 'x-day-rate-limit-remaining',
+]
 const MANAGED_PARAMS: ReadonlySet<string> = new Set(['model', 'messages', 'stream', 'stream_options', 'tools', 'tool_choice'])
 
 function rateHeaders(headers: Headers): Record<string, string> {
   const result: Record<string, string> = {}
-  for (const name of rateHeaderNames) {
+  for (const name of RATE_LIMIT_HEADERS) {
     const value = headers.get(name)
     if (value !== null) result[name] = value
   }
@@ -82,14 +111,19 @@ function configuredParams(config: ExaoneModelConfig): Record<string, unknown> {
   checkManagedParams(params)
   if (params.n !== undefined && params.n !== 1) throw new TypeError('Strands supports one choice; n must be 1')
   const template = params.chat_template_kwargs
-  if (template !== undefined && (typeof template !== 'object' || template === null || Array.isArray(template))) throw new TypeError('chat_template_kwargs must be an object')
+  if (template !== undefined && (typeof template !== 'object' || template === null || Array.isArray(template))) {
+    throw new TypeError('chat_template_kwargs must be an object')
+  }
   const templateOptions = { ...(template as Record<string, unknown> | undefined) }
   if (config.preserveThinking !== undefined) templateOptions.preserve_thinking = config.preserveThinking
+  else if (templateOptions.preserve_thinking === undefined) templateOptions.preserve_thinking = true
   if (config.enableThinking !== undefined) templateOptions.enable_thinking = config.enableThinking
-  if (Object.keys(templateOptions).length) params.chat_template_kwargs = templateOptions
+  params.chat_template_kwargs = templateOptions
   if (config.maxTokens !== undefined) params.max_tokens = config.maxTokens
   if (config.temperature !== undefined) params.temperature = config.temperature
+  else if (params.temperature === undefined) params.temperature = 1.0
   if (config.topP !== undefined) params.top_p = config.topP
+  else if (params.top_p === undefined) params.top_p = 0.95
   if (config.topK !== undefined) params.top_k = config.topK
   if (config.presencePenalty !== undefined) params.presence_penalty = config.presencePenalty
   if (config.reasoningEffort !== undefined) params.reasoning_effort = config.reasoningEffort
@@ -99,14 +133,29 @@ function configuredParams(config: ExaoneModelConfig): Record<string, unknown> {
 function requestParameters(config: ExaoneModelConfig, messages: Message[], options?: StreamOptions): Record<string, unknown> {
   const params = configuredParams(config)
   const stream = config.stream ?? true
-  const result: Record<string, unknown> = { ...params, model: config.modelId ?? 'k-exaone_v2.5', messages: formatMessages(messages, options), stream }
-  if (stream && config.includeUsage !== undefined) result.stream_options = { include_usage: config.includeUsage }
+  const result: Record<string, unknown> = {
+    ...params,
+    model: config.modelId ?? 'k-exaone_v2.5',
+    messages: formatMessages(messages, options),
+    stream,
+  }
+  if (stream) result.stream_options = { include_usage: config.includeUsage ?? true }
   if (options?.toolSpecs?.length) {
-    result.tools = options.toolSpecs.map((tool) => ({ type: 'function', function: { name: tool.name, description: tool.description, parameters: tool.inputSchema ?? { type: 'object', properties: {} } } }))
+    result.tools = options.toolSpecs.map((tool) => ({
+      type: 'function',
+      function: {
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.inputSchema ?? { type: 'object', properties: {} },
+      },
+    }))
     if (options.toolChoice) result.tool_choice = makeToolChoice(options.toolChoice)
   }
   if (options?.structuredOutputSchema && !options.toolChoice && result.response_format === undefined) {
-    result.response_format = { type: 'json_schema', json_schema: { name: 'structured_output', strict: true, schema: z.toJSONSchema(options.structuredOutputSchema) } }
+    result.response_format = {
+      type: 'json_schema',
+      json_schema: { name: 'structured_output', strict: true, schema: z.toJSONSchema(options.structuredOutputSchema) },
+    }
   }
   return result
 }
@@ -124,6 +173,42 @@ function finishReason(reason: string, key: string): StopReason {
   }
 }
 
+function toolFragment(value: unknown, field: string): string {
+  if (value === null || value === undefined) return ''
+  if (typeof value !== 'string') throw new ModelError(`EXAONE returned an invalid tool ${field}; expected a string`)
+  return value
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+function validateWireMessage(message: unknown): void {
+  if (message == null) return
+  if (!isRecord(message)) throw new ModelError('EXAONE returned an invalid message')
+  const calls = message.tool_calls
+  if (calls == null) return
+  if (!Array.isArray(calls)) throw new ModelError('EXAONE returned invalid tool calls')
+  for (const call of calls) {
+    if (!isRecord(call) || (call.function != null && !isRecord(call.function))) {
+      throw new ModelError('EXAONE returned an invalid tool call')
+    }
+  }
+}
+
+/** Validate containers before accessing their fields; contents are validated by the mapper. */
+function wireResponse(value: unknown): WireResponse {
+  if (!isRecord(value)) throw new ModelError('EXAONE returned an invalid response object')
+  if (value.error != null || value.choices == null) return value as WireResponse
+  if (!Array.isArray(value.choices)) throw new ModelError('EXAONE returned invalid choices')
+  for (const choice of value.choices) {
+    if (!isRecord(choice)) throw new ModelError('EXAONE returned an invalid choice')
+    validateWireMessage(choice.delta)
+    validateWireMessage(choice.message)
+  }
+  return value as WireResponse
+}
+
 /** Convert OpenAI-compatible deltas to non-overlapping Strands content blocks. */
 class EventMapper {
   private active: TextKind | undefined
@@ -132,31 +217,41 @@ class EventMapper {
   usage: Record<string, unknown> | undefined
   readonly responseMetadata = new ResponseMetadataCollector()
 
-  private textEvents(kind: TextKind, value: string): ModelStreamEvent[] {
-    if (!value) return []
+  constructor(private readonly key: string) {}
+
+  private textEvents(kind: TextKind, value: unknown): ModelStreamEvent[] {
+    if (value === null || value === undefined || value === '') return []
+    if (typeof value !== 'string') throw new ModelError(`EXAONE returned invalid ${kind} content; expected a string`)
     const result: ModelStreamEvent[] = []
     if (kind !== this.active) {
       if (this.active) result.push({ type: 'modelContentBlockStopEvent' })
       result.push({ type: 'modelContentBlockStartEvent' })
       this.active = kind
     }
-    result.push({ type: 'modelContentBlockDeltaEvent', delta: kind === 'reasoning' ? { type: 'reasoningContentDelta', text: value } : { type: 'textDelta', text: value } })
+    result.push({
+      type: 'modelContentBlockDeltaEvent',
+      delta: kind === 'reasoning' ? { type: 'reasoningContentDelta', text: value } : { type: 'textDelta', text: value },
+    })
     return result
   }
 
-  private updateCalls(calls: WireCall[]): void {
+  private updateCalls(calls: WireCall[], streaming: boolean): void {
     for (const [position, call] of calls.entries()) {
-      const index = call.index ?? position
+      if (call.type != null && call.type !== 'function') throw new ModelError('EXAONE returned an unsupported tool call type')
+      const index = call.index === undefined && !streaming ? position : call.index
+      if (typeof index !== 'number' || !Number.isSafeInteger(index) || index < 0) {
+        throw new ModelError('EXAONE returned a tool call without a valid index')
+      }
       const current = this.calls.get(index) ?? { id: '', name: '', arguments: '' }
-      if (call.id && call.id !== current.id) current.id += call.id
-      if (call.function?.name && call.function.name !== current.name) current.name += call.function.name
-      current.arguments += call.function?.arguments ?? ''
+      current.id += toolFragment(call.id, 'ID')
+      current.name += toolFragment(call.function?.name, 'name')
+      current.arguments += toolFragment(call.function?.arguments, 'arguments')
       this.calls.set(index, current)
     }
   }
 
-  accept(event: WireResponse): ModelStreamEvent[] {
-    if (event.error) throw new ModelError('EXAONE returned an error in the response stream')
+  accept(event: WireResponse, streaming: boolean): ModelStreamEvent[] {
+    if (event.error != null) throw new ExaoneResponseError(redactMetadata(event, this.key))
     this.responseMetadata.accept(event)
     if (event.usage) this.usage = event.usage
     if ((event.choices?.length ?? 0) > 1) throw new ModelError('EXAONE returned multiple choices, which Strands cannot represent')
@@ -164,10 +259,13 @@ class EventMapper {
     for (const choice of event.choices ?? []) {
       if ((choice.index ?? 0) !== 0) throw new ModelError('EXAONE returned multiple choices, which Strands cannot represent')
       const delta = choice.delta ?? choice.message ?? {}
-      result.push(...this.textEvents('reasoning', delta.reasoning_content ?? ''))
-      result.push(...this.textEvents('text', delta.content ?? ''))
-      if (delta.tool_calls) this.updateCalls(delta.tool_calls)
-      if (choice.finish_reason) this.finished = choice.finish_reason
+      result.push(...this.textEvents('reasoning', delta.reasoning_content))
+      result.push(...this.textEvents('text', delta.content))
+      if (delta.tool_calls) this.updateCalls(delta.tool_calls, streaming)
+      if (choice.finish_reason) {
+        if (this.finished && this.finished !== choice.finish_reason) throw new ModelError('EXAONE returned conflicting finish reasons')
+        this.finished = choice.finish_reason
+      }
     }
     return result
   }
@@ -195,6 +293,10 @@ class EventMapper {
   }
 }
 
+function validTokenCount(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+}
+
 function metadataEvent(mapper: EventMapper, response: Response, key: string): { event: ModelStreamEvent; metadata: ExaoneMetadata } {
   const usage = mapper.usage
   const metadata: ExaoneMetadata = { rateLimit: rateHeaders(response.headers) }
@@ -207,29 +309,31 @@ function metadataEvent(mapper: EventMapper, response: Response, key: string): { 
   const completion = usage?.completion_tokens
   const total = usage?.total_tokens
   const event: ModelStreamEvent = { type: 'modelMetadataEvent', trace: { exaone: safeMetadata } }
-  if (typeof prompt === 'number' && typeof completion === 'number' && typeof total === 'number') {
+  if (validTokenCount(prompt) && validTokenCount(completion) && validTokenCount(total)) {
     event.usage = { inputTokens: prompt, outputTokens: completion, totalTokens: total }
   }
   return { event, metadata: safeMetadata }
 }
 
-async function* responseEvents(response: Response, streaming: boolean, mapper: EventMapper): AsyncGenerator<ModelStreamEvent> {
-  if (!streaming) {
-    let data: WireResponse
-    try { data = await response.json() as WireResponse } catch (error) {
-      if (error instanceof SyntaxError) throw new ModelError('EXAONE returned malformed response JSON')
-      throw error
-    }
-    yield* mapper.accept(data)
-    return
+async function readResponseJSON(response: Response): Promise<WireResponse> {
+  let data: unknown
+  try { data = await response.json() as unknown } catch (error) {
+    if (error instanceof SyntaxError) throw new ModelError('EXAONE returned malformed response JSON')
+    if (error instanceof TypeError) throw new ResponseReadError(error)
+    throw error
   }
+  return wireResponse(data)
+}
+
+async function* responseEvents(response: Response, streaming: boolean, mapper: EventMapper): AsyncGenerator<ModelStreamEvent> {
+  if (!streaming) { yield* mapper.accept(await readResponseJSON(response), false); return }
   if (!response.body) throw new ModelError('EXAONE returned an empty stream')
   let done = false
   for await (const payload of readSSE(response.body)) {
     if (payload === '[DONE]') { done = true; break }
-    let data: WireResponse
-    try { data = JSON.parse(payload) as WireResponse } catch { throw new ModelError('EXAONE returned malformed stream JSON') }
-    yield* mapper.accept(data)
+    let data: unknown
+    try { data = JSON.parse(payload) as unknown } catch { throw new ModelError('EXAONE returned malformed stream JSON') }
+    yield* mapper.accept(wireResponse(data), true)
   }
   if (!done) throw new ModelError('EXAONE stream ended before [DONE]')
 }
@@ -254,7 +358,19 @@ async function fetchResponse(config: ExaoneModelConfig, request: Record<string, 
   }
 }
 
-/** Strands model provider for EXAONE API Platform. */
+/**
+ * EXAONE model provider for Strands Agents.
+ *
+ * The API key defaults to the `EXAONE_API_KEY` environment variable. Previous
+ * reasoning is sent back with assistant messages; set `preserveThinking` to ask
+ * EXAONE to keep it in the model input across user turns.
+ *
+ * @example
+ * ```typescript
+ * const model = new ExaoneModel({ preserveThinking: true })
+ * const agent = new Agent({ model })
+ * ```
+ */
 export class ExaoneModel extends Model<ExaoneModelConfig> {
   private _config: ExaoneModelConfig
   constructor(config: ExaoneModelConfig = {}) {
@@ -262,15 +378,24 @@ export class ExaoneModel extends Model<ExaoneModelConfig> {
     validateRetryConfig(config)
     this._config = { modelId: 'k-exaone_v2.5', contextWindowLimit: 524288, ...config }
   }
+  /** Update the model configuration. Invalid retry settings leave the current configuration unchanged. */
   override updateConfig(config: Partial<ExaoneModelConfig>): void {
     const updated = { ...this._config, ...config }
     validateRetryConfig(updated)
     this._config = updated
   }
+  /** Get the model configuration without the API key. */
   override getConfig(): ExaoneModelConfig {
     const { apiKey: _key, ...safe } = this._config
     return { ...safe }
   }
+  /**
+   * Stream an EXAONE response as Strands model events.
+   *
+   * @param messages - Conversation history to send to the model.
+   * @param options - System prompt, tools, structured output, and cancellation options.
+   * @yields Strands model events translated from the response.
+   */
   override async *stream(messages: Message[], options?: StreamOptions): AsyncGenerator<ModelStreamEvent> {
     const config = { ...this._config }
     const key = getKey(config)
@@ -283,13 +408,21 @@ export class ExaoneModel extends Model<ExaoneModelConfig> {
     const response = await sendWithRetry(config, signal, () => fetchResponse(config, request, key, signal))
     try {
       if (!response.ok) await throwHttpError(response, key)
-      const mapper = new EventMapper()
+      const mapper = new EventMapper(key)
       yield { type: 'modelMessageStartEvent', role: 'assistant' }
+      let deliveredContent = false
       try {
-        yield* responseEvents(response, request.stream !== false, mapper)
+        for await (const event of responseEvents(response, request.stream !== false, mapper)) {
+          if (event.type === 'modelContentBlockDeltaEvent') deliveredContent = true
+          yield event
+        }
       } catch (error) {
         if (signal.aborted) throw signal.reason
-        if (error instanceof TypeError) throw new ModelNetworkError('EXAONE response stream failed', { cause: safeTransportCause(error, key) })
+        if (error instanceof ResponseReadError) {
+          const cause = safeTransportCause(error.cause, key)
+          if (deliveredContent) throw new ModelError('EXAONE response stream failed after content was delivered', { cause })
+          throw new ModelNetworkError('EXAONE response stream failed', { cause })
+        }
         throw error
       }
       for (const event of mapper.finish(key)) yield event

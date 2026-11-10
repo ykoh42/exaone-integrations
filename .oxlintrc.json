@@ -5,7 +5,7 @@
   "ignorePatterns": ["**/dist/**", "**/node_modules/**"],
   "overrides": [
     {
-      "files": ["typescript/*/src/**/*.{js,jsx,mjs,cjs,ts,tsx,mts,cts}"],
+      "files": ["packages/*/src/**/*.{js,jsx,mjs,cjs,ts,tsx,mts,cts}"],
       "rules": {
         "sonarjs/cognitive-complexity": ["warn", 15]
       }

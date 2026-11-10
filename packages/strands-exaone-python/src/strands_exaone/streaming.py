@@ -36,6 +36,29 @@ class _Tool:
     arguments: str = ""
 
 
+def _validate_tool_arguments(raw: str) -> None:
+    """Require JSON object arguments without retaining invalid data in an error."""
+    try:
+        arguments = json.loads(raw)
+    except (TypeError, ValueError):
+        # Raise outside the handler so tool arguments are not retained as exception context.
+        pass
+    else:
+        if isinstance(arguments, dict):
+            return
+        raise ExaoneError("Tool arguments must be a JSON object")
+    raise ExaoneError("Invalid tool arguments in EXAONE response")
+
+
+def _tool_text(value: Any) -> str:
+    """Accept optional string fragments and reject invalid JSON types."""
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise ExaoneError("Invalid EXAONE tool-call delta: expected a string")
+    return value
+
+
 @dataclass
 class StreamDecoder:
     """Accumulate interleaved tool calls while emitting text and reasoning deltas."""
@@ -67,22 +90,23 @@ class StreamDecoder:
             yield from self._switch("text")
             yield {"contentBlockDelta": {"delta": {"text": text}}}
 
-    def _store_tool(self, fragment: dict[str, Any]) -> None:
+    def _store_tool(self, fragment: Any) -> None:
+        if not isinstance(fragment, dict):
+            raise ExaoneError("Invalid EXAONE tool-call delta: expected an object")
         index = fragment.get("index")
-        if not isinstance(index, int) or index < 0:
+        if type(index) is not int or index < 0:
             raise ExaoneError("Tool delta is missing a valid index")
         if fragment.get("type") not in (None, "function"):
             raise ExaoneError("Unsupported tool call type")
         item = self.tools.setdefault(index, _Tool())
-        ident = fragment.get("id")
-        function = fragment.get("function") or {}
-        if ident and ident != item.ident:
-            item.ident += ident
-        name = function.get("name")
-        if name and name != item.name:
-            item.name += name
-        if function.get("arguments"):
-            item.arguments += function["arguments"]
+        function = fragment.get("function")
+        if function is None:
+            function = {}
+        if not isinstance(function, dict):
+            raise ExaoneError("Invalid EXAONE tool-call delta: expected a function object")
+        item.ident += _tool_text(fragment.get("id"))
+        item.name += _tool_text(function.get("name"))
+        item.arguments += _tool_text(function.get("arguments"))
 
     def feed(self, payload: dict[str, Any]) -> Iterator[dict[str, Any]]:
         """Consume one stream chunk (or an equivalent synthetic non-stream chunk)."""
@@ -90,17 +114,31 @@ class StreamDecoder:
             if not isinstance(payload["usage"], dict):
                 raise ExaoneError("Invalid usage payload")
             self.usage = payload["usage"]
-        choices = payload.get("choices") or []
-        if len(choices) > 1 or any(c.get("index", 0) != 0 for c in choices):
+        choices = payload.get("choices")
+        if choices is None:
+            choices = []
+        if not isinstance(choices, list) or any(not isinstance(choice, dict) for choice in choices):
+            raise ExaoneError("Invalid EXAONE response choices")
+        if any(type(choice.get("index", 0)) is not int for choice in choices):
+            raise ExaoneError("Invalid EXAONE response choice index")
+        if len(choices) > 1 or any(choice.get("index", 0) != 0 for choice in choices):
             raise ExaoneError("Multiple choices are not supported by the Strands Model interface")
         if choices:
             yield from self._feed_choice(choices[0])
 
     def _feed_choice(self, choice: dict[str, Any]) -> Iterator[dict[str, Any]]:
-        delta = choice.get("delta") or {}
+        delta = choice.get("delta")
+        if delta is None:
+            delta = {}
+        if not isinstance(delta, dict):
+            raise ExaoneError("Invalid EXAONE choice delta")
         yield from self._text_events(delta)
-        for fragment in delta.get("tool_calls") or []:
-            self._store_tool(fragment)
+        calls = delta.get("tool_calls")
+        if calls is not None:
+            if not isinstance(calls, list):
+                raise ExaoneError("Invalid EXAONE tool-call delta: expected an array")
+            for fragment in calls:
+                self._store_tool(fragment)
         finish = choice.get("finish_reason")
         if finish:
             if self.finish_reason is not None:
@@ -116,12 +154,7 @@ class StreamDecoder:
             if item.ident in ids:
                 raise ExaoneError("Duplicate tool call IDs in EXAONE response")
             ids.add(item.ident)
-            try:
-                arguments = json.loads(item.arguments)
-            except (TypeError, ValueError) as exc:
-                raise ExaoneError("Invalid tool arguments in EXAONE response") from exc
-            if not isinstance(arguments, dict):
-                raise ExaoneError("Tool arguments must be a JSON object")
+            _validate_tool_arguments(item.arguments)
         for index in sorted(self.tools):
             item = self.tools[index]
             yield {"contentBlockStart": {"start": {"toolUse": {"name": item.name, "toolUseId": item.ident}}}}
@@ -152,13 +185,26 @@ class StreamDecoder:
 
 def nonstream_chunk(data: dict[str, Any]) -> dict[str, Any]:
     """Convert a complete Chat Completions response into a decoder input."""
-    choices = data.get("choices") or []
-    if len(choices) != 1:
+    choices = data.get("choices")
+    if not isinstance(choices, list) or len(choices) != 1:
         raise ExaoneError("Expected exactly one completion choice")
     choice = choices[0]
-    message = choice.get("message") or {}
+    if not isinstance(choice, dict):
+        raise ExaoneError("Invalid EXAONE response choice")
+    message = choice.get("message")
+    if message is None:
+        message = {}
+    if not isinstance(message, dict):
+        raise ExaoneError("Invalid EXAONE response message")
+    tool_calls = message.get("tool_calls")
+    if tool_calls is None:
+        tool_calls = []
+    if not isinstance(tool_calls, list):
+        raise ExaoneError("Invalid EXAONE tool-call delta: expected an array")
     calls = []
-    for index, call in enumerate(message.get("tool_calls") or []):
+    for index, call in enumerate(tool_calls):
+        if not isinstance(call, dict):
+            raise ExaoneError("Invalid EXAONE tool-call delta: expected an object")
         calls.append({**call, "index": index})
     return {
         "choices": [

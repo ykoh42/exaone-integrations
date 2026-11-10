@@ -389,3 +389,227 @@ def test_invalid_retry_configuration(kwargs: dict[str, Any]) -> None:
 def test_missing_key_error_names_configuration_options() -> None:
     with pytest.raises(ValueError, match=r"EXAONE_API_KEY.*api_key"):
         ExaoneModel(api_key="")
+
+
+@pytest.mark.parametrize("failure", ["connect", "read"])
+async def test_transport_errors_do_not_expose_credentials(failure: str) -> None:
+    import traceback
+
+    secret = "synthetic-secret-key"
+    count = 0
+
+    class Interrupted(httpx.AsyncByteStream):
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            yield b'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'
+            try:
+                raise ValueError(f"nested {secret}")
+            except ValueError as cause:
+                raise httpx.ReadError(f"interrupted {secret}") from cause
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal count
+        count += 1
+        if failure == "connect":
+            try:
+                raise ValueError(f"nested {secret}")
+            except ValueError as cause:
+                raise httpx.ConnectError(f"connection {secret}", request=request) from cause
+        return httpx.Response(200, stream=Interrupted())
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        model = ExaoneModel(api_key=secret, http_client=client, max_retries=1, base_retry_delay=0)
+        error_type = httpx.ConnectError if failure == "connect" else httpx.ReadError
+        with pytest.raises(error_type) as caught:
+            await events(model)
+    assert count == (2 if failure == "connect" else 1)
+    error = caught.value
+    assert secret not in str(error)
+    assert secret not in "".join(traceback.format_exception(error))
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    with pytest.raises(RuntimeError, match="request property has not been set"):
+        _ = error.request
+
+
+async def test_structured_output_transport_error_does_not_retain_original() -> None:
+    import traceback
+
+    from pydantic import BaseModel
+
+    class Output(BaseModel):
+        value: int
+
+    secret = "synthetic-secret-key"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        try:
+            raise ValueError(f"nested {secret}")
+        except ValueError as cause:
+            raise httpx.ConnectError(f"connection {secret}", request=request) from cause
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        model = ExaoneModel(api_key=secret, http_client=client)
+        with pytest.raises(httpx.ConnectError) as caught:
+            _ = [event async for event in model.structured_output(Output, MESSAGE)]
+    assert secret not in "".join(traceback.format_exception(caught.value))
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    with pytest.raises(RuntimeError, match="request property has not been set"):
+        _ = caught.value.request
+
+
+async def test_closing_model_stream_closes_http_response() -> None:
+    class OpenStream(httpx.AsyncByteStream):
+        closed = False
+
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            yield b'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    stream = OpenStream()
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, stream=stream))
+    ) as client:
+        model = ExaoneModel(api_key="test-only-key", http_client=client)
+        generator = model.stream(MESSAGE)
+        await anext(generator)
+        await generator.aclose()
+        assert stream.closed
+
+
+@pytest.mark.parametrize("failure", ["connect", "read"])
+async def test_custom_transport_error_uses_safe_standard_base_type(failure: str) -> None:
+    import traceback
+
+    secret = "synthetic-secret-key"
+    count = 0
+
+    class CustomConnectError(httpx.ConnectError):
+        def __init__(self, message: str, required: str, *, request: httpx.Request) -> None:
+            super().__init__(message, request=request)
+            self.required = required
+
+        def __str__(self) -> str:
+            raise RuntimeError(f"custom formatter {secret}")
+
+    class CustomReadError(httpx.ReadError):
+        def __init__(self, message: str, required: str) -> None:
+            super().__init__(message)
+            self.required = required
+
+    class Interrupted(httpx.AsyncByteStream):
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            yield b'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'
+            try:
+                raise ValueError(f"nested {secret}")
+            except ValueError as cause:
+                raise CustomReadError(f"interrupted {secret}", secret) from cause
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal count
+        count += 1
+        if failure == "connect":
+            try:
+                raise ValueError(f"nested {secret}")
+            except ValueError as cause:
+                raise CustomConnectError(f"connection {secret}", secret, request=request) from cause
+        return httpx.Response(200, stream=Interrupted())
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        model = ExaoneModel(api_key=secret, http_client=client, max_retries=1, base_retry_delay=0)
+        with pytest.raises(httpx.RequestError) as caught:
+            await events(model)
+    error = caught.value
+    assert type(error) is (httpx.ConnectError if failure == "connect" else httpx.ReadError)
+    assert count == (2 if failure == "connect" else 1)
+    assert secret not in str(error)
+    assert secret not in "".join(traceback.format_exception(error))
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    with pytest.raises(RuntimeError, match="request property has not been set"):
+        _ = error.request
+
+
+@pytest.mark.parametrize(
+    ("kind", "expected_type"),
+    [
+        ("invalid_url", httpx.InvalidURL),
+        ("cookie", httpx.CookieConflict),
+        ("stream", httpx.StreamError),
+        ("consumed", httpx.StreamConsumed),
+        ("status", httpx.HTTPError),
+    ],
+)
+async def test_other_httpx_errors_are_redacted_without_original_chain(
+    kind: str, expected_type: type[Exception]
+) -> None:
+    import traceback
+
+    secret = "synthetic-secret-key"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if kind == "invalid_url":
+            error: Exception = httpx.InvalidURL(f"bad url {secret}")
+        elif kind == "cookie":
+            error = httpx.CookieConflict(f"bad cookie {secret}")
+        elif kind == "stream":
+            error = httpx.StreamError(f"bad stream {secret}")
+        elif kind == "consumed":
+            error = httpx.StreamConsumed()
+            error.args = (f"bad stream {secret}",)
+        else:
+            error = httpx.HTTPStatusError(f"bad status {secret}", request=request, response=httpx.Response(400))
+        try:
+            raise ValueError(f"nested {secret}")
+        except ValueError as cause:
+            raise error from cause
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        model = ExaoneModel(api_key=secret, http_client=client)
+        with pytest.raises(expected_type) as caught:
+            await events(model)
+    assert type(caught.value) is expected_type
+    assert secret not in "".join(traceback.format_exception(caught.value))
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+
+
+async def test_http_status_response_hook_retains_only_safe_status() -> None:
+    import traceback
+
+    secret = "synthetic-secret-key"
+    request_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal request_count
+        request_count += 1
+        return httpx.Response(422, text=f"private response {secret}")
+
+    async def raise_for_status(response: httpx.Response) -> None:
+        try:
+            raise ValueError(f"nested {secret}")
+        except ValueError as cause:
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError as error:
+                raise error from cause
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), event_hooks={"response": [raise_for_status]}
+    ) as client:
+        model = ExaoneModel(api_key=secret, base_url=f"https://{secret}.example/v1", http_client=client)
+        with pytest.raises(httpx.HTTPError) as caught:
+            await events(model)
+    error = caught.value
+    assert type(error) is httpx.HTTPError
+    assert getattr(error, "status_code", None) == 422
+    assert request_count == 1
+    assert secret not in "".join(traceback.format_exception(error))
+    assert secret not in repr(vars(error))
+    with pytest.raises(RuntimeError, match="request property has not been set"):
+        _ = error.request
+    assert not hasattr(error, "response")
+    assert error.__cause__ is None
+    assert error.__context__ is None

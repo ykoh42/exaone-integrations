@@ -1,0 +1,17 @@
+{
+  "name": "strands-exaone-cli-example",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@strands-agents/cli": "~0.2.4",
+    "@strands-agents/harness": "~0.1.1",
+    "@strands-agents/sdk": "1.24.0",
+    "strands-exaone": "file:../..",
+    "zod": "^4.5.4"
+  },
+  "overrides": {
+    "@strands-agents/cli": {
+      "smol-toml": "1.9.0"
+    }
+  }
+}

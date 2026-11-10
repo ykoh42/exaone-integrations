@@ -8,7 +8,10 @@ export interface ExaoneModelConfig extends BaseModelConfig {
   baseURL?: string
   /** Total request timeout in milliseconds, including retry attempts, delays, and stream consumption. */
   timeoutMs?: number
-  /** Additional HTTP attempts before the response is exposed; defaults to 0. */
+  /**
+   * Additional attempts for retryable HTTP responses before events are exposed.
+   * Defaults to 0. Fetch failures are not retried because the request may have been sent.
+   */
   maxRetries?: number
   /** Initial exponential backoff window in milliseconds; defaults to 500. */
   baseRetryDelayMs?: number
@@ -24,17 +27,24 @@ export interface ExaoneModelConfig extends BaseModelConfig {
   presencePenalty?: number
   /** Controls the EXAONE reasoning effort. */
   reasoningEffort?: 'low' | 'medium' | 'high' | 'max'
-  /** Preserve earlier assistant reasoning when sending conversation history. */
+  /**
+   * Ask EXAONE to retain earlier assistant reasoning in model input. Reasoning
+   * present in conversation history is forwarded independently of this setting.
+   */
   preserveThinking?: boolean
-  /** Empirically observed option; the official documentation currently disagrees. */
+  /**
+   * Empirically observed option; the official documentation currently disagrees.
+   * Setting this to false does not guarantee that content contains no reasoning.
+   */
   enableThinking?: boolean
   /** Additional API request parameters. Provider-managed fields cannot be overridden. */
   params?: Record<string, unknown>
   /** Optional fetch implementation for testing or a custom transport. */
   fetch?: typeof globalThis.fetch
   /**
-   * Per-request metadata callback. The API key is redacted; response metadata may still
-   * contain sensitive content such as logprob tokens, refusal text or function arguments.
+   * Called once after a successful response completes. The API key is redacted; response
+   * metadata may still contain sensitive content such as logprob tokens, refusal text,
+   * or function arguments. Failed and interrupted streams do not invoke this callback.
    */
   onMetadata?: (metadata: ExaoneMetadata) => void
 }
@@ -55,6 +65,7 @@ export interface ExaoneMetadata {
   /**
    * Response-level and choice fields, including selected message metadata such as
    * refusal, annotations, audio, and function_call. Excludes content, reasoning and tool_calls.
+   * Collected metadata is not size-limited and can grow with the response.
    */
   response?: Record<string, unknown>
 }

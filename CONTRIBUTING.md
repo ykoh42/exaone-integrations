@@ -4,10 +4,10 @@ This repository contains independently installable Python and TypeScript Strands
 
 ## Development setup
 
-Use Python 3.10 or newer and the Node.js version in `.node-version`. Create and activate a Python virtual environment, then install the development dependencies:
+Use Python 3.10 or newer, the Node.js version in `.node-version`, and npm 11.20.0. The npm version supports this repository's install-script settings. Create and activate a Python virtual environment, then install the development dependencies:
 
 ```bash
-python -m pip install -e './python/strands-exaone[dev]'
+python -m pip install -e './packages/strands-exaone-python[dev]'
 npm ci
 ```
 
@@ -15,11 +15,11 @@ npm ci
 
 ```bash
 # Python
-ruff check python/strands-exaone
-ruff format --check python/strands-exaone
-complexipy python/strands-exaone/src --max-complexity-allowed 15
-python -m pytest python/strands-exaone/tests
-(cd python/strands-exaone && hatch build)
+ruff check packages/strands-exaone-python
+ruff format --check packages/strands-exaone-python
+complexipy packages/strands-exaone-python/src --max-complexity-allowed 15
+python -m pytest packages/strands-exaone-python/tests
+(cd packages/strands-exaone-python && hatch build)
 
 # TypeScript
 npm run check

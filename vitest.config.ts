@@ -6,14 +6,14 @@ export default defineConfig({
     unstubEnvs: true,
     clearMocks: false,
     include: [
-      'typescript/*/src/**/__tests__/**/*.test.ts',
-      'typescript/*/test/**/*.test.ts',
+      'packages/*/src/**/__tests__/**/*.test.ts',
+      'packages/*/test/**/*.test.ts',
     ],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'json', 'html'],
-      include: ['typescript/*/src/**/*.{ts,js}'],
-      exclude: ['typescript/*/src/**/__tests__/**'],
+      include: ['packages/*/src/**/*.{ts,js}'],
+      exclude: ['packages/*/src/**/__tests__/**'],
     },
   },
 })

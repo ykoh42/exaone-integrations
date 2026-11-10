@@ -14,13 +14,14 @@ import ssl
 import threading
 import time
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager, suppress
+from contextlib import aclosing, asynccontextmanager, suppress
 from copy import deepcopy
-from typing import Any, TypeVar, cast
+from functools import wraps
+from typing import Any, Concatenate, ParamSpec, TypeVar, cast
 
 import httpx
 import truststore
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 from strands.models.model import Model
 from strands.types.content import Messages, SystemContentBlock
 from strands.types.event_loop import Usage
@@ -36,6 +37,7 @@ from .streaming import StreamDecoder, nonstream_chunk, sse_data
 
 T = TypeVar("T", bound=BaseModel)
 R = TypeVar("R")
+P = ParamSpec("P")
 MetadataCallback = Callable[[dict[str, Any]], Any]
 _SUPPORTED_CONFIG = {
     "model_id",
@@ -58,7 +60,7 @@ _SUPPORTED_CONFIG = {
     "base_retry_delay",
     "max_retry_delay",
 }
-_MANAGED_PARAMS = {"model", "messages", "stream", "stream_options", "tools", "tool_choice", "response_format"}
+_MANAGED_PARAMS = {"model", "messages", "stream", "tools", "tool_choice", "response_format"}
 
 
 def _validate_config(config: dict[str, Any]) -> None:
@@ -88,6 +90,20 @@ def _validate_params(config: dict[str, Any]) -> None:
         raise ValueError("Strands supports exactly one completion choice")
     if "chat_template_kwargs" in params and not isinstance(params["chat_template_kwargs"], dict):
         raise ValueError("chat_template_kwargs must be a dictionary")
+    options = params.get("stream_options")
+    if options is not None and not isinstance(options, dict):
+        raise ValueError("stream_options must be a dictionary or None")
+
+
+def _apply_stream_options(body: dict[str, Any], *, stream: bool, include_usage: bool | None) -> None:
+    if not stream:
+        body.pop("stream_options", None)
+        return
+    options = dict(body.get("stream_options") or {})
+    if include_usage is not None:
+        options["include_usage"] = include_usage
+    options.setdefault("include_usage", True)
+    body["stream_options"] = options
 
 
 def _validate_numbers(config: dict[str, Any]) -> None:
@@ -147,6 +163,45 @@ async def _cancellable(awaitable: Awaitable[R], signal: threading.Event | None) 
                 await task
 
 
+def _copy_transport_error(error: Exception, secret: str) -> Exception:
+    """Copy into the nearest standard HTTPX type without retaining the original."""
+    message = error.args[0] if error.args and isinstance(error.args[0], str) else "HTTP transport error"
+    if isinstance(error, httpx.HTTPStatusError):
+        safe_error = httpx.HTTPError(redact(message, secret))
+        if isinstance(error.response, httpx.Response):
+            safe_error.status_code = error.response.status_code  # type: ignore[attr-defined]
+        return safe_error
+    for error_type in type(error).__mro__:
+        if getattr(httpx, error_type.__name__, None) is not error_type:
+            continue
+        if error_type in (httpx.RequestNotRead, httpx.ResponseNotRead, httpx.StreamClosed, httpx.StreamConsumed):
+            return error_type()
+        if issubclass(error_type, (httpx.HTTPError, httpx.InvalidURL, httpx.CookieConflict, httpx.StreamError)):
+            return error_type(redact(message, secret))
+    return httpx.HTTPError(redact(message, secret))
+
+
+def _safe_transport_errors(
+    method: Callable[Concatenate[ExaoneModel, P], AsyncGenerator[R, None]],
+) -> Callable[Concatenate[ExaoneModel, P], AsyncGenerator[R, None]]:
+    """Remove credentials and the original request from HTTPX request errors."""
+
+    @wraps(method)
+    async def wrapped(self: ExaoneModel, *args: P.args, **kwargs: P.kwargs) -> AsyncGenerator[R, None]:
+        safe_error: Exception | None = None
+        try:
+            async with aclosing(method(self, *args, **kwargs)) as events:
+                async for event in events:
+                    yield event
+        except (httpx.HTTPError, httpx.InvalidURL, httpx.CookieConflict, httpx.StreamError) as error:
+            safe_error = _copy_transport_error(error, self._api_key)
+        if safe_error is not None:
+            # Raise outside the handler so the original error is not retained as context.
+            raise safe_error
+
+    return wrapped
+
+
 def _safe_headers(headers: httpx.Headers, key: str) -> dict[str, str]:
     names = {"x-request-id", "retry-after", "retry-after-ms", "content-type"}
     return {
@@ -161,13 +216,43 @@ def _standard_usage(usage: dict[str, Any] | None) -> Usage | None:
     if not usage:
         return None
     names = {"prompt_tokens": "inputTokens", "completion_tokens": "outputTokens", "total_tokens": "totalTokens"}
-    if any(not isinstance(usage.get(name), int) for name in names):
+    if any(type(usage.get(name)) is not int or not 0 <= usage[name] <= 2**53 - 1 for name in names):
         return None
     return {
         "inputTokens": usage["prompt_tokens"],
         "outputTokens": usage["completion_tokens"],
         "totalTokens": usage["total_tokens"],
     }
+
+
+def _parse_response(payload: bytes | str, *, stream: bool = False) -> dict[str, Any]:
+    """Decode a response object without attaching the raw payload to an error."""
+    try:
+        data = json.loads(payload)
+    except ValueError:
+        # Raise outside the handler so the raw JSON is not retained as exception context.
+        pass
+    else:
+        if isinstance(data, dict):
+            return data
+        raise ExaoneError("Invalid EXAONE event stream payload" if stream else "Invalid EXAONE response payload")
+    raise ExaoneError("Malformed JSON in EXAONE event stream" if stream else "Malformed JSON in EXAONE response")
+
+
+def _check_response_error(data: dict[str, Any], response: httpx.Response, key: str) -> None:
+    """Preserve a non-null error envelope even when the HTTP status is successful."""
+    if data.get("error") is not None:
+        raise response_error(response.status_code, data, _safe_headers(response.headers, key), key)
+
+
+def _validate_output(output_model: type[T], content: str) -> T:
+    """Validate output without exposing its contents in validation errors."""
+    try:
+        return output_model.model_validate_json(content)
+    except ValidationError:
+        # Validation errors can contain generated text; do not retain them as context.
+        pass
+    raise ExaoneError("Structured output did not match the requested schema")
 
 
 class ExaoneModel(Model):
@@ -181,6 +266,10 @@ class ExaoneModel(Model):
     Provider-level retries are disabled by default; set ``max_retries`` to opt in.
     Retries occur only before response events are exposed. A supplied ``http_client``
     stays caller-owned and is not closed by this model.
+
+    Requests use EXAONE's recommended agent settings when no value is supplied:
+    ``temperature=1.0``, ``top_p=0.95``, and ``preserve_thinking=True``. Named
+    options take precedence over ``params``, followed by these defaults.
     """
 
     def __init__(
@@ -222,14 +311,17 @@ class ExaoneModel(Model):
             top_k: Top-k sampling threshold.
             presence_penalty: Penalty for tokens already present in the generated text.
             reasoning_effort: EXAONE reasoning effort.
-            preserve_thinking: Whether EXAONE should preserve previous reasoning.
+            preserve_thinking: Whether EXAONE should preserve previous reasoning in its input.
+                Reasoning present in the conversation is forwarded independently of this setting.
             enable_thinking: Whether to enable reasoning, when supported by the service.
-            include_usage: Whether to request usage in a streaming response.
+            include_usage: Whether to request usage in a streaming response. Defaults to true.
             response_format: Output format for ordinary model calls.
             timeout: HTTPX timeout in seconds for each request attempt.
             params: Additional EXAONE Chat Completions parameters.
             context_window_limit: Model context window in tokens.
             metadata_callback: Callback for response metadata on successful completion.
+                It is not called for failed or interrupted streams. Metadata may contain
+                generated tokens and other sensitive content even after API key redaction.
             http_client: Caller-owned async client; the provider does not close it.
             max_retries: Maximum number of retries before a response is exposed.
             base_retry_delay: Initial retry delay ceiling, in seconds.
@@ -240,7 +332,7 @@ class ExaoneModel(Model):
         """
         self._api_key = os.environ.get("EXAONE_API_KEY", "") if api_key is None else api_key
         if not self._api_key:
-            raise ValueError("Set the EXAONE_API_KEY environment variable or pass api_key.")
+            raise ValueError("EXAONE API key is required. Set the EXAONE_API_KEY environment variable or pass api_key.")
         self._callback = metadata_callback
         self._http_client = http_client
         self._config: dict[str, Any] = {
@@ -320,14 +412,15 @@ class ExaoneModel(Model):
         for name in ("max_tokens", "temperature", "top_p", "top_k", "presence_penalty", "reasoning_effort"):
             if config[name] is not None:
                 body[name] = config[name]
+        body.setdefault("temperature", 1.0)
+        body.setdefault("top_p", 0.95)
         thinking = dict(body.get("chat_template_kwargs") or {})
         for name in ("preserve_thinking", "enable_thinking"):
             if config[name] is not None:
                 thinking[name] = config[name]
-        if thinking:
-            body["chat_template_kwargs"] = thinking
-        if stream and config["include_usage"] is not None:
-            body["stream_options"] = {"include_usage": config["include_usage"]}
+        thinking.setdefault("preserve_thinking", True)
+        body["chat_template_kwargs"] = thinking
+        _apply_stream_options(body, stream=stream, include_usage=config["include_usage"])
         if tool_specs:
             body["tools"] = format_tools(tool_specs)
         if tool_choice is not None:
@@ -425,16 +518,8 @@ class ExaoneModel(Model):
                 return
             if not raw:
                 continue
-            try:
-                chunk = json.loads(raw)
-            except ValueError as exc:
-                raise ExaoneError("Malformed JSON in EXAONE event stream") from exc
-            if not isinstance(chunk, dict):
-                raise ExaoneError("Invalid EXAONE event stream payload")
-            if "error" in chunk:
-                raise response_error(
-                    response.status_code, chunk, _safe_headers(response.headers, self._api_key), self._api_key
-                )
+            chunk = _parse_response(raw, stream=True)
+            _check_response_error(chunk, response, self._api_key)
             metadata.add(chunk)
             for event in decoder.feed(chunk):
                 yield event
@@ -446,17 +531,14 @@ class ExaoneModel(Model):
         signal: threading.Event | None,
         metadata: ResponseMetadata,
     ) -> AsyncIterator[dict[str, Any]]:
-        try:
-            data = json.loads(await _cancellable(response.aread(), signal))
-        except ValueError as exc:
-            raise ExaoneError("Malformed JSON in EXAONE response") from exc
-        if not isinstance(data, dict):
-            raise ExaoneError("Invalid EXAONE response payload")
+        data = _parse_response(await _cancellable(response.aread(), signal))
+        _check_response_error(data, response, self._api_key)
         metadata.add(data)
         for event in decoder.feed(nonstream_chunk(data)):
             yield event
 
     @override
+    @_safe_transport_errors
     async def stream(
         self,
         messages: Messages,
@@ -514,6 +596,7 @@ class ExaoneModel(Model):
                 await response.aclose()
 
     @override
+    @_safe_transport_errors
     async def structured_output(
         self, output_model: type[T], prompt: Messages, system_prompt: str | None = None, **kwargs: Any
     ) -> AsyncGenerator[dict[str, Any], None]:
@@ -542,19 +625,25 @@ class ExaoneModel(Model):
         async with self._client() as client:
             response = await self._send(client, body, signal)
             try:
-                data = json.loads(await _cancellable(response.aread(), signal))
-                choices = data.get("choices") or []
-                if len(choices) != 1:
+                data = _parse_response(await _cancellable(response.aread(), signal))
+                _check_response_error(data, response, self._api_key)
+                choices = data.get("choices")
+                if not isinstance(choices, list) or len(choices) != 1:
                     raise ExaoneError("Expected exactly one structured output choice")
                 choice = choices[0]
+                if not isinstance(choice, dict):
+                    raise ExaoneError("Invalid structured output choice")
                 if choice.get("finish_reason") != "stop":
                     reason = choice.get("finish_reason")
                     reason = redact(reason, self._api_key) if isinstance(reason, str) else None
                     raise ExaoneError(f"Structured output did not finish normally: {reason!r}", finish_reason=reason)
-                content = (choice.get("message") or {}).get("content")
+                message = choice.get("message")
+                if not isinstance(message, dict):
+                    raise ExaoneError("Structured output did not include a message")
+                content = message.get("content")
                 if not isinstance(content, str):
                     raise ExaoneError("Structured output did not include JSON text")
-                result = output_model.model_validate_json(content)
+                result = _validate_output(output_model, content)
                 callback = kwargs.get("metadata_callback", self._callback)
                 metadata = ResponseMetadata(enabled=bool(callback))
                 metadata.add(data)

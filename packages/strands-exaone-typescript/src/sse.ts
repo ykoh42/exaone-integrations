@@ -1,3 +1,10 @@
+/** A transport failure while reading response bytes, distinct from parsing errors. */
+export class ResponseReadError extends Error {
+  constructor(cause: TypeError) {
+    super('Failed to read response bytes', { cause })
+  }
+}
+
 /** Incremental SSE line parser. */
 class SSEParser {
   private buffer = ''
@@ -43,7 +50,11 @@ export async function* readSSE(body: ReadableStream<Uint8Array>): AsyncGenerator
   let complete = false
   try {
     while (true) {
-      const chunk = await reader.read()
+      let chunk: ReadableStreamReadResult<Uint8Array>
+      try { chunk = await reader.read() } catch (error) {
+        if (error instanceof TypeError) throw new ResponseReadError(error)
+        throw error
+      }
       complete = chunk.done
       const text = decoder.decode(chunk.value, { stream: !chunk.done })
       yield* parser.push(text, chunk.done)

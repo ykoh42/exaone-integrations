@@ -4,8 +4,8 @@ Model providers for using the EXAONE Chat Completions API with [Strands Agents](
 
 | Language | Package | Status |
 | --- | --- | --- |
-| Python | [`strands-exaone`](python/strands-exaone/) | Implemented; not published |
-| TypeScript | [`strands-exaone`](typescript/strands-exaone/) | Implemented; not published |
+| Python | [`strands-exaone`](packages/strands-exaone-python/) | Implemented; not published |
+| TypeScript | [`strands-exaone`](packages/strands-exaone-typescript/) | Implemented; not published |
 
 Both providers support streamed and non-streamed responses, reasoning history, tool calls, structured output, and EXAONE response metadata. Select a language above for installation, examples, configuration, and API limitations.
 
@@ -15,7 +15,7 @@ Clone this repository and run the following commands from its root. The packages
 
 ```bash
 # Python, in your virtual environment
-python -m pip install -e ./python/strands-exaone
+python -m pip install -e ./packages/strands-exaone-python
 
 # TypeScript / Node.js
 npm ci
@@ -23,6 +23,8 @@ npm run build --workspace=strands-exaone
 ```
 
 Set `EXAONE_API_KEY` in your environment before running an agent. See the package READMEs for examples and [CONTRIBUTING.md](CONTRIBUTING.md) for development checks.
+
+For runnable Strands CLI agents, see the [Python example](packages/strands-exaone-python/examples/strands-cli/) and the [TypeScript example](packages/strands-exaone-typescript/examples/strands-cli/).
 
 The providers adapt a single completion choice to Strands. EXAONE Tabular is a separate API and is outside this project's scope.
 

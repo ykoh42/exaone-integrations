@@ -6,6 +6,9 @@
   "files": [
     "dist",
     "src",
+    "examples/strands-cli/agent.ts",
+    "examples/strands-cli/package.json",
+    "examples/strands-cli/README.md",
     "LICENSE"
   ],
   "exports": {
@@ -21,7 +24,7 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/ykoh42/exaone-integrations.git",
-    "directory": "typescript/strands-exaone"
+    "directory": "packages/strands-exaone-typescript"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
@@ -33,6 +36,7 @@
     "zod": "^4.5.4"
   },
   "devDependencies": {
+    "@strands-agents/harness": "~0.1.1",
     "@strands-agents/sdk": "1.24.0",
     "zod": "^4.5.4"
   },

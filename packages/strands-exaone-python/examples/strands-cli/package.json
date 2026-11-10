@@ -1,0 +1,12 @@
+{
+  "name": "strands-exaone-python-cli-example",
+  "private": true,
+  "dependencies": {
+    "@strands-agents/cli": "~0.2.4"
+  },
+  "overrides": {
+    "@strands-agents/cli": {
+      "smol-toml": "1.9.0"
+    }
+  }
+}

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { Agent, Message, ModelError, ModelNetworkError, ModelThrottledError, tool } from '@strands-agents/sdk'
 import { z } from 'zod'
-import { ExaoneAPIError, ExaoneModel } from '../src/index.js'
+import { ExaoneAPIError, ExaoneModel, ExaoneResponseError } from '../src/index.js'
 import { readSSE } from '../src/sse.js'
 
 const user = () => Message.fromMessageData({ role: 'user', content: [{ text: 'hello' }] })
@@ -123,6 +123,220 @@ describe('ExaoneModel', () => {
     expect(result.message.content).toHaveLength(2)
     expect(result.message.content[0]).toMatchObject({ toolUseId: 'a', name: 'one', input: {} })
     expect(result.message.content[1]).toMatchObject({ toolUseId: 'b', name: 'two', input: { n: 2 } })
+  })
+
+  it.each([
+    { id: 'a', name: 'b' },
+    { id: 'call_1', name: 'lookup' },
+  ])('concatenates repeated streamed ID and name fragments', async ({ id, name }) => {
+    const data = sse([
+      event({ tool_calls: [{ index: 0, id, function: { name, arguments: '{}' } }] }),
+      event({ tool_calls: [{ index: 0, id, function: { name } }] }),
+      event({}, 'tool_calls'),
+    ])
+    const model = new ExaoneModel({ apiKey: 'key', fetch: transport(response(data)) })
+    const result = await aggregate(model)
+    expect(result.message.content[0]).toMatchObject({ toolUseId: id + id, name: name + name, input: {} })
+  })
+
+  it('assembles unambiguous streamed tool ID and name fragments', async () => {
+    const data = sse([
+      event({ tool_calls: [{ index: 0, id: 'a', function: { name: 'x', arguments: '{"n":' } }] }),
+      event({ tool_calls: [{ index: 0, id: 'b', function: { name: 'y', arguments: '1}' } }] }),
+      event({}, 'tool_calls'),
+    ])
+    const model = new ExaoneModel({ apiKey: 'key', fetch: transport(response(data)) })
+    const result = await aggregate(model)
+    expect(result.message.content[0]).toMatchObject({ toolUseId: 'ab', name: 'xy', input: { n: 1 } })
+  })
+
+  it('keeps repeated argument deltas in order', async () => {
+    const data = sse([
+      event({ tool_calls: [{ index: 0, id: 'call', function: { name: 'lookup', arguments: '{"word":"' } }] }),
+      event({ tool_calls: [{ index: 0, function: { arguments: 'a' } }] }),
+      event({ tool_calls: [{ index: 0, function: { arguments: 'a' } }] }),
+      event({ tool_calls: [{ index: 0, function: { arguments: '"}' } }] }),
+      event({}, 'tool_calls'),
+    ])
+    const model = new ExaoneModel({ apiKey: 'key', fetch: transport(response(data)) })
+    const result = await aggregate(model)
+    expect(result.message.content[0]).toMatchObject({ toolUseId: 'call', name: 'lookup', input: { word: 'aa' } })
+  })
+
+  it.each([
+    {
+      idParts: ['a', 'a'], nameParts: ['a', 'a'], argumentParts: ['{', '"v":', '1', '}'],
+      expectedId: 'aa', expectedName: 'aa', expectedInput: { v: 1 },
+    },
+    {
+      idParts: ['call_', null, 'id', ''], nameParts: ['get', undefined, '_', 'item'],
+      argumentParts: ['{"city":"', '서', '울', '"}'],
+      expectedId: 'call_id', expectedName: 'get_item', expectedInput: { city: '서울' },
+    },
+    {
+      idParts: ['i', '', 'd'], nameParts: ['name', 'name'], argumentParts: ['{"word":"', 'a', 'a', '"}'],
+      expectedId: 'id', expectedName: 'namename', expectedInput: { word: 'aa' },
+    },
+    {
+      idParts: [null, 'call'], nameParts: ['', 'lookup'], argumentParts: [null, '{}'],
+      expectedId: 'call', expectedName: 'lookup', expectedInput: {},
+    },
+  ])('reassembles valid deltas with varied boundaries and optional fragments', async (testCase) => {
+    const count = Math.max(testCase.idParts.length, testCase.nameParts.length, testCase.argumentParts.length)
+    const chunks = Array.from({ length: count }, (_, index) => event({
+      tool_calls: [{
+        index: 0,
+        id: testCase.idParts[index],
+        type: index === 0 ? 'function' : null,
+        function: { name: testCase.nameParts[index], arguments: testCase.argumentParts[index] },
+      }],
+    }))
+    const model = new ExaoneModel({ apiKey: 'key', fetch: transport(response(sse([...chunks, event({}, 'tool_calls')]))) })
+    const result = await aggregate(model)
+    expect(result.message.content[0]).toMatchObject({
+      toolUseId: testCase.expectedId, name: testCase.expectedName, input: testCase.expectedInput,
+    })
+  })
+
+  it('executes only the tool whose name matches the combined streamed fragments', async () => {
+    const data = sse([
+      event({ tool_calls: [{ index: 0, id: 'call_', type: 'function', function: { name: 'a', arguments: '{}' } }] }),
+      event({ tool_calls: [{ index: 0, id: '1', function: { name: 'a' } }] }),
+      event({}, 'tool_calls'),
+    ])
+    const shortCallback = vi.fn(() => 'incorrect')
+    const fullCallback = vi.fn(() => 'correct')
+    const shortTool = tool({ name: 'a', description: 'Short name', inputSchema: z.object({}), callback: shortCallback })
+    const fullTool = tool({ name: 'aa', description: 'Full name', inputSchema: z.object({}), callback: fullCallback })
+    let count = 0
+    const fetcher = vi.fn(async () => response(count++ === 0 ? data : sse([event({ content: 'done' }), event({}, 'stop')])))
+    const model = new ExaoneModel({ apiKey: 'key', fetch: fetcher as typeof fetch })
+    const agent = new Agent({ model, tools: [shortTool, fullTool], printer: false, retryStrategy: null })
+    await agent.invoke('Use the tool')
+    expect(shortCallback).not.toHaveBeenCalled()
+    expect(fullCallback).toHaveBeenCalledOnce()
+  })
+
+  it('rejects an unsupported tool call type before exposing or executing a tool', async () => {
+    const data = sse([
+      event({ tool_calls: [{ index: 0, id: 'call_1', type: 'unexpected_type', function: { name: 'lookup', arguments: '{}' } }] }),
+      event({}, 'tool_calls'),
+    ])
+    const callback = vi.fn(() => '7')
+    const lookup = tool({ name: 'lookup', description: 'Look up a number', inputSchema: z.object({}), callback })
+    const model = new ExaoneModel({ apiKey: 'key', fetch: transport(response(data)) })
+    const agent = new Agent({ model, tools: [lookup], printer: false, retryStrategy: null })
+    await expect(agent.invoke('Look up the number')).rejects.toThrow(/unsupported tool call type/i)
+    expect(callback).not.toHaveBeenCalled()
+    const events = []
+    const second = new ExaoneModel({ apiKey: 'key', fetch: transport(response(data)) })
+    await expect((async () => {
+      for await (const item of second.stream([user()])) events.push(item)
+    })()).rejects.toThrow(ModelError)
+    expect(events.some((item) => item.type === 'modelContentBlockStartEvent' && item.start?.type === 'toolUseStart')).toBe(false)
+  })
+
+  it.each([undefined, null, -1, 0.5, '0'])('rejects invalid streaming tool index %s before tool events', async (index) => {
+    const data = sse([
+      event({ tool_calls: [{ index, id: 'call_1', function: { name: 'lookup', arguments: '{}' } }] }),
+      event({}, 'tool_calls'),
+    ])
+    const model = new ExaoneModel({ apiKey: 'key', fetch: transport(response(data)) })
+    const events = []
+    await expect((async () => {
+      for await (const item of model.stream([user()])) events.push(item)
+    })()).rejects.toThrow(/valid index/i)
+    expect(events.some((item) => item.type === 'modelContentBlockStartEvent' && item.start?.type === 'toolUseStart')).toBe(false)
+  })
+
+  it('does not execute a tool whose streaming index is missing', async () => {
+    const data = sse([
+      event({ tool_calls: [{ id: 'call_1', function: { name: 'lookup', arguments: '{}' } }] }),
+      event({}, 'tool_calls'),
+    ])
+    const callback = vi.fn(() => '7')
+    const lookup = tool({ name: 'lookup', description: 'Look up a number', inputSchema: z.object({}), callback })
+    const model = new ExaoneModel({ apiKey: 'key', fetch: transport(response(data)) })
+    const agent = new Agent({ model, tools: [lookup], printer: false, retryStrategy: null })
+    await expect(agent.invoke('Look up the number')).rejects.toThrow(/valid index/i)
+    expect(callback).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    { field: 'reasoning_content', stream: true },
+    { field: 'content', stream: true },
+    { field: 'reasoning_content', stream: false },
+    { field: 'content', stream: false },
+  ])('rejects non-string $field without executing tools (stream=$stream)', async ({ field, stream }) => {
+    const call = { id: 'call_1', type: 'function', function: { name: 'lookup', arguments: '{}' } }
+    const payload = stream
+      ? sse([event({ [field]: { value: 'invalid' }, tool_calls: [{ index: 0, ...call }] }, 'tool_calls')])
+      : JSON.stringify(wire([{ index: 0, message: { [field]: { value: 'invalid' }, tool_calls: [call] }, finish_reason: 'tool_calls' }]))
+    const callback = vi.fn(() => '7')
+    const lookup = tool({ name: 'lookup', description: 'Look up a number', inputSchema: z.object({}), callback })
+    const model = new ExaoneModel({ apiKey: 'key', stream, fetch: transport(response(payload)) })
+    const agent = new Agent({ model, tools: [lookup], printer: false, retryStrategy: null })
+    await expect(agent.invoke('Look up the number')).rejects.toThrow(/expected a string/i)
+    expect(callback).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    { field: 'id', stream: true },
+    { field: 'name', stream: true },
+    { field: 'arguments', stream: true },
+    { field: 'id', stream: false },
+    { field: 'name', stream: false },
+    { field: 'arguments', stream: false },
+  ])('rejects non-string tool $field without executing tools (stream=$stream)', async ({ field, stream }) => {
+    const call = {
+      index: 0,
+      id: field === 'id' ? 42 : 'call_1',
+      type: 'function',
+      function: { name: field === 'name' ? 42 : 'lookup', arguments: field === 'arguments' ? 42 : '{}' },
+    }
+    const payload = stream
+      ? sse([event({ tool_calls: [call] }, 'tool_calls')])
+      : JSON.stringify(wire([{ index: 0, message: { tool_calls: [call] }, finish_reason: 'tool_calls' }]))
+    const callback = vi.fn(() => '7')
+    const lookup = tool({ name: 'lookup', description: 'Look up a number', inputSchema: z.object({}), callback })
+    const model = new ExaoneModel({ apiKey: 'key', stream, fetch: transport(response(payload)) })
+    const agent = new Agent({ model, tools: [lookup], printer: false, retryStrategy: null })
+    await expect(agent.invoke('Look up the number')).rejects.toThrow(/expected a string/i)
+    expect(callback).not.toHaveBeenCalled()
+  })
+
+  it('accepts null streamed tool fragments before the complete values arrive', async () => {
+    const data = sse([
+      event({ tool_calls: [{ index: 0, id: null, function: { name: null, arguments: null } }] }),
+      event({ tool_calls: [{ index: 0, id: 'call_1', function: { name: 'lookup', arguments: '{}' } }] }),
+      event({}, 'tool_calls'),
+    ])
+    const model = new ExaoneModel({ apiKey: 'key', fetch: transport(response(data)) })
+    const result = await aggregate(model)
+    expect(result.message.content[0]).toMatchObject({ toolUseId: 'call_1', name: 'lookup', input: {} })
+  })
+
+  it('exposes redacted SSE error bodies and codes without describing HTTP 200 as an error', async () => {
+    const body = { error: { message: 'private-key', code: 'code-private-key', type: 'model_error' }, 'private-key': 'secret' }
+    const model = new ExaoneModel({ apiKey: 'private-key', fetch: transport(response(sse([body]))) })
+    try {
+      await collect(model)
+      throw new Error('Expected a response error')
+    } catch (error) {
+      expect(error).toBeInstanceOf(ExaoneResponseError)
+      expect(error).toBeInstanceOf(ModelError)
+      expect((error as ExaoneResponseError).body).toEqual({ error: { message: '[REDACTED]', code: 'code-[REDACTED]', type: 'model_error' }, '[REDACTED]': 'secret' })
+      expect((error as ExaoneResponseError).code).toBe('code-[REDACTED]')
+      expect(String(error)).not.toContain('HTTP 200')
+      expect(JSON.stringify(error)).not.toContain('private-key')
+    }
+  })
+
+  it('accepts a null error field on successful responses', async () => {
+    const data = sse([{ ...event({ content: 'ok' }, 'stop'), error: null }])
+    const model = new ExaoneModel({ apiKey: 'key', fetch: transport(response(data)) })
+    const result = await aggregate(model)
+    expect(result.stopReason).toBe('endTurn')
   })
 
   it('rejects missing and duplicate tool identifiers before returning any tool events', async () => {

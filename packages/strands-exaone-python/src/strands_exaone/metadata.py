@@ -24,9 +24,12 @@ class ResponseMetadata:
         for key in _FIELDS:
             if key in chunk and (chunk[key] is not None or key not in self.response):
                 self.response[key] = deepcopy(chunk[key])
-        choices = chunk.get("choices") or []
+        choices = chunk.get("choices")
+        if not isinstance(choices, list):
+            return
         for choice in choices:
-            self._add_choice(choice)
+            if isinstance(choice, dict):
+                self._add_choice(choice)
         if choices:
             self.response["choices"] = [self._choice]
 

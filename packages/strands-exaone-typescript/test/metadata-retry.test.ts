@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { Message, ModelNetworkError, ModelThrottledError } from '@strands-agents/sdk'
+import { Message, ModelError, ModelNetworkError, ModelThrottledError } from '@strands-agents/sdk'
 import { ExaoneAPIError, ExaoneModel } from '../src/index.js'
 
 const user = () => Message.fromMessageData({ role: 'user', content: [{ text: 'hello' }] })
@@ -15,6 +15,60 @@ async function collect(model: ExaoneModel, signal?: AbortSignal) {
 afterEach(() => vi.useRealTimers())
 
 describe('response metadata', () => {
+  const tokenFields = ['prompt_tokens', 'completion_tokens', 'total_tokens'] as const
+  const malformedCounts = [
+    { name: 'negative', wire: -1, expected: -1 },
+    { name: 'fractional', wire: 1.5, expected: 1.5 },
+    { name: 'unsafe integer', wire: Number.MAX_SAFE_INTEGER + 1, expected: Number.MAX_SAFE_INTEGER + 1 },
+    { name: 'overflow', wire: '__overflow__', expected: Infinity },
+  ]
+  for (const field of tokenFields) {
+    it.each(malformedCounts)(`omits malformed SDK usage for ${field} ($name) while preserving raw metadata`, async ({ wire, expected }) => {
+      const usage = { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3, [field]: wire }
+      const payload = [
+        { choices: [{ index: 0, delta: { content: 'ok' }, finish_reason: 'stop' }] },
+        { choices: [], usage },
+      ].map((item) => `data: ${JSON.stringify(item).replace('"__overflow__"', '1e309')}\n\n`).join('') + 'data: [DONE]\n\n'
+      const onMetadata = vi.fn()
+      const model = new ExaoneModel({ apiKey: 'test-key', fetch: async () => new Response(payload), onMetadata })
+      const events = await collect(model)
+      expect(events).toContainEqual(expect.objectContaining({ type: 'modelContentBlockDeltaEvent', delta: { type: 'textDelta', text: 'ok' } }))
+      expect(events.find((item) => item.type === 'modelMetadataEvent')).not.toHaveProperty('usage')
+      expect(onMetadata).toHaveBeenCalledOnce()
+      expect(onMetadata.mock.calls[0]![0].usage?.[field]).toBe(expected)
+    })
+  }
+
+  it('retains zero token counts in SDK usage and raw metadata', async () => {
+    const onMetadata = vi.fn()
+    const model = new ExaoneModel({ apiKey: 'test-key', fetch: async () => stream([
+      { choices: [{ index: 0, delta: { content: 'ok' }, finish_reason: 'stop' }] },
+      { choices: [], usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 } },
+    ]), onMetadata })
+    const events = await collect(model)
+    expect(events.find((item) => item.type === 'modelMetadataEvent')).toMatchObject({ usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 } })
+    expect(onMetadata.mock.calls[0]![0].usage).toMatchObject({ prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 })
+  })
+
+  it('requests streaming usage by default, respects updates, and omits stream options for non-streaming requests', async () => {
+    const requests: Record<string, unknown>[] = []
+    const fetcher = fakeFetch(async (_url, init) => {
+      const request = JSON.parse(String(init?.body)) as Record<string, unknown>
+      requests.push(request)
+      return request.stream ? stream([{ choices: [{ index: 0, delta: { content: 'ok' }, finish_reason: 'stop' }] }]) : ok()
+    })
+    const model = new ExaoneModel({ apiKey: 'test-key', fetch: fetcher })
+    await collect(model)
+    model.updateConfig({ includeUsage: false })
+    await collect(model)
+    model.updateConfig({ includeUsage: true, stream: false })
+    await collect(model)
+    expect(requests[0]).toMatchObject({ stream: true, stream_options: { include_usage: true } })
+    expect(requests[1]).toMatchObject({ stream: true, stream_options: { include_usage: false } })
+    expect(requests[2]).toMatchObject({ stream: false })
+    expect(requests[2]).not.toHaveProperty('stream_options')
+  })
+
   it('reports abort as an error and redacts credentials from unknown finish reasons', async () => {
     const aborted = fakeFetch(async () => stream([{ choices: [{ index: 0, delta: {}, finish_reason: 'abort' }] }]))
     await expect(collect(new ExaoneModel({ apiKey: 'private-secret', fetch: aborted }))).rejects.toThrow('abort')
@@ -25,8 +79,29 @@ describe('response metadata', () => {
   it('accumulates stream metadata and all logprob fragments, redacting credentials', async () => {
     const onMetadata = vi.fn()
     const chunks = [
-      { id: 'resp-private-secret', object: 'chat.completion.chunk', model: 'example', created: 123, metadata: { version: 'private-secret' }, service_tier: null, choices: [{ index: 0, delta: { reasoning_content: 'hidden-reasoning', refusal: 'Cannot ', annotations: [{ id: 1 }], audio: { data: 'fragment-a' }, function_call: { name: 'f' } }, logprobs: { content: [{ token: 'one' }], refusal: null }, finish_reason: null }] },
-      { id: null, choices: [{ index: 0, delta: { content: 'hidden-response', refusal: 'do that.', annotations: [{ id: 2 }], audio: { data: 'fragment-b-private-secret' }, function_call: { arguments: '{}' } }, logprobs: { content: [{ token: 'two-private-secret' }] }, matched_stop: 'end', finish_reason: null }] },
+      {
+        id: 'resp-private-secret', object: 'chat.completion.chunk', model: 'example', created: 123,
+        metadata: { version: 'private-secret' }, service_tier: null,
+        choices: [{
+          index: 0,
+          delta: {
+            reasoning_content: 'hidden-reasoning', refusal: 'Cannot ', annotations: [{ id: 1 }],
+            audio: { data: 'fragment-a' }, function_call: { name: 'f' },
+          },
+          logprobs: { content: [{ token: 'one' }], refusal: null }, finish_reason: null,
+        }],
+      },
+      {
+        id: null,
+        choices: [{
+          index: 0,
+          delta: {
+            content: 'hidden-response', refusal: 'do that.', annotations: [{ id: 2 }],
+            audio: { data: 'fragment-b-private-secret' }, function_call: { arguments: '{}' },
+          },
+          logprobs: { content: [{ token: 'two-private-secret' }] }, matched_stop: 'end', finish_reason: null,
+        }],
+      },
       { system_fingerprint: null, choices: [{ index: 0, delta: {}, finish_reason: 'stop', logprobs: null }] },
       { usage: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3, opaque: 'private-secret' }, choices: [] },
     ]
@@ -38,7 +113,17 @@ describe('response metadata', () => {
     expect(metadata.response).toEqual({
       id: 'resp-[REDACTED]', object: 'chat.completion.chunk', model: 'example', created: 123,
       metadata: { version: '[REDACTED]' }, service_tier: null, system_fingerprint: null,
-      choices: [{ index: 0, finish_reason: 'stop', matched_stop: 'end', logprobs: { content: [{ token: 'one' }, { token: 'two-[REDACTED]' }], refusal: null }, message: { refusal: 'Cannot do that.', annotations: [{ id: 1 }, { id: 2 }] }, message_deltas: [{ audio: { data: 'fragment-a' }, function_call: { name: 'f' } }, { audio: { data: 'fragment-b-[REDACTED]' }, function_call: { arguments: '{}' } }] }],
+      choices: [{
+        index: 0,
+        finish_reason: 'stop',
+        matched_stop: 'end',
+        logprobs: { content: [{ token: 'one' }, { token: 'two-[REDACTED]' }], refusal: null },
+        message: { refusal: 'Cannot do that.', annotations: [{ id: 1 }, { id: 2 }] },
+        message_deltas: [
+          { audio: { data: 'fragment-a' }, function_call: { name: 'f' } },
+          { audio: { data: 'fragment-b-[REDACTED]' }, function_call: { arguments: '{}' } },
+        ],
+      }],
     })
     expect(metadata.usage.opaque).toBe('[REDACTED]')
     expect(JSON.stringify(metadata)).not.toContain('hidden-reasoning')
@@ -50,12 +135,30 @@ describe('response metadata', () => {
 
   it('preserves non-streaming fields and masks secrets in headers and nested metadata', async () => {
     const onMetadata = vi.fn()
-    const payload = { id: 'id-1', metadata: { 'key-private-secret': 'private-secret' }, moderation: { result: true }, service_tier: null, choices: [{ index: 0, message: { content: 'answer', refusal: 'private-secret', annotations: [], audio: { id: 'audio-id' }, function_call: null }, finish_reason: 'stop', logprobs: { content: [{ token: 'token' }] }, matched_stop: null }] }
+    const payload = {
+      id: 'id-1', metadata: { 'key-private-secret': 'private-secret' }, moderation: { result: true },
+      service_tier: null,
+      choices: [{
+        index: 0,
+        message: { content: 'answer', refusal: 'private-secret', annotations: [], audio: { id: 'audio-id' }, function_call: null },
+        finish_reason: 'stop', logprobs: { content: [{ token: 'token' }] }, matched_stop: null,
+      }],
+    }
     const fetcher = fakeFetch(async () => new Response(JSON.stringify(payload), { headers: { 'x-request-id': 'private-secret', 'retry-after': 'private-secret' } }))
     await collect(new ExaoneModel({ apiKey: 'private-secret', stream: false, fetch: fetcher, onMetadata }))
     expect(onMetadata.mock.calls[0]![0]).toMatchObject({
       requestId: '[REDACTED]', rateLimit: { 'retry-after': '[REDACTED]' },
-      response: { id: 'id-1', moderation: { result: true }, service_tier: null, metadata: { 'key-[REDACTED]': '[REDACTED]' }, choices: [{ index: 0, finish_reason: 'stop', logprobs: { content: [{ token: 'token' }] }, matched_stop: null, message: { refusal: '[REDACTED]', annotations: [], audio: { id: 'audio-id' }, function_call: null } }] },
+      response: {
+        id: 'id-1', moderation: { result: true }, service_tier: null,
+        metadata: { 'key-[REDACTED]': '[REDACTED]' },
+        choices: [{
+          index: 0,
+          finish_reason: 'stop',
+          logprobs: { content: [{ token: 'token' }] },
+          matched_stop: null,
+          message: { refusal: '[REDACTED]', annotations: [], audio: { id: 'audio-id' }, function_call: null },
+        }],
+      },
     })
   })
 })
@@ -159,7 +262,7 @@ describe('opt-in retry policy', () => {
     const events = []
     const model = new ExaoneModel({ apiKey: 'key', fetch: partial, maxRetries: 2, baseRetryDelayMs: 0 })
     const consume = async () => { for await (const item of model.stream([user()])) events.push(item) }
-    await expect(consume()).rejects.toBeInstanceOf(ModelNetworkError)
+    await expect(consume()).rejects.toBeInstanceOf(ModelError)
     expect(events).toContainEqual({ type: 'modelContentBlockDeltaEvent', delta: { type: 'textDelta', text: 'part' } })
     expect(partial).toHaveBeenCalledOnce()
   })

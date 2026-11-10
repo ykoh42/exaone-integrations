@@ -2,20 +2,22 @@
   "name": "exaone-integrations",
   "private": true,
   "type": "module",
+  "packageManager": "npm@11.20.0",
   "workspaces": [
-    "typescript/*"
+    "packages/*"
   ],
   "allowScripts": {
     "esbuild": true,
     "fsevents": false
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.13.0",
+    "npm": ">=11.20.0"
   },
   "scripts": {
     "build": "npm run build --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
-    "lint": "oxlint typescript --deny-warnings",
+    "lint": "oxlint packages/strands-exaone-typescript --deny-warnings",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",

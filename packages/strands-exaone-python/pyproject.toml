@@ -20,6 +20,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+    "strands-harness~=0.1.0",
     "hatch>=1.0.0,<2.0.0",
     "complexipy>=8.3,<9",
     "pytest>=9.0.0,<10.0.0",
