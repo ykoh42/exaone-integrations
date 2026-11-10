@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
-import time
 from collections.abc import AsyncIterator
 from copy import deepcopy
 from typing import Any
@@ -244,7 +243,7 @@ async def test_cancel_signal_during_sync_metadata_callback(method: str) -> None:
 
     def callback(_: dict[str, Any]) -> None:
         entered.set()
-        time.sleep(0.1)
+        assert signal.wait(timeout=2), "Cancellation was not signalled"
 
     def cancel() -> None:
         entered.wait(timeout=2)

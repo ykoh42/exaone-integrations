@@ -121,18 +121,21 @@ describe('metadata callbacks', () => {
   })
 
   it('times out while a callback is pending without waiting for the callback', async () => {
+    vi.useFakeTimers()
     const gate = deferred<void>()
     const started = deferred<void>()
     const model = new ExaoneModel({ apiKey: 'key', timeoutMs: 20, fetch: async () => response([chunk({ content: 'text' }), chunk({}, 'stop')]), onMetadata: () => { started.resolve(); return gate.promise } })
     const result = collect(model)
     const failure = expect(result).rejects.toMatchObject({ name: 'TimeoutError' })
     await started.promise
+    await vi.advanceTimersByTimeAsync(20)
     await failure
     gate.reject(new Error('late callback rejection'))
-    await new Promise(resolve => setImmediate(resolve))
+    await vi.advanceTimersByTimeAsync(0)
   })
 
   it.each(['cancel', 'timeout'] as const)('does not execute a pending tool when callback waiting ends in %s', async (mode) => {
+    if (mode === 'timeout') vi.useFakeTimers()
     const started = deferred<void>()
     const gate = deferred<void>()
     const callback = vi.fn(() => 'unexpected')
@@ -143,11 +146,13 @@ describe('metadata callbacks', () => {
     const run = agent.invoke('Use the tool').then(result => result.stopReason, error => (error as Error).name)
     await started.promise
     if (mode === 'cancel') agent.cancel()
+    else await vi.advanceTimersByTimeAsync(30)
     expect(await run).toBe(mode === 'cancel' ? 'cancelled' : 'ModelError')
     expect(callback).not.toHaveBeenCalled()
     expect(fetcher).toHaveBeenCalledOnce()
     gate.reject(new Error('late callback rejection'))
-    await new Promise(resolve => setImmediate(resolve))
+    if (mode === 'timeout') await vi.advanceTimersByTimeAsync(0)
+    else await new Promise(resolve => setImmediate(resolve))
     await agent.shutdown()
   })
 
