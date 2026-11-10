@@ -47,10 +47,10 @@ function waitForRetryChunk(ms: number, signal: AbortSignal): Promise<void> {
 }
 
 async function waitForRetry(ms: number, signal: AbortSignal): Promise<void> {
-  // Node clamps larger timeouts to 1 ms. Wait in bounded chunks so a long
-  // Retry-After value cannot cause an early request.
+  // Node truncates fractional timeouts and clamps larger timeouts to 1 ms.
+  // Round up and wait in bounded chunks so a server hint is not shortened.
   const maxTimeout = 2_147_483_647
-  let remaining = ms
+  let remaining = Math.ceil(ms)
   while (remaining > maxTimeout) {
     await waitForRetryChunk(maxTimeout, signal)
     remaining -= maxTimeout

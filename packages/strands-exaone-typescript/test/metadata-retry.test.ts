@@ -179,6 +179,20 @@ describe('opt-in retry policy', () => {
     expect(attempts).toBe(2)
   })
 
+  it('does not round a fractional millisecond retry hint down', async () => {
+    vi.useFakeTimers()
+    let attempts = 0
+    const fetcher = fakeFetch(async () => ++attempts === 1
+      ? new Response('{}', { status: 429, headers: { 'retry-after-ms': '19.5' } })
+      : ok())
+    const result = collect(new ExaoneModel({ apiKey: 'key', fetch: fetcher, stream: false, maxRetries: 1 }))
+    await vi.advanceTimersByTimeAsync(19)
+    expect(attempts).toBe(1)
+    await vi.advanceTimersByTimeAsync(1)
+    await result
+    expect(attempts).toBe(2)
+  })
+
   it.each([0, 2_147_483_647])('cancels a long retry wait after %i ms without another request', async (elapsed) => {
     vi.useFakeTimers()
     const delay = 2_147_483_657
