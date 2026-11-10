@@ -122,7 +122,7 @@ describe('Strands harness transport and persistence', () => {
     expect(failure).toBeInstanceOf(ModelError)
     expect(failure).not.toBeInstanceOf(ModelNetworkError)
     expect((failure as Error).message).toContain('after content was delivered')
-    expect(((failure as Error).cause as Error).message).toContain('[REDACTED]')
+    expect(((failure as Error).cause as Error).message).toBe('EXAONE response body read failed')
     expect(((failure as Error).cause as Error).message).not.toContain('test-secret')
     expect(fragments).toEqual(['partial'])
     expect(requests).toBe(1)

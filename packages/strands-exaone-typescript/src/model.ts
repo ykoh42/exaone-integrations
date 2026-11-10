@@ -72,15 +72,23 @@ function rateHeaders(headers: Headers): Record<string, string> {
   return result
 }
 
-async function throwHttpError(response: Response, key: string): Promise<never> {
-  const raw = (await response.text()).replaceAll(key, '[REDACTED]')
-  let body: unknown = raw
-  try { body = redactMetadata(JSON.parse(raw) as unknown, key) } catch { /* preserve non-JSON error */ }
+async function throwHttpError(response: Response, key: string, signal: AbortSignal): Promise<never> {
+  let body: unknown
+  let readCause: Error | undefined
+  try {
+    const raw = (await response.text()).replaceAll(key, '[REDACTED]')
+    body = raw
+    try { body = redactMetadata(JSON.parse(raw) as unknown, key) } catch { /* preserve non-JSON error */ }
+  } catch (error) {
+    if (signal.aborted) throw signal.reason
+    readCause = safeResponseReadCause(error)
+  }
   const requestId = response.headers.get('x-request-id')?.replaceAll(key, '[REDACTED]')
   const headers = redactMetadata(rateHeaders(response.headers), key) as Record<string, string>
   const error = new ExaoneAPIError(response.status, body, requestId, headers)
+  if (readCause) Object.defineProperty(error, 'cause', { value: readCause })
   if (response.status === 429) throw new ModelThrottledError(error.message, { cause: error })
-  if (response.status === 400 && /context.{0,40}(length|window|limit|exceed)|maximum context/i.test(raw)) {
+  if ((response.status === 400 || response.status === 413) && isRecord(body) && isRecord(body.error) && body.error.code === 'context_length_exceeded') {
     const overflow = new ContextWindowOverflowError('EXAONE context window exceeded')
     Object.defineProperty(overflow, 'cause', { value: error })
     throw overflow
@@ -317,12 +325,10 @@ function metadataEvent(mapper: EventMapper, response: Response, key: string): { 
 }
 
 async function readResponseJSON(response: Response): Promise<WireResponse> {
+  let raw: string
+  try { raw = await response.text() } catch (error) { throw new ResponseReadError(error) }
   let data: unknown
-  try { data = await response.json() as unknown } catch (error) {
-    if (error instanceof SyntaxError) throw new ModelError('EXAONE returned malformed response JSON')
-    if (error instanceof TypeError) throw new ResponseReadError(error)
-    throw error
-  }
+  try { data = JSON.parse(raw) as unknown } catch { throw new ModelError('EXAONE returned malformed response JSON') }
   return wireResponse(data)
 }
 
@@ -346,6 +352,13 @@ function safeTransportCause(error: unknown, key: string): Error {
   const safe = error instanceof TypeError ? new TypeError(message) : new Error(message)
   safe.name = error.name.replaceAll(key, '[REDACTED]')
   return safe
+}
+
+/** Read failures may contain credentials or request content, so expose no original diagnostics. */
+function safeResponseReadCause(error: unknown): Error {
+  if (error instanceof SyntaxError) return new SyntaxError('EXAONE response body read failed')
+  if (error instanceof TypeError) return new TypeError('EXAONE response body read failed')
+  return new Error('EXAONE response body read failed')
 }
 
 /** Serialize once so retries send the same request, without exposing input on failure. */
@@ -414,7 +427,7 @@ export class ExaoneModel extends Model<ExaoneModelConfig> {
     const signal = AbortSignal.any(signals)
     const response = await sendWithRetry(config, signal, () => fetchResponse(config, body, key, signal))
     try {
-      if (!response.ok) await throwHttpError(response, key)
+      if (!response.ok) await throwHttpError(response, key, signal)
       const mapper = new EventMapper(key)
       yield { type: 'modelMessageStartEvent', role: 'assistant' }
       let deliveredContent = false
@@ -426,7 +439,7 @@ export class ExaoneModel extends Model<ExaoneModelConfig> {
       } catch (error) {
         if (signal.aborted) throw signal.reason
         if (error instanceof ResponseReadError) {
-          const cause = safeTransportCause(error.cause, key)
+          const cause = safeResponseReadCause(error.cause)
           if (deliveredContent) throw new ModelError('EXAONE response stream failed after content was delivered', { cause })
           throw new ModelNetworkError('EXAONE response stream failed', { cause })
         }

@@ -1075,3 +1075,47 @@ async def test_agent_default_callback_prints_reasoning_but_none_preserves_histor
     assert ("VISIBLE_ANSWER" in output) is default_callback
     assert str(result).strip() == "VISIBLE_ANSWER"
     assert any(message.get("reasoning_content") == "SYNTHETIC_REASONING" for message in requests[1]["messages"])
+
+
+@pytest.mark.parametrize("status", [400, 413])
+@pytest.mark.parametrize(
+    ("code", "is_overflow"),
+    [
+        ("context_length_exceeded", True),
+        ("CONTEXT_LENGTH_EXCEEDED", False),
+        ("invalid_parameter", False),
+        (None, False),
+    ],
+)
+async def test_context_overflow_requires_exact_error_code(status: int, code: str | None, is_overflow: bool) -> None:
+    from strands_exaone import ExaoneContextWindowError
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            status,
+            json={"error": {"message": "context window setting", "code": code}},
+            headers={"x-request-id": "synthetic-request"},
+        )
+
+    model, client = model_for(handler)
+    try:
+        with pytest.raises(ExaoneContextWindowError if is_overflow else ExaoneError) as caught:
+            await collect(model)
+    finally:
+        await client.aclose()
+    assert caught.value.status_code == status
+    assert caught.value.code == code
+    assert caught.value.request_id == "synthetic-request"
+    assert (isinstance(caught.value, ExaoneContextWindowError)) is is_overflow
+
+
+async def test_throttle_status_takes_precedence_over_context_code() -> None:
+    model, client = model_for(
+        lambda request: httpx.Response(429, json={"error": {"message": "busy", "code": "context_length_exceeded"}})
+    )
+    try:
+        with pytest.raises(ExaoneThrottledError) as caught:
+            await collect(model)
+    finally:
+        await client.aclose()
+    assert caught.value.status_code == 429

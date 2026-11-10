@@ -297,7 +297,7 @@ describe('opt-in retry policy', () => {
       expect(error).toBeInstanceOf(ModelNetworkError)
       const cause = (error as Error).cause as Error
       expect(cause).not.toBe(original)
-      expect(cause.message).toBe('response [REDACTED]')
+      expect(cause.message).toBe('EXAONE response body read failed')
       expect(cause.cause).toBeUndefined()
       expect(cause.stack).not.toContain(secret)
     }

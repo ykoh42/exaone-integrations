@@ -577,7 +577,7 @@ async def test_harness_many_interleaved_unicode_argument_fragments() -> None:
     }
 
 
-@pytest.mark.parametrize("invalid_arguments", ["{", "[]"])
+@pytest.mark.parametrize("invalid_arguments", ["{", "[]", '{"value":NaN}'])
 async def test_harness_rejects_all_tools_when_any_arguments_are_invalid(invalid_arguments: str) -> None:
     calls: list[str] = []
 
@@ -739,3 +739,154 @@ async def test_harness_config_update_does_not_change_inflight_retry_delay_ceilin
             with pytest.raises(ExaoneThrottledError):
                 await make_harness(model).invoke_async("Second.")
     assert requests == {"first": 2 if initial_max_delay else 1, "second": 2 if updated_max_delay else 1}
+
+
+async def test_harness_preserves_nested_json_tool_result() -> None:
+    expected = {"greeting": "안녕", "values": [0, False, None], "nested": {"key": "x\n🙂"}}
+    requests: list[dict[str, Any]] = []
+
+    @tool
+    def get_json() -> dict[str, Any]:
+        """Return a synthetic JSON object."""
+        return expected
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        if len(requests) == 1:
+            return response(
+                events(
+                    chunk({"reasoning_content": "request synthetic data"}),
+                    chunk(tool_delta("call_1", "get_json")),
+                    chunk(finish="tool_calls"),
+                )
+            )
+        return response(events(chunk({"content": "done"}), chunk(finish="stop")))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        agent = make_harness(ExaoneModel(api_key="test-only-key", http_client=client), [get_json])
+        await agent.invoke_async("Get the synthetic JSON.")
+    assert len(requests) == 2
+    result = next(message for message in requests[1]["messages"] if message.get("tool_call_id") == "call_1")
+    assert json.loads(result["content"]) == expected
+    assert any(message.get("reasoning_content") == "request synthetic data" for message in requests[1]["messages"])
+
+
+async def test_harness_repeated_identical_finish_reason_executes_tool_once() -> None:
+    calls: list[bool] = []
+    requests = 0
+
+    @tool
+    def get_number() -> str:
+        """Return a synthetic number."""
+        calls.append(True)
+        return "7"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        if requests == 1:
+            return response(
+                events(
+                    chunk(tool_delta("call_1", "get_number")), chunk(finish="tool_calls"), chunk(finish="tool_calls")
+                )
+            )
+        return response(events(chunk({"content": "done"}), chunk(finish="stop")))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        await make_harness(ExaoneModel(api_key="test-only-key", http_client=client), [get_number]).invoke_async(
+            "Get a number."
+        )
+    assert calls == [True]
+    assert requests == 2
+
+
+async def test_harness_conflicting_finish_reasons_fail_before_tool_execution() -> None:
+    calls: list[bool] = []
+
+    @tool
+    def get_number() -> str:
+        """Return a synthetic number."""
+        calls.append(True)
+        return "7"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return response(events(chunk(tool_delta("call_1", "get_number")), chunk(finish="length"), chunk(finish="stop")))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(ExaoneError, match="Multiple finish reasons"):
+            await make_harness(ExaoneModel(api_key="test-only-key", http_client=client), [get_number]).invoke_async(
+                "Get a number."
+            )
+    assert calls == []
+
+
+@pytest.mark.parametrize("token", ["NaN", "Infinity", "-Infinity", '{"nested":[1,NaN]}'])
+async def test_harness_rejects_non_json_number_constants_before_tool_execution(token: str) -> None:
+    calls: list[float] = []
+    requests = 0
+
+    @tool
+    def capture(value: float) -> str:
+        """Record a synthetic numeric input."""
+        calls.append(value)
+        return "done"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        if requests > 1:
+            return response(events(chunk({"content": "unexpected"}), chunk(finish="stop")))
+        call = {
+            "tool_calls": [
+                {"index": 0, "id": "capture_1", "function": {"name": "capture", "arguments": '{"value":' + token + "}"}}
+            ]
+        }
+        return response(events(chunk(call), chunk(finish="tool_calls")))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(ExaoneError, match="Invalid tool arguments") as caught:
+            await make_harness(ExaoneModel(api_key="test-only-key", http_client=client), [capture]).invoke_async(
+                "Use the tool."
+            )
+    assert calls == []
+    assert requests == 1
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+
+
+@pytest.mark.parametrize(
+    "raw_value",
+    ['"NaN"', '"Infinity"', "0", "-2.5", "1e308", '{"label":"NaN","nested":[-1,0,4.2]}'],
+)
+async def test_harness_accepts_valid_json_numbers_and_constant_strings(raw_value: str) -> None:
+    calls: list[Any] = []
+    requests = 0
+
+    @tool
+    def capture(value: Any) -> str:
+        """Record a synthetic JSON value."""
+        calls.append(value)
+        return "done"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        if requests > 1:
+            return response(events(chunk({"content": "done"}), chunk(finish="stop")))
+        call = {
+            "tool_calls": [
+                {
+                    "index": 0,
+                    "id": "capture_1",
+                    "function": {"name": "capture", "arguments": '{"value":' + raw_value + "}"},
+                }
+            ]
+        }
+        return response(events(chunk(call), chunk(finish="tool_calls")))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        await make_harness(ExaoneModel(api_key="test-only-key", http_client=client), [capture]).invoke_async(
+            "Use the tool."
+        )
+    assert calls == [json.loads(raw_value)]
+    assert requests == 2

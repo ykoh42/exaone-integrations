@@ -87,7 +87,6 @@ def response_error(status: int, body: Any, headers: dict[str, str], secret: str)
     )
     if status == 429:
         return ExaoneThrottledError(details)
-    lowered = str(message).lower()
-    if status in {400, 413} and ("context length" in lowered or "context window" in lowered):
+    if status in {400, 413} and nested.get("code") == "context_length_exceeded":
         return ExaoneContextWindowError(details)
     return details

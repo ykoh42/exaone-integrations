@@ -6,6 +6,7 @@ import json
 from typing import Any
 
 import httpx
+import pytest
 from harness_support import chunk, events, make_harness, response, tool_delta
 from strands import tool
 from strands_harness import create_harness
@@ -187,3 +188,98 @@ async def test_harness_continues_after_synthetic_extreme_usage() -> None:
     assert first.metrics.accumulated_usage["inputTokens"] == 0
     assert second.metrics.accumulated_usage["inputTokens"] == 0
     assert all(record["usage"]["prompt_tokens"] == huge for record in records)
+
+
+@pytest.mark.parametrize("status", [400, 413])
+async def test_harness_ambiguous_context_error_does_not_rewrite_history(status: int) -> None:
+    from copy import deepcopy
+
+    from strands_exaone import ExaoneError
+
+    requests: list[dict[str, Any]] = []
+    history = [
+        {"role": "user", "content": [{"text": f"synthetic question {index}"}]}
+        if index % 2 == 0
+        else {
+            "role": "assistant",
+            "content": [
+                {"reasoningContent": {"reasoningText": {"text": f"synthetic reasoning {index}"}}},
+                {"text": f"synthetic answer {index}"},
+            ],
+        }
+        for index in range(8)
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        if len(requests) == 1:
+            return httpx.Response(
+                status, json={"error": {"message": "Invalid context window configuration", "code": "invalid_parameter"}}
+            )
+        return response(events(chunk({"content": "unexpected retry"}), chunk(finish="stop")))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        agent = create_harness(
+            model=ExaoneModel(api_key="test-only-key", http_client=client),
+            messages=deepcopy(history),
+            builtin_tools=[],
+            builtin_plugins=[],
+            session=False,
+            memory=False,
+            skills=False,
+            caching=False,
+            callback_handler=None,
+            retry_strategy=None,
+        )
+        with pytest.raises(ExaoneError, match="Invalid context window configuration") as caught:
+            await agent.invoke_async("synthetic latest turn")
+    assert caught.value.status_code == status
+    assert caught.value.code == "invalid_parameter"
+    assert len(requests) == 1
+    after = [{"role": message["role"], "content": message["content"]} for message in agent.messages]
+    assert after == history + [{"role": "user", "content": [{"text": "synthetic latest turn"}]}]
+
+
+@pytest.mark.parametrize("status", [400, 413])
+async def test_harness_explicit_context_code_triggers_reactive_recovery(status: int) -> None:
+    from copy import deepcopy
+
+    requests: list[dict[str, Any]] = []
+    history = [
+        {"role": "user", "content": [{"text": f"synthetic question {index}"}]}
+        if index % 2 == 0
+        else {
+            "role": "assistant",
+            "content": [
+                {"reasoningContent": {"reasoningText": {"text": f"synthetic reasoning {index}"}}},
+                {"text": f"synthetic answer {index}"},
+            ],
+        }
+        for index in range(8)
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        if len(requests) == 1:
+            return httpx.Response(
+                status, json={"error": {"message": "synthetic overflow", "code": "context_length_exceeded"}}
+            )
+        return response(events(chunk({"content": "synthetic recovery"}), chunk(finish="stop")))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        agent = create_harness(
+            model=ExaoneModel(api_key="test-only-key", http_client=client),
+            messages=deepcopy(history),
+            builtin_tools=[],
+            builtin_plugins=[],
+            session=False,
+            memory=False,
+            skills=False,
+            caching=False,
+            callback_handler=None,
+            retry_strategy=None,
+        )
+        result = await agent.invoke_async("synthetic latest turn")
+    assert "synthetic recovery" in str(result)
+    assert len(requests) >= 2
+    assert any("synthetic reasoning 1" not in str(request["messages"]) for request in requests[1:])

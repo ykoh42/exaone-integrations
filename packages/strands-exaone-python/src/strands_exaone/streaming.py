@@ -7,7 +7,7 @@ import json
 import re
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, NoReturn
 
 import httpx
 
@@ -61,10 +61,14 @@ class _Tool:
     arguments: list[str] = field(default_factory=list)
 
 
+def _reject_json_constant(value: str) -> NoReturn:
+    raise ValueError("Non-standard JSON numeric constant")
+
+
 def _validate_tool_arguments(raw: str) -> None:
     """Require JSON object arguments without retaining invalid data in an error."""
     try:
-        arguments = json.loads(raw)
+        arguments = json.loads(raw, parse_constant=_reject_json_constant)
     except (TypeError, ValueError):
         # Raise outside the handler so tool arguments are not retained as exception context.
         pass
@@ -168,7 +172,7 @@ class StreamDecoder:
                 self._store_tool(fragment)
         finish = choice.get("finish_reason")
         if finish:
-            if self.finish_reason is not None:
+            if self.finish_reason is not None and self.finish_reason != finish:
                 raise ExaoneError("Multiple finish reasons received")
             self.finish_reason = finish
 
