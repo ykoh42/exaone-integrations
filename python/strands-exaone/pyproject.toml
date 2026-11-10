@@ -4,11 +4,18 @@ build-backend = "hatchling.build"
 
 [project]
 name = "strands-exaone"
-version = "0.0.0"
+version = "0.1.0"
 description = "EXAONE model provider for Strands Agents"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = ["strands-agents>=1.0.0,<2.0.0"]
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = [
+    "strands-agents>=1.64.0,<1.65.0",
+    "httpx>=0.27,<1",
+    "pydantic>=2,<3",
+    "truststore>=0.10,<1",
+]
 
 [project.optional-dependencies]
 dev = [

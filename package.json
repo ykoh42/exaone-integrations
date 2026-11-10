@@ -16,17 +16,18 @@
     "build": "npm run build --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "lint": "oxlint typescript --deny-warnings",
-    "test": "vitest run --passWithNoTests",
+    "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "check": "npm run lint && npm run typecheck && npm run test && npm run build"
   },
   "devDependencies": {
+    "@vitest/coverage-v8": "^5.0.2",
     "eslint-plugin-sonarjs": "^4.2.2",
+    "openai": "^6.49.0",
     "oxlint": "^1.93.0",
     "typescript": "^6.0.3",
-    "vitest": "^5.0.2",
-    "@vitest/coverage-v8": "^5.0.2"
+    "vitest": "^5.0.2"
   },
   "overrides": {
     "minimatch": "11.0.1"

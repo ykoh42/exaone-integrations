@@ -1,2 +1,2 @@
-/** Scaffold for the EXAONE provider for Strands Agents. */
-export {}
+export { ExaoneAPIError, ExaoneModel } from './model.js'
+export type { ExaoneMetadata, ExaoneModelConfig } from './types.js'
