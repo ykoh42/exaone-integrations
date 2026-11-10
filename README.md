@@ -12,6 +12,7 @@ The initial work targets Strands Agents for Python and TypeScript:
 No model provider has been implemented or published yet. See [CONTRIBUTING.md](CONTRIBUTING.md) for local checks.
 
 Before implementation, consult the [K-EXAONE 2.5 specification checklist](docs/k-exaone-2.5-checklist.md).
-See the [live API observations](docs/live-api-observations-2026-11-10.md) for verified behavior and documentation discrepancies.
+See the live API observations from [November 10](docs/live-api-observations-2026-11-10.md) and [November 11](docs/live-api-observations-2026-11-11.md) for observed behavior and documentation discrepancies.
+The [Strands provider design analysis](docs/strands-provider-design.md) compares implementation options for both languages.
 
 The Strands package setup draws on the [Strands extension template](https://github.com/strands-agents/extension-template). The workspace and development guidelines also draw on [web-llm-adapters](https://github.com/ykoh42/web-llm-adapters).
