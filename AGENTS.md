@@ -1,6 +1,11 @@
-- Write simple, readable code with plain names and small functions.
-- Keep framework packages independently installable. Share code only when multiple packages need the same behavior.
-- Preserve EXAONE input, output, and reasoning history across framework boundaries; add only protocol-required transformations.
-- Distinguish API limitations, framework limitations, and adapter defects. Report unsupported or unverified behavior accurately.
-- Test protocol changes with representative request and response fixtures. Validate real EXAONE flows before claiming support; report skipped live checks.
-- Keep Python and TypeScript behavior aligned where their framework interfaces permit it.
+# Repository guidance
+
+- Keep each framework package independently buildable and installable. Test the built package when changing its packaging or public exports.
+- Preserve EXAONE reasoning, content, and metadata that the framework can represent. Reject unsupported input or response shapes explicitly, and document framework and API limitations separately.
+- Keep equivalent Python and TypeScript behavior aligned when their framework interfaces allow it.
+- Follow the relevant Strands harness-sdk provider conventions for code and user-facing documentation; keep the community-maintained status clear.
+- Cover protocol changes with representative fixtures. Distinguish fixture coverage from live API observations and report unverified behavior.
+- Run live EXAONE checks serially within the account's limits. Use synthetic inputs and avoid load tests. Never commit credentials, real response text, or reasoning; logprobs may contain generated tokens.
+- Retry only before output is exposed; never replay a partially delivered stream or tool call.
+- Record unexpected API behavior and its reproduction conditions in local `docs/`; keep credential-redacted request and response captures there when the user requests them. These working files must stay out of Git.
+- See `CONTRIBUTING.md` and the package READMEs for current setup and verification commands.

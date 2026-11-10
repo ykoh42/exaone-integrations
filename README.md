@@ -1,21 +1,31 @@
 # EXAONE Integrations
 
-Community-maintained integrations for the EXAONE API and agent frameworks. This project is not affiliated with LG AI Research.
+Model providers for using the EXAONE Chat Completions API with [Strands Agents](https://strandsagents.com/). This is a community-maintained project and is not affiliated with LG AI Research or the Strands Agents project.
 
-| Package | Directory | Status |
+| Language | Package | Status |
 | --- | --- | --- |
-| `strands-exaone` for Python | [`python/strands-exaone`](python/strands-exaone/) | Implemented, not published |
-| `strands-exaone` for TypeScript | [`typescript/strands-exaone`](typescript/strands-exaone/) | Implemented, not published |
+| Python | [`strands-exaone`](python/strands-exaone/) | Implemented; not published |
+| TypeScript | [`strands-exaone`](typescript/strands-exaone/) | Implemented; not published |
 
-Both packages implement Strands' model interface for K-EXAONE 2.5. They support streaming and non-streaming chat, separate reasoning content and its preservation across turns, tool calls, structured output requests, EXAONE generation options, and request-specific usage metadata. The package READMEs contain usage and configuration examples. Until release, install from a local checkout:
+Both providers support streamed and non-streamed responses, reasoning history, tool calls, structured output, and EXAONE response metadata. Select a language above for installation, examples, configuration, and API limitations.
 
-```sh
-python -m pip install ./python/strands-exaone
-npm install ./typescript/strands-exaone @strands-agents/sdk zod
+## Get started
+
+Clone this repository and run the following commands from its root. The packages are not yet published to PyPI or npm.
+
+```bash
+# Python, in your virtual environment
+python -m pip install -e ./python/strands-exaone
+
+# TypeScript / Node.js
+npm ci
+npm run build --workspace=strands-exaone
 ```
 
-Set `EXAONE_API_KEY` in your environment before running a provider. Do not commit API keys. See [CONTRIBUTING.md](CONTRIBUTING.md) for development and opt-in live checks.
+Set `EXAONE_API_KEY` in your environment before running an agent. See the package READMEs for examples and [CONTRIBUTING.md](CONTRIBUTING.md) for development checks.
 
-The [K-EXAONE 2.5 checklist](docs/k-exaone-2.5-checklist.md) distinguishes implemented, live-tested, fixture-tested, and unverified behavior. API observations are recorded for [November 10](docs/live-api-observations-2026-11-10.md) and [November 11](docs/live-api-observations-2026-11-11.md); the [provider design analysis](docs/strands-provider-design.md) compares the alternatives. Both providers expose one completion choice, as required by the Strands model interface; the separate EXAONE Tabular API is outside their scope.
+The providers adapt a single completion choice to Strands. EXAONE Tabular is a separate API and is outside this project's scope.
 
-The package setup draws on the [Strands extension template](https://github.com/strands-agents/extension-template). The workspace and development guidelines also draw on [web-llm-adapters](https://github.com/ykoh42/web-llm-adapters).
+## License
+
+This project is licensed under the [MIT License](LICENSE).

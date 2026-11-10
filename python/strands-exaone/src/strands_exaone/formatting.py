@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, cast
+
+from strands.types.content import ContentBlock, Message, Messages, SystemContentBlock
+from strands.types.tools import ToolChoice, ToolResult, ToolSpec, ToolUse
 
 
-def _text_of_result(result: dict[str, Any]) -> str:
+def _text_of_result(result: ToolResult) -> str:
     parts: list[str] = []
     for item in result.get("content", []):
         if "text" in item:
@@ -18,7 +21,7 @@ def _text_of_result(result: dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
-def _tool_call(tool: dict[str, Any]) -> dict[str, Any]:
+def _tool_call(tool: ToolUse) -> dict[str, Any]:
     return {
         "id": tool["toolUseId"],
         "type": "function",
@@ -29,7 +32,7 @@ def _tool_call(tool: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _reasoning_text(block: dict[str, Any]) -> str:
+def _reasoning_text(block: ContentBlock) -> str:
     reasoning = block["reasoningContent"]
     if reasoning.get("redactedContent") is not None:
         raise ValueError("EXAONE does not support redacted reasoning")
@@ -39,7 +42,7 @@ def _reasoning_text(block: dict[str, Any]) -> str:
     return value.get("text", "")
 
 
-def _message_parts(message: dict[str, Any]) -> tuple[list[str], list[str], list[dict[str, Any]], list[dict[str, Any]]]:
+def _message_parts(message: Message) -> tuple[list[str], list[str], list[dict[str, Any]], list[dict[str, Any]]]:
     text: list[str] = []
     reasoning: list[str] = []
     calls: list[dict[str, Any]] = []
@@ -61,7 +64,7 @@ def _message_parts(message: dict[str, Any]) -> tuple[list[str], list[str], list[
 
 
 def _system_messages(
-    system_prompt: str | None, system_prompt_content: list[dict[str, Any]] | None
+    system_prompt: str | None, system_prompt_content: list[SystemContentBlock] | None
 ) -> list[dict[str, Any]]:
     if system_prompt_content is not None:
         if any(set(block) != {"text"} for block in system_prompt_content):
@@ -70,7 +73,7 @@ def _system_messages(
     return [{"role": "system", "content": system_prompt}] if system_prompt is not None else []
 
 
-def _format_message(message: dict[str, Any]) -> list[dict[str, Any]]:
+def _format_message(message: Message) -> list[dict[str, Any]]:
     role = message["role"]
     if role not in {"user", "assistant"}:
         raise ValueError(f"Unsupported Strands message role: {role}")
@@ -90,9 +93,9 @@ def _format_message(message: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def format_messages(
-    messages: list[dict[str, Any]],
+    messages: Messages,
     system_prompt: str | None,
-    system_prompt_content: list[dict[str, Any]] | None,
+    system_prompt_content: list[SystemContentBlock] | None,
 ) -> list[dict[str, Any]]:
     """Build ordered wire messages without losing thinking or tool result IDs."""
     output = _system_messages(system_prompt, system_prompt_content)
@@ -101,7 +104,7 @@ def format_messages(
     return output
 
 
-def format_tools(specs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def format_tools(specs: list[ToolSpec]) -> list[dict[str, Any]]:
     """Convert Strands tool specifications to OpenAI-compatible functions."""
     return [
         {
@@ -116,12 +119,12 @@ def format_tools(specs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
-def format_tool_choice(choice: dict[str, Any]) -> str | dict[str, Any]:
+def format_tool_choice(choice: ToolChoice) -> str | dict[str, Any]:
     """Map a Strands tool choice to the Chat Completions wire format."""
     if "auto" in choice:
         return "auto"
     if "any" in choice:
         return "required"
     if "tool" in choice:
-        return {"type": "function", "function": {"name": choice["tool"]["name"]}}
+        return {"type": "function", "function": {"name": cast(dict[str, Any], choice)["tool"]["name"]}}
     raise ValueError("Unsupported tool choice")

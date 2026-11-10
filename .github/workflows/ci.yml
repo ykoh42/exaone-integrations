@@ -47,4 +47,10 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check
-      - run: npm pack --workspace=strands-exaone --dry-run
+      - name: Verify npm package in an independent project
+        run: |
+          npm pack --workspace=strands-exaone --pack-destination "$RUNNER_TEMP"
+          mkdir "$RUNNER_TEMP/exaone-package-check"
+          cd "$RUNNER_TEMP/exaone-package-check"
+          npm install --ignore-scripts "$RUNNER_TEMP"/strands-exaone-*.tgz
+          node --input-type=module -e "import { ExaoneModel } from 'strands-exaone'; import { Model } from '@strands-agents/sdk'; if (!(new ExaoneModel() instanceof Model)) process.exit(1)"

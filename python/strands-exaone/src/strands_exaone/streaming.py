@@ -9,7 +9,7 @@ from typing import Any
 
 import httpx
 
-from .errors import ExaoneError
+from .errors import ExaoneError, redact
 
 
 async def sse_data(response: httpx.Response) -> AsyncIterator[str]:
@@ -128,7 +128,7 @@ class StreamDecoder:
             yield {"contentBlockDelta": {"delta": {"toolUse": {"input": item.arguments}}}}
             yield {"contentBlockStop": {}}
 
-    def finish(self, *, require_done: bool) -> Iterator[dict[str, Any]]:
+    def finish(self, *, require_done: bool, secret: str = "") -> Iterator[dict[str, Any]]:
         """Complete the message only after an unambiguous end of stream."""
         if require_done and not self.done:
             raise ExaoneError("EXAONE stream ended without [DONE]")
@@ -138,8 +138,9 @@ class StreamDecoder:
             "length": "max_tokens",
             "content_filter": "content_filtered",
         }
-        if self.finish_reason not in reasons:
-            raise ExaoneError("EXAONE response ended without a supported finish reason")
+        if not isinstance(self.finish_reason, str) or self.finish_reason not in reasons:
+            reason = redact(self.finish_reason, secret) if isinstance(self.finish_reason, str) else None
+            raise ExaoneError(f"EXAONE response ended with unsupported finish reason: {reason!r}", finish_reason=reason)
         if bool(self.tools) != (self.finish_reason == "tool_calls"):
             raise ExaoneError("Tool calls and finish reason are inconsistent")
         if self.active is not None:

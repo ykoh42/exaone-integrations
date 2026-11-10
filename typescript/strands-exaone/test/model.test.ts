@@ -25,6 +25,10 @@ async function collect(model: ExaoneModel, messages: Message[] = [user()]) {
 }
 
 describe('ExaoneModel', () => {
+  it('explains both ways to provide the API key', async () => {
+    await expect(collect(new ExaoneModel({ apiKey: '' }))).rejects.toThrow(/apiKey.*EXAONE_API_KEY/)
+  })
+
   it('preserves reasoning, text and usage while formatting request options', async () => {
     const data = sse([event({ reasoning_content: '생각' }), event({ content: ' 답' }), event({}, 'stop'), wire([], { usage })])
     const fetcher = vi.fn(async () => response(data, 200, { 'x-request-id': 'request-1' }))

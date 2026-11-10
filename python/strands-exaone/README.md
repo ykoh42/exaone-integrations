@@ -1,17 +1,54 @@
-# strands-exaone
+# strands-exaone for Python
 
-A Python model provider connecting [Strands Agents](https://strandsagents.com/) to the EXAONE Chat Completions API. It preserves EXAONE reasoning alongside assistant messages, including across tool calls, and translates streamed text and tool calls into Strands events.
+Use the EXAONE Chat Completions API as a model provider for [Strands Agents](https://strandsagents.com/). This community-maintained package is not affiliated with LG AI Research or the Strands Agents project.
 
-This package targets `strands-agents` 1.64.x and Python 3.10 or newer. The package is not yet published; from this repository, install it with:
+## Quick start
 
-```sh
-pip install -e ./python/strands-exaone
+The package requires Python 3.10 or newer and `strands-agents` 1.64.x. It has not been published to PyPI. From the root of a checkout, install it in your virtual environment:
+
+```bash
+python -m pip install -e ./python/strands-exaone
 export EXAONE_API_KEY='your-api-key'
 ```
 
-The environment variable must be set by your shell or application; the package does not load `.env` files. You can alternatively pass `api_key=` to `ExaoneModel`.
+```python
+from strands import Agent
+from strands_exaone import ExaoneModel
 
-## Agent and tools
+model = ExaoneModel(preserve_thinking=True)
+agent = Agent(model=model)
+response = agent("Explain what an AI agent is in one sentence.")
+print(response)
+```
+
+The provider reads `EXAONE_API_KEY` when the model is constructed. You can instead pass `api_key=...`. The package does not load `.env` files automatically.
+
+## Configuration
+
+| Option | Description | Default |
+| --- | --- | --- |
+| `model_id` | EXAONE model ID. | `k-exaone_v2.5` |
+| `base_url` | API base URL, including `/v1`. | `https://api.exaone.ai/v1` |
+| `stream` | Request a streaming response; `False` adapts a non-streaming response to Strands events. | `True` |
+| `max_tokens`, `temperature`, `top_p`, `top_k`, `presence_penalty` | Generation parameters. | Service defaults when omitted |
+| `reasoning_effort` | EXAONE reasoning setting. | Service default |
+| `preserve_thinking`, `enable_thinking` | EXAONE `chat_template_kwargs` for previous reasoning and reasoning generation. | Service defaults |
+| `include_usage` | Set `stream_options.include_usage` on streaming requests. | Omitted |
+| `response_format` | Response format for ordinary agent calls. | Omitted |
+| `timeout` | HTTPX timeout in seconds for each attempt. | `120` |
+| `context_window_limit` | Context window reported to Strands, in tokens. | `524288` |
+| `max_retries`, `base_retry_delay`, `max_retry_delay` | Optional retry policy. | `0` retries; `0.5` and `30` seconds |
+| `metadata_callback` | Callback for successful request metadata. | None |
+| `http_client` | Caller-owned `httpx.AsyncClient` for custom transport or headers. | Provider-managed client |
+| `params` | Additional Chat Completions parameters. | None |
+
+Explicit options take precedence over matching `params` values. The provider manages `model`, `messages`, `stream`, `stream_options`, `tools`, `tool_choice`, and `response_format`; do not set them in `params`. Strands represents one completion, so `n` must be 1. Supported generation settings can vary by service version; see the [EXAONE API documentation](https://docs.exaone.ai/en/docs/k-exaone-2.5).
+
+## Reasoning and tools
+
+Reasoning is stored separately from the final answer and sent back as `reasoning_content` when it is present in the Strands conversation. Set `preserve_thinking=True` to request preservation of previous reasoning. `enable_thinking` is a separate setting; its observed behavior has differed from the documentation, so verify it for your use case.
+
+In one live request with `enable_thinking=False`, the API returned `reasoning_tokens=0` and no separate `reasoning_content`, but the response `content` contained a `<think>` or `</think>` tag. A separate request with `enable_thinking=True` returned both reasoning tokens and separate reasoning content. These individual observations do not establish a general rule: `False` does not guarantee that reasoning will be absent from the visible response.
 
 ```python
 from strands import Agent, tool
@@ -19,22 +56,16 @@ from strands_exaone import ExaoneModel
 
 
 @tool
-def get_weather(city: str) -> str:
-    """Return the weather for a city."""
-    return f"The weather in {city} is sunny."
+def get_number() -> int:
+    """Return the example number."""
+    return 7
 
 
-model = ExaoneModel(
-    model_id="k-exaone_v2.5",
-    preserve_thinking=True,
-    enable_thinking=True,
-    max_tokens=2048,
-)
-agent = Agent(model=model, tools=[get_weather])
-agent("What is the weather in Seoul?")
+agent = Agent(model=ExaoneModel(preserve_thinking=True), tools=[get_number])
+agent("Use the tool to get the number, then add 3.")
 ```
 
-Strands retains the returned reasoning blocks in the conversation. When sending that history back to EXAONE, the provider maps them to `reasoning_content` and keeps tool requests and results linked. `preserve_thinking` and `enable_thinking` are distinct EXAONE `chat_template_kwargs`; set them explicitly according to the behavior needed. Refer to the EXAONE documentation for model-specific support and defaults.
+The provider assembles streamed tool-call arguments before exposing calls to Strands. It accepts text, reasoning, tool calls, and text/JSON tool results; unsupported content types are rejected.
 
 ## Structured output
 
@@ -54,17 +85,17 @@ answer = agent.structured_output(Answer, "Return Seoul and a temperature of 20 d
 print(answer.city, answer.temperature_c)
 ```
 
-The provider sends a JSON Schema and validates the response against the Pydantic model. Structured output uses a non-streaming request and requires a normally completed response. For JSON object mode with ordinary agent calls, configure `ExaoneModel(response_format={"type": "json_object"})`. A structured-output call supplies its own schema and takes precedence over that setting.
+The provider requests JSON Schema output without streaming and validates the result against the Pydantic model. For ordinary model calls, `response_format={"type": "json_object"}` requests JSON object mode. A structured-output call supplies its own schema.
 
-## Configuration
+EXAONE returned `finish_reason=abort` on some observed structured-output requests; the cause is not established. The provider reports an error instead of treating an aborted result as valid. Schema support may vary with the service and schema.
 
-The constructor supports `model_id`, `base_url`, `stream`, `max_tokens`, `temperature`, `top_p`, `top_k`, `presence_penalty`, `reasoning_effort`, `preserve_thinking`, `enable_thinking`, `include_usage`, `response_format`, `timeout`, and `context_window_limit`. Defaults are left to the service where possible. `stream=False` requests a non-streaming completion while still presenting Strands events to the agent. `max_tokens=0` and boolean `False` are passed through without being discarded.
+## Retries
 
-Use `params` for additional API request fields, such as `params={"parallel_tool_calls": False}` or additional `chat_template_kwargs`. Explicit constructor settings take precedence over matching values in `params`. Fields managed by Strands, including `messages`, `model`, `tools`, `tool_choice`, `stream`, `stream_options`, and `response_format`, cannot be supplied in `params`. Strands consumes one completion, so `n` must be 1. EXAONE model and endpoint capabilities can differ; consult the service documentation before enabling an option.
+Retries are disabled by default. Set `max_retries=2` to allow two additional attempts for connection failures before a response, or HTTP 429, 500, 502, 503, and 504. The provider never retries after a successful response starts or replays a partially delivered stream.
 
-Only text content, reasoning, tool calls, and text/JSON tool results are supported. Unsupported content types raise an error instead of being silently removed. The provider does not add automatic HTTP retries.
+The provider honors `retry-after` in seconds or HTTP-date form and `retry-after-ms`, using the longer valid delay when both are present. If the server's delay exceeds `max_retry_delay`, it returns the original error rather than retrying early. Without a usable header, it uses capped exponential backoff with jitter. Cancellation interrupts requests and retry waits. `timeout` applies per HTTPX attempt, not to the overall operation including retries and waits. Strands or application-level retries are separate.
 
-## Per-request metadata and errors
+## Metadata and errors
 
 ```python
 from strands_exaone import ExaoneModel
@@ -77,8 +108,12 @@ def on_metadata(metadata: dict) -> None:
 model = ExaoneModel(include_usage=True, metadata_callback=on_metadata)
 ```
 
-On successful completion the callback runs once per request with `status_code`, `request_id`, selected response `headers`, and raw `usage` when provided. This includes EXAONE-specific reasoning token usage when returned by the service. Concurrent requests each produce their own callback. The callback can be synchronous or asynchronous; callback exceptions propagate to the caller. It is not called on HTTP errors or interrupted streams. The API key is redacted from callback metadata and exposed errors. Strands' ordinary usage event contains the standard input, output, and total token counts.
+On successful completion, the callback receives `status_code`, `request_id`, selected response `headers`, `usage`, and `response`. Raw usage can include `reasoning_tokens`. Available response metadata includes top-level IDs, model, service and weight metadata; choice-level `finish_reason`, `matched_stop`, and `logprobs`; and selected message fields. Streaming logprob and annotation arrays are accumulated in order; refusal fragments are joined, while audio and legacy function-call fragments remain in `message_deltas`. Fields are present only when supplied by the service. The callback may be synchronous or asynchronous and is not called for failed or interrupted streams.
 
-`ExaoneThrottledError` is also a Strands `ModelThrottledException`; its `headers` preserve supported rate-limit and retry information. Other service errors expose `status_code`, `code`, `param`, `request_id`, `headers`, and the sanitized response body on `ExaoneError`. Context-window errors recognized from the response are also Strands `ContextWindowOverflowException` instances. Network errors from HTTPX may propagate separately. The provider does not retry 429 responses.
+**Metadata can contain user or generated content**, including logprob tokens, refusal text, audio, and function arguments. It is not size-limited and can grow with the response. API keys are redacted, but metadata should only be logged or shared under an appropriate data policy. The provider does not copy ordinary assistant content, reasoning, or tool calls into response metadata.
 
-Advanced users may pass an `httpx.AsyncClient` as `http_client`, for example to configure a proxy or default request headers. The caller owns and closes that client; internally created clients and response streams are closed by the provider. Strands cancellation signals abort in-flight reads and close the response.
+`ExaoneThrottledError` is a Strands `ModelThrottledException` and preserves request ID, rate-limit headers, and a sanitized error body. Other API errors expose details through `ExaoneError`; recognized context-window errors also implement Strands' `ContextWindowOverflowException`. An injected `http_client` remains caller-owned.
+
+## License
+
+[MIT](LICENSE)

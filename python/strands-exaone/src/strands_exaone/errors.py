@@ -20,6 +20,7 @@ class ExaoneError(Exception):
         request_id: str | None = None,
         headers: dict[str, str] | None = None,
         body: Any = None,
+        finish_reason: str | None = None,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
@@ -28,6 +29,7 @@ class ExaoneError(Exception):
         self.request_id = request_id
         self.headers = headers or {}
         self.body = body
+        self.finish_reason = finish_reason
 
 
 class ExaoneThrottledError(ModelThrottledException):
@@ -61,7 +63,7 @@ def redact(value: Any, secret: str) -> Any:
     if isinstance(value, str):
         return value.replace(secret, "[REDACTED]") if secret else value
     if isinstance(value, dict):
-        return {key: redact(item, secret) for key, item in value.items()}
+        return {redact(key, secret): redact(item, secret) for key, item in value.items()}
     if isinstance(value, list):
         return [redact(item, secret) for item in value]
     return value

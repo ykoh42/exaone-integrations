@@ -1,29 +1,43 @@
 # Contributing
 
-Use the Node.js version in `.node-version` and Python 3.10 or newer. Install dependencies and run the checks:
+This repository contains independently installable Python and TypeScript Strands model providers. Run the commands below from the repository root.
 
-```sh
-npm ci
-npm run check
+## Development setup
+
+Use Python 3.10 or newer and the Node.js version in `.node-version`. Create and activate a Python virtual environment, then install the development dependencies:
+
+```bash
 python -m pip install -e './python/strands-exaone[dev]'
+npm ci
+```
+
+## Checks
+
+```bash
+# Python
 ruff check python/strands-exaone
 ruff format --check python/strands-exaone
 complexipy python/strands-exaone/src --max-complexity-allowed 15
 python -m pytest python/strands-exaone/tests
 (cd python/strands-exaone && hatch build)
+
+# TypeScript
+npm run check
 npm pack --workspace=strands-exaone --dry-run
 ```
 
-Tests use pytest and Vitest, following the Strands SDK. Python and TypeScript enforce a cognitive complexity threshold of 15 for source functions; the tools use similar metrics, but their scores are not directly comparable.
+The packages use pytest and Vitest. Python and TypeScript checks enforce a cognitive complexity threshold of 15; the scores from the two tools are not directly comparable. CI builds a Python wheel and installs the npm tarball in a separate project.
 
-## Opt-in live tests
+## Live tests
 
-Live tests send synthetic prompts to EXAONE and consume API quota. Set `EXAONE_API_KEY` in the environment, install both development workspaces, and run these serially (not concurrently):
+Live tests are optional. They send synthetic prompts to EXAONE and consume API quota. Set `EXAONE_API_KEY` in your environment, install the development dependencies, and run the tests one at a time:
 
-```sh
+```bash
 python scripts/live-smoke-python.py
 npm run build --workspace=strands-exaone
 node scripts/live-smoke-typescript.mjs
 ```
 
-The TypeScript smoke test also compares the Strands OpenAI chat provider. For the separate Python comparison, install `strands-agents[openai]` and run `python scripts/live-compare-python.py`. The scripts rate-limit requests, record only boolean/counter observations, and do not print the API key or model output. They do not automatically load `.env` files. Never commit API keys or model outputs containing sensitive data. API service conditions and rates can change; local mock tests do not require credentials.
+The TypeScript smoke test includes a comparison with the Strands OpenAI chat provider. To run the Python comparison, install `strands-agents[openai]` and run `python scripts/live-compare-python.py`.
+
+The scripts do not load `.env` automatically. Run live checks serially within the account's limits and use synthetic inputs. Never commit API keys, generated responses, or reasoning. Logprob tokens and other response metadata can also contain generated or user-provided content.
