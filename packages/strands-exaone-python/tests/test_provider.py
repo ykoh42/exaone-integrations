@@ -1043,3 +1043,35 @@ async def test_valid_usage_is_forwarded_to_sdk_metrics(value: int) -> None:
     finally:
         await client.aclose()
     assert received[-1]["metadata"]["usage"] == {"inputTokens": value, "outputTokens": value, "totalTokens": value}
+
+
+@pytest.mark.parametrize("default_callback", [True, False])
+async def test_agent_default_callback_prints_reasoning_but_none_preserves_history(
+    capsys: Any, default_callback: bool
+) -> None:
+    requests: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        if len(requests) == 1:
+            payload = sse(
+                chunk({"reasoning_content": "SYNTHETIC_REASONING"}),
+                chunk({"content": "VISIBLE_ANSWER"}),
+                chunk(finish="stop"),
+            )
+        else:
+            payload = sse(chunk({"content": "next"}), chunk(finish="stop"))
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=payload)
+
+    model, client = model_for(handler)
+    try:
+        agent = Agent(model=model) if default_callback else Agent(model=model, callback_handler=None)
+        result = await agent.invoke_async("Hello.")
+        output = capsys.readouterr().out
+        await agent.invoke_async("Next turn.")
+    finally:
+        await client.aclose()
+    assert ("SYNTHETIC_REASONING" in output) is default_callback
+    assert ("VISIBLE_ANSWER" in output) is default_callback
+    assert str(result).strip() == "VISIBLE_ANSWER"
+    assert any(message.get("reasoning_content") == "SYNTHETIC_REASONING" for message in requests[1]["messages"])

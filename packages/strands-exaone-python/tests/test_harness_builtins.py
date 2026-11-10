@@ -381,3 +381,268 @@ async def test_harness_local_mcp_tool_round_trip(tmp_path: Any) -> None:
     messages = requests[1]["messages"]
     assert any(message.get("reasoning_content") == "synthetic" for message in messages)
     assert any(message.get("tool_call_id") == "call_1" and "7" in message["content"] for message in messages)
+
+
+async def test_harness_multifile_unicode_paths_recovers_from_missing_file(tmp_path: Any) -> None:
+    """Exercise synthetic file work through the real harness, including a failed read."""
+    import shlex
+
+    workspace = tmp_path / "한글 작업 공간"
+    workspace.mkdir()
+    first, second = workspace / "파일 하나.txt", workspace / "파일 둘.txt"
+    requests: list[dict[str, Any]] = []
+    steps = [
+        [("missing", "read", {"path": str(first)})],
+        [
+            ("write_a", "write", {"path": str(first), "content": "찾을 값: 이전 하나\n"}),
+            ("write_b", "write", {"path": str(second), "content": "찾을 값: 이전 둘\n"}),
+        ],
+        [
+            ("edit_a", "edit", {"path": str(first), "old_str": "이전 하나", "new_str": "완료 하나"}),
+            ("edit_b", "edit", {"path": str(second), "old_str": "이전 둘", "new_str": "완료 둘"}),
+        ],
+        [("search", "shell", {"command": f"grep -n '찾을 값' {shlex.quote(str(first))} {shlex.quote(str(second))}"})],
+        [
+            (
+                "program",
+                "programmatic_tool_caller",
+                {
+                    "code": "\n".join(
+                        [
+                            f"a = await read(path={str(first)!r})",
+                            f"b = await read(path={str(second)!r})",
+                            "print(a)",
+                            "print(b)",
+                        ]
+                    )
+                },
+            )
+        ],
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        index = len(requests) - 1
+        if index == len(steps):
+            return response(events(chunk({"content": "done"}), chunk(finish="stop")))
+        calls = [
+            {
+                "index": pos,
+                "id": ident,
+                "function": {"name": name, "arguments": json.dumps(arguments, ensure_ascii=False)},
+            }
+            for pos, (ident, name, arguments) in enumerate(steps[index])
+        ]
+        return response(
+            events(
+                chunk({"reasoning_content": f"step {index}"}), chunk({"tool_calls": calls}), chunk(finish="tool_calls")
+            )
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        agent = create_harness(
+            model=ExaoneModel(api_key="test-only-key", http_client=client),
+            builtin_tools=["read", "write", "edit", "shell", "programmatic_tool_caller"],
+            builtin_plugins=[],
+            session=False,
+            memory=False,
+            skills=False,
+            caching=False,
+            callback_handler=None,
+            retry_strategy=None,
+        )
+        await agent.invoke_async("Perform the synthetic local file task.")
+    assert first.read_text() == "찾을 값: 완료 하나\n"
+    assert second.read_text() == "찾을 값: 완료 둘\n"
+    assert len(requests) == len(steps) + 1
+    results = {
+        message["tool_call_id"]: message["content"] for message in requests[-1]["messages"] if message["role"] == "tool"
+    }
+    assert set(results) == {ident for step in steps for ident, _, _ in step}
+    assert any(word in results["missing"].lower() for word in ("not found", "no such file", "does not exist"))
+    assert "완료 하나" in results["search"] and "완료 둘" in results["search"]
+    assert "완료 하나" in results["program"] and "완료 둘" in results["program"]
+
+
+async def test_harness_large_file_read_and_offloaded_search(tmp_path: Any) -> None:
+    """Exercise synthetic large tool arguments, offload, and retrieval."""
+    import re
+
+    path = tmp_path / "큰 문서.txt"
+    text = (
+        "\n".join(
+            f"행 {index:04d} " + "가" * 80 + (" TARGET_SYNTHETIC" if index == 200 else "") for index in range(400)
+        )
+        + "\n"
+    )
+    requests: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        match len(requests):
+            case 1:
+                ident, name, arguments = "write_1", "write", {"path": str(path), "content": text}
+            case 2:
+                ident, name, arguments = "read_1", "read", {"path": str(path)}
+            case 3:
+                result = next(
+                    message for message in requests[-1]["messages"] if message.get("tool_call_id") == "read_1"
+                )
+                match = re.search(r"\[Stored references:\]\s+(\S+)\s+\(text,", result["content"])
+                assert match is not None
+                ident, name, arguments = (
+                    "retrieve_1",
+                    "retrieve_offloaded_content",
+                    {"reference": match.group(1), "pattern": "TARGET_SYNTHETIC", "context_lines": 0},
+                )
+            case 4:
+                return response(events(chunk({"content": "done"}), chunk(finish="stop")))
+            case _:
+                raise AssertionError("Unexpected mock request")
+        call = {
+            "tool_calls": [
+                {
+                    "index": 0,
+                    "id": ident,
+                    "function": {"name": name, "arguments": json.dumps(arguments, ensure_ascii=False)},
+                }
+            ]
+        }
+        return response(events(chunk(call), chunk(finish="tool_calls")))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        agent = create_harness(
+            model=ExaoneModel(api_key="test-only-key", http_client=client),
+            builtin_tools=["read", "write"],
+            builtin_plugins=[],
+            session=False,
+            memory=False,
+            skills=False,
+            caching=False,
+            callback_handler=None,
+            retry_strategy=None,
+        )
+        await agent.invoke_async("Write, inspect, and search a large synthetic file.")
+    assert path.read_text() == text
+    assert len(requests) == 4
+    results = {
+        message["tool_call_id"]: message["content"] for message in requests[-1]["messages"] if message["role"] == "tool"
+    }
+    assert "offloaded" in results["read_1"].lower()
+    assert "TARGET_SYNTHETIC" in results["retrieve_1"]
+    assert "행 0200" in results["retrieve_1"]
+
+
+async def test_harness_parallel_background_shell_and_file_write(tmp_path: Any) -> None:
+    """Exercise built-in foreground and background tools in one synthetic turn."""
+    import shlex
+
+    shell_path = tmp_path / "백그라운드 결과.txt"
+    write_path = tmp_path / "일반 결과.txt"
+    requests: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        if len(requests) == 1:
+            calls = [
+                {
+                    "index": 0,
+                    "id": "shell_1",
+                    "function": {
+                        "name": "shell",
+                        "arguments": json.dumps(
+                            {
+                                "command": f"printf '%s' 'BACKGROUND_SYNTHETIC' > {shlex.quote(str(shell_path))}",
+                                "_background_execution": True,
+                            }
+                        ),
+                    },
+                },
+                {
+                    "index": 1,
+                    "id": "write_1",
+                    "function": {
+                        "name": "write",
+                        "arguments": json.dumps(
+                            {"path": str(write_path), "content": "FOREGROUND_SYNTHETIC"}, ensure_ascii=False
+                        ),
+                    },
+                },
+            ]
+            return response(
+                events(
+                    chunk({"reasoning_content": "run both"}), chunk({"tool_calls": calls}), chunk(finish="tool_calls")
+                )
+            )
+        return response(events(chunk({"content": "done"}), chunk(finish="stop")))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        agent = create_harness(
+            model=ExaoneModel(api_key="test-only-key", http_client=client),
+            builtin_tools=["shell", "write"],
+            builtin_plugins=[],
+            session=False,
+            memory=False,
+            skills=False,
+            caching=False,
+            callback_handler=None,
+            retry_strategy=None,
+        )
+        await agent.invoke_async("Run two local synthetic file tasks.")
+    assert shell_path.read_text() == "BACKGROUND_SYNTHETIC"
+    assert write_path.read_text() == "FOREGROUND_SYNTHETIC"
+    history = [message for request in requests[1:] for message in request["messages"]]
+    assert any(message.get("tool_call_id") == "write_1" for message in history)
+    assert any(
+        message.get("tool_call_id") == "shell_1" and "background" in message["content"].lower() for message in history
+    )
+    assert any(message.get("reasoning_content") == "run both" for message in history)
+
+
+async def test_harness_programmatic_tool_recovers_from_read_failure(tmp_path: Any) -> None:
+    """Recover from a failed nested tool and continue with a valid file."""
+    existing = tmp_path / "있는 파일.txt"
+    missing = tmp_path / "없는 파일.txt"
+    existing.write_text("VALID_SYNTHETIC_VALUE\n")
+    requests: list[dict[str, Any]] = []
+    program = (
+        f"try:\n    await read(path={str(missing)!r})\n"
+        "except RuntimeError:\n    print('RECOVERED_SYNTHETIC')\n"
+        f"print(await read(path={str(existing)!r}))"
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        if len(requests) == 1:
+            call = {
+                "tool_calls": [
+                    {
+                        "index": 0,
+                        "id": "program_1",
+                        "function": {
+                            "name": "programmatic_tool_caller",
+                            "arguments": json.dumps({"code": program}, ensure_ascii=False),
+                        },
+                    }
+                ]
+            }
+            return response(events(chunk(call), chunk(finish="tool_calls")))
+        return response(events(chunk({"content": "done"}), chunk(finish="stop")))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        agent = create_harness(
+            model=ExaoneModel(api_key="test-only-key", http_client=client),
+            builtin_tools=["read", "programmatic_tool_caller"],
+            builtin_plugins=[],
+            session=False,
+            memory=False,
+            skills=False,
+            caching=False,
+            callback_handler=None,
+            retry_strategy=None,
+        )
+        await agent.invoke_async("Inspect synthetic files and recover from missing data.")
+    assert len(requests) == 2
+    result = next(message for message in requests[-1]["messages"] if message.get("tool_call_id") == "program_1")
+    assert "RECOVERED_SYNTHETIC" in result["content"]
+    assert "VALID_SYNTHETIC_VALUE" in result["content"]
