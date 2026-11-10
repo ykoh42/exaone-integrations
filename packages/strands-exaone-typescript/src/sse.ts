@@ -7,22 +7,32 @@ export class ResponseReadError extends Error {
 
 /** Incremental SSE line parser. */
 class SSEParser {
-  private buffer = ''
+  private readonly fragments: string[] = []
   private data: string[] = []
+  private afterCR = false
 
-  push(text: string, end: boolean): string[] {
-    this.buffer += text
+  private startOffset(text: string): number {
+    if (!this.afterCR || !text.length) return 0
+    this.afterCR = false
+    return text[0] === '\n' ? 1 : 0
+  }
+
+  push(text: string): string[] {
     const result: string[] = []
-    let newline = this.buffer.search(/[\r\n]/)
-    while (newline !== -1) {
-      const terminator = this.buffer[newline]
-      if (terminator === '\r' && newline === this.buffer.length - 1 && !end) break
-      const skip = terminator === '\r' && this.buffer[newline + 1] === '\n' ? 2 : 1
-      const line = this.buffer.slice(0, newline)
-      this.buffer = this.buffer.slice(newline + skip)
-      this.line(line, result)
-      newline = this.buffer.search(/[\r\n]/)
+    let start = this.startOffset(text)
+    for (let index = start; index < text.length; index++) {
+      const char = text[index]
+      if (char !== '\r' && char !== '\n') continue
+      if (index > start) this.fragments.push(text.slice(start, index))
+      this.line(this.fragments.join(''), result)
+      this.fragments.length = 0
+      if (char === '\r') {
+        if (text[index + 1] === '\n') index++
+        else if (index + 1 === text.length) this.afterCR = true
+      }
+      start = index + 1
     }
+    if (start < text.length) this.fragments.push(text.slice(start))
     // EOF does not dispatch a pending event; the stream requires a blank line.
     return result
   }
@@ -54,7 +64,7 @@ export async function* readSSE(body: ReadableStream<Uint8Array>): AsyncGenerator
       }
       complete = chunk.done
       const text = decoder.decode(chunk.value, { stream: !chunk.done })
-      yield* parser.push(text, chunk.done)
+      yield* parser.push(text)
       if (chunk.done) break
     }
   } finally {

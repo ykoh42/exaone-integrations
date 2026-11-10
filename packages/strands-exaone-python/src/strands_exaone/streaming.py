@@ -58,7 +58,7 @@ async def sse_data(response: httpx.Response) -> AsyncIterator[str]:
 class _Tool:
     ident: str = ""
     name: str = ""
-    arguments: str = ""
+    arguments: list[str] = field(default_factory=list)
 
 
 def _validate_tool_arguments(raw: str) -> None:
@@ -131,7 +131,9 @@ class StreamDecoder:
             raise ExaoneError("Invalid EXAONE tool-call delta: expected a function object")
         item.ident += _tool_text(fragment.get("id"))
         item.name += _tool_text(function.get("name"))
-        item.arguments += _tool_text(function.get("arguments"))
+        arguments = _tool_text(function.get("arguments"))
+        if arguments:
+            item.arguments.append(arguments)
 
     def feed(self, payload: dict[str, Any]) -> Iterator[dict[str, Any]]:
         """Consume one stream chunk (or an equivalent synthetic non-stream chunk)."""
@@ -172,18 +174,20 @@ class StreamDecoder:
 
     def _tool_events(self) -> Iterator[dict[str, Any]]:
         ids: set[str] = set()
+        validated: list[tuple[_Tool, str]] = []
         for index in sorted(self.tools):
             item = self.tools[index]
-            if not item.ident or not item.name or not item.arguments:
+            arguments = "".join(item.arguments)
+            if not item.ident or not item.name or not arguments:
                 raise ExaoneError("Incomplete tool call in EXAONE response")
             if item.ident in ids:
                 raise ExaoneError("Duplicate tool call IDs in EXAONE response")
             ids.add(item.ident)
-            _validate_tool_arguments(item.arguments)
-        for index in sorted(self.tools):
-            item = self.tools[index]
+            _validate_tool_arguments(arguments)
+            validated.append((item, arguments))
+        for item, arguments in validated:
             yield {"contentBlockStart": {"start": {"toolUse": {"name": item.name, "toolUseId": item.ident}}}}
-            yield {"contentBlockDelta": {"delta": {"toolUse": {"input": item.arguments}}}}
+            yield {"contentBlockDelta": {"delta": {"toolUse": {"input": arguments}}}}
             yield {"contentBlockStop": {}}
 
     def finish(self, *, require_done: bool, secret: str = "") -> Iterator[dict[str, Any]]:

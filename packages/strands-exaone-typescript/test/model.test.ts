@@ -404,6 +404,20 @@ describe('ExaoneModel', () => {
 })
 
 describe('SSE parser', () => {
+  it.each([1, 7, 1024])('preserves a large Unicode event split into %i-byte fragments', async (fragment) => {
+    const content = '한a'.repeat(40000)
+    const bytes = new TextEncoder().encode(`\uFEFFdata: ${content}\r\ndata: tail\r\n\r\n`)
+    let offset = 0
+    const stream = new ReadableStream<Uint8Array>({ pull(controller) {
+      if (offset >= bytes.length) return controller.close()
+      controller.enqueue(bytes.subarray(offset, Math.min(offset + fragment, bytes.length)))
+      offset += fragment
+    } })
+    const events = []
+    for await (const value of readSSE(stream)) events.push(value)
+    expect(events).toEqual([`${content}\ntail`])
+  })
+
   it.each(['\n', '\r', '\r\n'])('strips a split leading BOM, dispatches blank-line events and discards the incomplete tail (%j)', async (newline) => {
     const bytes = new TextEncoder().encode(`\uFEFFdata: 안녕${newline}${newline}data: pending${newline}`)
     const stream = new ReadableStream<Uint8Array>({ start(controller) {

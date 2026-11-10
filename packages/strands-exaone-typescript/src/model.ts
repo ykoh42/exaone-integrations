@@ -6,6 +6,7 @@
 import { Model, ModelError, ModelNetworkError, ModelThrottledError, ContextWindowOverflowError } from '@strands-agents/sdk'
 import type { Message, ModelStreamEvent, StreamOptions, StopReason } from '@strands-agents/sdk'
 import { z } from 'zod'
+import { copyConfig } from './config.js'
 import { formatMessages } from './messages.js'
 import { redactMetadata, ResponseMetadataCollector } from './metadata.js'
 import { sendWithRetry, validateRetryConfig } from './retry.js'
@@ -347,11 +348,16 @@ function safeTransportCause(error: unknown, key: string): Error {
   return safe
 }
 
-async function fetchResponse(config: ExaoneModelConfig, request: Record<string, unknown>, key: string, signal: AbortSignal): Promise<Response> {
+/** Serialize once so retries send the same request, without exposing input on failure. */
+function requestBody(request: Record<string, unknown>): string | undefined {
+  try { return JSON.stringify(request) } catch { throw new ModelError('EXAONE request could not be serialized as JSON') }
+}
+
+async function fetchResponse(config: ExaoneModelConfig, body: string | undefined, key: string, signal: AbortSignal): Promise<Response> {
   const transport = config.fetch ?? globalThis.fetch
   const url = `${(config.baseURL ?? 'https://api.exaone.ai/v1').replace(/\/+$/, '')}/chat/completions`
   try {
-    return await transport(url, { method: 'POST', headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' }, body: JSON.stringify(request), signal })
+    return await transport(url, { method: 'POST', headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' }, ...(body === undefined ? {} : { body }), signal })
   } catch (error) {
     if (signal.aborted) throw signal.reason
     throw new ModelNetworkError('EXAONE network request failed', { cause: safeTransportCause(error, key) })
@@ -376,18 +382,18 @@ export class ExaoneModel extends Model<ExaoneModelConfig> {
   constructor(config: ExaoneModelConfig = {}) {
     super()
     validateRetryConfig(config)
-    this._config = { modelId: 'k-exaone_v2.5', contextWindowLimit: 524288, ...config }
+    this._config = { modelId: 'k-exaone_v2.5', contextWindowLimit: 524288, ...copyConfig(config) }
   }
   /** Update the model configuration. Invalid retry settings leave the current configuration unchanged. */
   override updateConfig(config: Partial<ExaoneModelConfig>): void {
-    const updated = { ...this._config, ...config }
+    const updated = { ...this._config, ...copyConfig(config) }
     validateRetryConfig(updated)
     this._config = updated
   }
   /** Get the model configuration without the API key. */
   override getConfig(): ExaoneModelConfig {
     const { apiKey: _key, ...safe } = this._config
-    return { ...safe }
+    return copyConfig(safe)
   }
   /**
    * Stream an EXAONE response as Strands model events.
@@ -400,12 +406,13 @@ export class ExaoneModel extends Model<ExaoneModelConfig> {
     const config = { ...this._config }
     const key = getKey(config)
     const request = requestParameters(config, messages, options)
+    const body = requestBody(request)
     const controller = new AbortController()
     const signals = [controller.signal]
     if (options?.cancelSignal) signals.push(options.cancelSignal)
     if (config.timeoutMs !== undefined) signals.push(AbortSignal.timeout(config.timeoutMs))
     const signal = AbortSignal.any(signals)
-    const response = await sendWithRetry(config, signal, () => fetchResponse(config, request, key, signal))
+    const response = await sendWithRetry(config, signal, () => fetchResponse(config, body, key, signal))
     try {
       if (!response.ok) await throwHttpError(response, key)
       const mapper = new EventMapper(key)

@@ -613,3 +613,42 @@ async def test_http_status_response_hook_retains_only_safe_status() -> None:
     assert not hasattr(error, "response")
     assert error.__cause__ is None
     assert error.__context__ is None
+
+
+async def test_structured_output_uses_request_config_snapshot_during_retry() -> None:
+    import asyncio
+
+    from pydantic import BaseModel
+
+    class Output(BaseModel):
+        value: int
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    requests: list[dict[str, Any]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        if len(requests) == 1:
+            entered.set()
+            await release.wait()
+            raise httpx.ConnectError("synthetic failure", request=request)
+        return httpx.Response(200, json={"choices": [{"finish_reason": "stop", "message": {"content": '{"value":7}'}}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        model = ExaoneModel(
+            api_key="test-only-key", http_client=client, max_retries=1, base_retry_delay=0, temperature=0.4
+        )
+
+        async def collect_structured() -> list[dict[str, Any]]:
+            return [event async for event in model.structured_output(Output, MESSAGE)]
+
+        task = asyncio.create_task(collect_structured())
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        model.update_config(max_retries=0, temperature=0.7)
+        release.set()
+        output = await task
+        later = await collect_structured()
+    assert output == [{"output": Output(value=7)}]
+    assert later == [{"output": Output(value=7)}]
+    assert [request["temperature"] for request in requests] == [0.4, 0.4, 0.7]

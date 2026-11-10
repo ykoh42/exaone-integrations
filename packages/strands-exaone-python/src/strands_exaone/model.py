@@ -369,7 +369,7 @@ class ExaoneModel(Model):
 
     @override
     def update_config(self, **model_config: Any) -> None:
-        """Update the model configuration with the provided arguments.
+        """Update the model configuration for requests that have not started.
 
         Args:
             **model_config: Configuration overrides.
@@ -382,12 +382,12 @@ class ExaoneModel(Model):
         self._config = updated
 
     @asynccontextmanager
-    async def _client(self) -> AsyncIterator[httpx.AsyncClient]:
+    async def _client(self, config: dict[str, Any]) -> AsyncIterator[httpx.AsyncClient]:
         if self._http_client is not None:
             yield self._http_client
             return
         context = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-        async with httpx.AsyncClient(verify=context, timeout=self._config["timeout"]) as client:
+        async with httpx.AsyncClient(verify=context, timeout=config["timeout"]) as client:
             yield client
 
     def _request(
@@ -400,8 +400,9 @@ class ExaoneModel(Model):
         *,
         stream: bool,
         response_format: dict[str, Any] | None = None,
+        config: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        config = self._config
+        config = self._config if config is None else config
         params = deepcopy(config.get("params") or {})
         body: dict[str, Any] = {
             **params,
@@ -435,30 +436,29 @@ class ExaoneModel(Model):
         client: httpx.AsyncClient,
         body: dict[str, Any],
         signal: threading.Event | None,
+        config: dict[str, Any],
     ) -> httpx.Response:
         request = client.build_request(
             "POST",
-            self._config["base_url"].rstrip("/") + "/chat/completions",
+            config["base_url"].rstrip("/") + "/chat/completions",
             json=body,
             headers={"Authorization": f"Bearer {self._api_key}", "Content-Type": "application/json"},
-            timeout=self._config["timeout"],
+            timeout=config["timeout"],
         )
-        for attempt in range(self._config["max_retries"] + 1):
+        for attempt in range(config["max_retries"] + 1):
             try:
                 response = await _cancellable(client.send(request, stream=True), signal)
             except (httpx.ConnectError, httpx.ConnectTimeout):
-                if attempt == self._config["max_retries"]:
+                if attempt == config["max_retries"]:
                     raise
-                delay = retry_delay({}, attempt, self._config["base_retry_delay"], self._config["max_retry_delay"])
+                delay = retry_delay({}, attempt, config["base_retry_delay"], config["max_retry_delay"])
                 assert delay is not None
                 await _cancellable(asyncio.sleep(delay), signal)
                 continue
             if response.is_success:
                 return response
-            if response.status_code in RETRY_STATUSES and attempt < self._config["max_retries"]:
-                delay = retry_delay(
-                    response.headers, attempt, self._config["base_retry_delay"], self._config["max_retry_delay"]
-                )
+            if response.status_code in RETRY_STATUSES and attempt < config["max_retries"]:
+                delay = retry_delay(response.headers, attempt, config["base_retry_delay"], config["max_retry_delay"])
                 if delay is not None:
                     await response.aclose()
                     await _cancellable(asyncio.sleep(delay), signal)
@@ -569,14 +569,17 @@ class ExaoneModel(Model):
             ExaoneThrottledError: If the service returns HTTP 429 after retries.
             ExaoneContextWindowError: If the input exceeds the model context window.
         """
-        streaming = self._config["stream"]
-        body = self._request(messages, tool_specs, system_prompt, system_prompt_content, tool_choice, stream=streaming)
+        config = self._config
+        streaming = config["stream"]
+        body = self._request(
+            messages, tool_specs, system_prompt, system_prompt_content, tool_choice, stream=streaming, config=config
+        )
         callback = kwargs.get("metadata_callback", self._callback)
         decoder = StreamDecoder()
         metadata = ResponseMetadata(enabled=bool(callback))
         started = time.monotonic()
-        async with self._client() as client:
-            response = await self._send(client, body, cancel_signal)
+        async with self._client(config) as client:
+            response = await self._send(client, body, cancel_signal, config)
             try:
                 yield {"messageStart": {"role": "assistant"}}
                 if streaming:
@@ -616,14 +619,15 @@ class ExaoneModel(Model):
             ExaoneThrottledError: If the service returns HTTP 429 after retries.
             ExaoneContextWindowError: If the input exceeds the model context window.
         """
+        config = self._config
         fmt = {
             "type": "json_schema",
             "json_schema": {"name": output_model.__name__, "schema": output_model.model_json_schema()},
         }
-        body = self._request(prompt, None, system_prompt, None, None, stream=False, response_format=fmt)
+        body = self._request(prompt, None, system_prompt, None, None, stream=False, response_format=fmt, config=config)
         signal = kwargs.get("cancel_signal")
-        async with self._client() as client:
-            response = await self._send(client, body, signal)
+        async with self._client(config) as client:
+            response = await self._send(client, body, signal, config)
             try:
                 data = _parse_response(await _cancellable(response.aread(), signal))
                 _check_response_error(data, response, self._api_key)

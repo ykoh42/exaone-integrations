@@ -518,3 +518,224 @@ async def test_harness_sse_utf8_ignores_charset_and_keeps_unicode(charset: str, 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         result = await make_harness(ExaoneModel(api_key="test-only-key", http_client=client)).invoke_async("Say text.")
     assert "".join(block.get("text", "") for block in result.message["content"]) == original
+
+
+async def test_harness_many_interleaved_unicode_argument_fragments() -> None:
+    """Synthetic tool arguments are reconstructed exactly before execution."""
+    from itertools import zip_longest
+
+    values = {"first": "한🙂" * 512, "second": "글🚀" * 384}
+    calls: dict[str, str] = {}
+    requests: list[dict[str, Any]] = []
+
+    @tool
+    def first_tool(value: str) -> str:
+        """Capture the first argument."""
+        calls["first"] = value
+        return "first complete"
+
+    @tool
+    def second_tool(value: str) -> str:
+        """Capture the second argument."""
+        calls["second"] = value
+        return "second complete"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        if len(requests) > 1:
+            return response(events(chunk({"content": "done"}), chunk(finish="stop")))
+        chunks = [
+            chunk(
+                {
+                    "tool_calls": [
+                        {"index": 0, "id": "first_1", "function": {"name": "first_tool", "arguments": ""}},
+                        {"index": 1, "id": "second_1", "function": {"name": "second_tool", "arguments": None}},
+                    ]
+                }
+            )
+        ]
+        raw_first = json.dumps({"value": values["first"]}, ensure_ascii=False)
+        raw_second = json.dumps({"value": values["second"]}, ensure_ascii=False)
+        for first, second in zip_longest(raw_first, raw_second):
+            parts = [
+                {"index": index, "function": {"arguments": value}}
+                for index, value in enumerate((first, second))
+                if value is not None
+            ]
+            chunks.append(chunk({"tool_calls": parts}))
+        chunks.append(chunk(finish="tool_calls"))
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=events(*chunks))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        agent = make_harness(ExaoneModel(api_key="test-only-key", http_client=client), [first_tool, second_tool])
+        await agent.invoke_async("Use both synthetic tools.")
+    assert calls == values
+    assert len(requests) == 2
+    assert {message["tool_call_id"] for message in requests[1]["messages"] if message["role"] == "tool"} == {
+        "first_1",
+        "second_1",
+    }
+
+
+@pytest.mark.parametrize("invalid_arguments", ["{", "[]"])
+async def test_harness_rejects_all_tools_when_any_arguments_are_invalid(invalid_arguments: str) -> None:
+    calls: list[str] = []
+
+    @tool
+    def first_tool(value: int) -> str:
+        """Capture the first argument."""
+        calls.append("first")
+        return str(value)
+
+    @tool
+    def second_tool(value: int) -> str:
+        """Capture the second argument."""
+        calls.append("second")
+        return str(value)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls_delta = [
+            {"index": 0, "id": "first_1", "function": {"name": "first_tool", "arguments": '{"value":1}'}},
+            {"index": 1, "id": "second_1", "function": {"name": "second_tool", "arguments": invalid_arguments}},
+        ]
+        return response(events(chunk({"tool_calls": calls_delta}), chunk(finish="tool_calls")))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        agent = make_harness(ExaoneModel(api_key="test-only-key", http_client=client), [first_tool, second_tool])
+        with pytest.raises(ExaoneError):
+            await agent.invoke_async("Use both synthetic tools.")
+    assert calls == []
+
+
+@pytest.mark.parametrize(("initial_retries", "updated_retries"), [(0, 1), (1, 0)])
+@pytest.mark.parametrize("failure", ["connect", "throttle"])
+async def test_harness_config_update_does_not_change_inflight_retry_policy(
+    initial_retries: int, updated_retries: int, failure: str
+) -> None:
+    import asyncio
+
+    from strands_exaone import ExaoneThrottledError
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    calls: dict[str, list[tuple[str, float, float]]] = {"first": [], "second": []}
+    phase = "first"
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        current = calls[phase]
+        current.append(
+            (request.url.host, json.loads(request.content)["temperature"], request.extensions["timeout"]["read"])
+        )
+        if len(current) == 1:
+            if phase == "first":
+                entered.set()
+                await release.wait()
+            if failure == "connect":
+                raise httpx.ConnectError("synthetic connection failure", request=request)
+            return httpx.Response(429, headers={"retry-after": "0"}, json={"error": {"message": "synthetic"}})
+        return response(events(chunk({"content": "ok"}), chunk(finish="stop")))
+
+    error_type = httpx.ConnectError if failure == "connect" else ExaoneThrottledError
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        model = ExaoneModel(
+            api_key="test-only-key",
+            http_client=client,
+            max_retries=initial_retries,
+            base_retry_delay=0,
+            max_retry_delay=0,
+            temperature=0.4,
+            base_url="https://old.example/v1",
+            timeout=11,
+        )
+        first = asyncio.create_task(make_harness(model).invoke_async("First."))
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        model.update_config(max_retries=updated_retries, temperature=0.7, base_url="https://new.example/v1", timeout=22)
+        release.set()
+        if initial_retries:
+            await first
+        else:
+            with pytest.raises(error_type):
+                await first
+        phase = "second"
+        if updated_retries:
+            await make_harness(model).invoke_async("Second.")
+        else:
+            with pytest.raises(error_type):
+                await make_harness(model).invoke_async("Second.")
+    assert calls["first"] == [("old.example", 0.4, 11)] * (initial_retries + 1)
+    assert calls["second"] == [("new.example", 0.7, 22)] * (updated_retries + 1)
+
+
+async def test_harness_cancellation_still_interrupts_retry_after_config_update(monkeypatch: Any) -> None:
+    import asyncio
+    import threading
+
+    import strands_exaone.model as model_module
+
+    waiting = asyncio.Event()
+    cancel = threading.Event()
+    count = 0
+
+    def delay(*args: Any, **kwargs: Any) -> float:
+        waiting.set()
+        return 30.0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal count
+        count += 1
+        return httpx.Response(429, headers={"retry-after": "30"}, json={"error": {"message": "busy"}})
+
+    monkeypatch.setattr(model_module, "retry_delay", delay)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        model = ExaoneModel(api_key="test-only-key", http_client=client, max_retries=1, max_retry_delay=30)
+        task = asyncio.create_task(make_harness(model).invoke_async("Hello.", cancel_signal=cancel))
+        await asyncio.wait_for(waiting.wait(), timeout=2)
+        model.update_config(max_retries=0, max_retry_delay=0)
+        cancel.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=2)
+    assert count == 1
+
+
+@pytest.mark.parametrize(("initial_max_delay", "updated_max_delay"), [(0.0, 1.0), (1.0, 0.0)])
+async def test_harness_config_update_does_not_change_inflight_retry_delay_ceiling(
+    initial_max_delay: float, updated_max_delay: float
+) -> None:
+    import asyncio
+
+    from strands_exaone import ExaoneThrottledError
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    requests: dict[str, int] = {"first": 0, "second": 0}
+    phase = "first"
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests[phase] += 1
+        if requests[phase] == 1:
+            if phase == "first":
+                entered.set()
+                await release.wait()
+            return httpx.Response(429, headers={"retry-after": "0.01"}, json={"error": {"message": "busy"}})
+        return response(events(chunk({"content": "ok"}), chunk(finish="stop")))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        model = ExaoneModel(
+            api_key="test-only-key", http_client=client, max_retries=1, max_retry_delay=initial_max_delay
+        )
+        first = asyncio.create_task(make_harness(model).invoke_async("First."))
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        model.update_config(max_retry_delay=updated_max_delay)
+        release.set()
+        if initial_max_delay:
+            await first
+        else:
+            with pytest.raises(ExaoneThrottledError):
+                await first
+        phase = "second"
+        if updated_max_delay:
+            await make_harness(model).invoke_async("Second.")
+        else:
+            with pytest.raises(ExaoneThrottledError):
+                await make_harness(model).invoke_async("Second.")
+    assert requests == {"first": 2 if initial_max_delay else 1, "second": 2 if updated_max_delay else 1}
