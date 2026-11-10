@@ -495,7 +495,7 @@ class ExaoneModel(Model):
         signal: threading.Event | None,
     ) -> None:
         _check_cancel(signal)
-        if callback:
+        if callback is not None:
             headers = _safe_headers(response.headers, self._api_key)
             try:
                 result = callback(
@@ -592,7 +592,7 @@ class ExaoneModel(Model):
         )
         callback = kwargs.get("metadata_callback", self._callback)
         decoder = StreamDecoder()
-        metadata = ResponseMetadata(enabled=bool(callback))
+        metadata = ResponseMetadata(enabled=callback is not None)
         started = time.monotonic()
         async with self._client(config) as client:
             response = await self._send(client, body, cancel_signal, config)
@@ -669,7 +669,7 @@ class ExaoneModel(Model):
                     raise ExaoneError("Structured output did not include JSON text")
                 result = _validate_output(output_model, content)
                 callback = kwargs.get("metadata_callback", self._callback)
-                metadata = ResponseMetadata(enabled=bool(callback))
+                metadata = ResponseMetadata(enabled=callback is not None)
                 metadata.add(data)
                 await self._metadata(callback, response, data.get("usage"), metadata, signal)
                 _check_cancel(signal)
