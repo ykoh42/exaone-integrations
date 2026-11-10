@@ -11,7 +11,7 @@ Both providers support streamed and non-streamed responses, reasoning history, t
 
 ## Get started
 
-Clone this repository and run the following commands from its root. The packages are not yet published to PyPI or npm.
+Clone this repository and run the following commands from its root. The packages are not yet published to PyPI or npm. For the TypeScript checkout, use the Node.js version in `.node-version` and npm 11.20.0.
 
 ```bash
 # Python, in your virtual environment
