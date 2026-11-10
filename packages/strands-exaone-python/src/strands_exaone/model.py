@@ -25,6 +25,7 @@ from pydantic import BaseModel, ValidationError
 from strands.models.model import Model
 from strands.types.content import Messages, SystemContentBlock
 from strands.types.event_loop import Usage
+from strands.types.exceptions import ContextWindowOverflowException, ModelThrottledException
 from strands.types.streaming import StreamEvent
 from strands.types.tools import ToolChoice, ToolSpec
 from typing_extensions import override
@@ -161,6 +162,11 @@ async def _cancellable(awaitable: Awaitable[R], signal: threading.Event | None) 
             task.cancel()
             with suppress(asyncio.CancelledError):
                 await task
+
+
+def _check_cancel(signal: threading.Event | None) -> None:
+    if signal is not None and signal.is_set():
+        raise asyncio.CancelledError
 
 
 def _copy_transport_error(error: Exception, secret: str) -> Exception:
@@ -320,8 +326,8 @@ class ExaoneModel(Model):
             timeout: HTTPX timeout in seconds for each request attempt.
             params: Additional EXAONE Chat Completions parameters.
             context_window_limit: Model context window in tokens.
-            metadata_callback: Callback for response metadata on successful completion.
-                It is not called for failed or interrupted streams. Metadata may contain
+            metadata_callback: Callback for response metadata after a successful response.
+                It is not called if the response fails or is interrupted before completion. Metadata may contain
                 generated tokens and other sensitive content even after API key redaction.
             http_client: Caller-owned async client; the provider does not close it.
             max_retries: Maximum number of retries before a response is exposed.
@@ -486,20 +492,29 @@ class ExaoneModel(Model):
         response: httpx.Response,
         usage: dict[str, Any] | None,
         metadata: ResponseMetadata,
+        signal: threading.Event | None,
     ) -> None:
+        _check_cancel(signal)
         if callback:
             headers = _safe_headers(response.headers, self._api_key)
-            result = callback(
-                {
-                    "status_code": response.status_code,
-                    "request_id": headers.get("x-request-id"),
-                    "headers": headers,
-                    "usage": redact(deepcopy(usage), self._api_key),
-                    "response": redact(deepcopy(metadata.response), self._api_key),
-                }
-            )
-            if inspect.isawaitable(result):
-                await result
+            try:
+                result = callback(
+                    {
+                        "status_code": response.status_code,
+                        "request_id": headers.get("x-request-id"),
+                        "headers": headers,
+                        "usage": redact(deepcopy(usage), self._api_key),
+                        "response": redact(deepcopy(metadata.response), self._api_key),
+                    }
+                )
+                if inspect.isawaitable(result):
+                    await _cancellable(result, signal)
+            except Exception as error:
+                _check_cancel(signal)
+                if isinstance(error, (ModelThrottledException, ContextWindowOverflowException)):
+                    raise ExaoneError("EXAONE metadata callback failed") from error
+                raise
+        _check_cancel(signal)
 
     async def _decode_stream(
         self,
@@ -582,19 +597,23 @@ class ExaoneModel(Model):
         async with self._client(config) as client:
             response = await self._send(client, body, cancel_signal, config)
             try:
+                _check_cancel(cancel_signal)
                 yield {"messageStart": {"role": "assistant"}}
                 if streaming:
                     events = self._decode_stream(response, decoder, cancel_signal, metadata)
                 else:
                     events = self._decode_nonstream(response, decoder, cancel_signal, metadata)
                 async for event in events:
+                    _check_cancel(cancel_signal)
                     yield cast(StreamEvent, event)
                 for event in decoder.finish(require_done=streaming, secret=self._api_key):
+                    _check_cancel(cancel_signal)
                     yield cast(StreamEvent, event)
-                await self._metadata(callback, response, decoder.usage, metadata)
+                await self._metadata(callback, response, decoder.usage, metadata, cancel_signal)
                 usage = _standard_usage(decoder.usage)
                 if usage is not None:
                     latency_ms = round((time.monotonic() - started) * 1000)
+                    _check_cancel(cancel_signal)
                     yield {"metadata": {"usage": usage, "metrics": {"latencyMs": latency_ms}}}
             finally:
                 await response.aclose()
@@ -652,7 +671,8 @@ class ExaoneModel(Model):
                 callback = kwargs.get("metadata_callback", self._callback)
                 metadata = ResponseMetadata(enabled=bool(callback))
                 metadata.add(data)
-                await self._metadata(callback, response, data.get("usage"), metadata)
+                await self._metadata(callback, response, data.get("usage"), metadata, signal)
+                _check_cancel(signal)
                 yield {"output": result}
             finally:
                 await response.aclose()

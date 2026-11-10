@@ -72,6 +72,26 @@ function rateHeaders(headers: Headers): Record<string, string> {
   return result
 }
 
+function requestTimeout(ms: number | undefined): { signal: AbortSignal; dispose: () => void } | undefined {
+  if (ms === undefined) return undefined
+  if (typeof ms !== 'number') throw new TypeError('timeoutMs must be a number')
+  if (!Number.isInteger(ms) || ms < 0 || ms > 4_294_967_295) throw new RangeError('timeoutMs must be an integer between 0 and 4294967295')
+  const controller = new AbortController()
+  const maxTimeout = 2_147_483_647
+  let remaining = ms
+  let timer: ReturnType<typeof setTimeout>
+  const schedule = () => {
+    const delay = Math.min(remaining, maxTimeout)
+    remaining -= delay
+    timer = setTimeout(() => {
+      if (remaining > 0) schedule()
+      else controller.abort(new DOMException('The operation was aborted due to timeout', 'TimeoutError'))
+    }, delay)
+  }
+  schedule()
+  return { signal: controller.signal, dispose: () => clearTimeout(timer) }
+}
+
 async function throwHttpError(response: Response, key: string, signal: AbortSignal): Promise<never> {
   let body: unknown
   let readCause: Error | undefined
@@ -324,6 +344,30 @@ function metadataEvent(mapper: EventMapper, response: Response, key: string): { 
   return { event, metadata: safeMetadata }
 }
 
+async function notifyMetadata(callback: ExaoneModelConfig['onMetadata'], metadata: ExaoneMetadata, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) throw signal.reason
+  if (!callback) return
+  let result: void | Promise<void>
+  try {
+    result = callback(metadata)
+  } catch (error) {
+    if (signal.aborted) throw signal.reason
+    throw new ModelError('EXAONE metadata callback failed', { cause: error })
+  }
+  await new Promise<void>((resolve, reject) => {
+    const abort = () => {
+      signal.removeEventListener('abort', abort)
+      reject(signal.reason)
+    }
+    signal.addEventListener('abort', abort, { once: true })
+    Promise.resolve(result).then(
+      () => { signal.removeEventListener('abort', abort); resolve() },
+      (error: unknown) => { signal.removeEventListener('abort', abort); reject(new ModelError('EXAONE metadata callback failed', { cause: error })) }
+    )
+    if (signal.aborted) abort()
+  })
+}
+
 async function readResponseJSON(response: Response): Promise<WireResponse> {
   let raw: string
   try { raw = await response.text() } catch (error) { throw new ResponseReadError(error) }
@@ -421,20 +465,23 @@ export class ExaoneModel extends Model<ExaoneModelConfig> {
     const request = requestParameters(config, messages, options)
     const body = requestBody(request)
     const controller = new AbortController()
-    const signals = [controller.signal]
-    if (options?.cancelSignal) signals.push(options.cancelSignal)
-    if (config.timeoutMs !== undefined) signals.push(AbortSignal.timeout(config.timeoutMs))
-    const signal = AbortSignal.any(signals)
-    const response = await sendWithRetry(config, signal, () => fetchResponse(config, body, key, signal))
+    const timeout = requestTimeout(config.timeoutMs)
     try {
+      const signals = [controller.signal, options?.cancelSignal, timeout?.signal].filter((item): item is AbortSignal => item != null)
+      const signal = AbortSignal.any(signals)
+      const response = await sendWithRetry(config, signal, () => fetchResponse(config, body, key, signal))
+      signal.throwIfAborted()
       if (!response.ok) await throwHttpError(response, key, signal)
       const mapper = new EventMapper(key)
       yield { type: 'modelMessageStartEvent', role: 'assistant' }
+      signal.throwIfAborted()
       let deliveredContent = false
       try {
         for await (const event of responseEvents(response, request.stream !== false, mapper)) {
+          signal.throwIfAborted()
           if (event.type === 'modelContentBlockDeltaEvent') deliveredContent = true
           yield event
+          signal.throwIfAborted()
         }
       } catch (error) {
         if (signal.aborted) throw signal.reason
@@ -445,10 +492,15 @@ export class ExaoneModel extends Model<ExaoneModelConfig> {
         }
         throw error
       }
-      for (const event of mapper.finish(key)) yield event
+      for (const event of mapper.finish(key)) {
+        signal.throwIfAborted()
+        yield event
+        signal.throwIfAborted()
+      }
       const metadata = metadataEvent(mapper, response, key)
-      config.onMetadata?.(metadata.metadata)
+      await notifyMetadata(config.onMetadata, metadata.metadata, signal)
+      signal.throwIfAborted()
       yield metadata.event
-    } finally { controller.abort() }
+    } finally { timeout?.dispose(); controller.abort() }
   }
 }

@@ -10,6 +10,6 @@
     "@strands-agents/sdk": "1.24.0",
     "strands-exaone": "file:../..",
     "tsx": "^4.23.13",
-    "zod": "^4.5.4"
+    "zod": "^4.6.6"
   }
 }

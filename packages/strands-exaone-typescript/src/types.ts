@@ -44,9 +44,9 @@ export interface ExaoneModelConfig extends BaseModelConfig {
   /**
    * Called once after a successful response completes. The API key is redacted; response
    * metadata may still contain sensitive content such as logprob tokens, refusal text,
-   * or function arguments. Failed and interrupted streams do not invoke this callback.
+   * or function arguments. Responses interrupted before completion do not invoke it.
    */
-  onMetadata?: (metadata: ExaoneMetadata) => void
+  onMetadata?: ((metadata: ExaoneMetadata) => void) | ((metadata: ExaoneMetadata) => Promise<void>)
 }
 
 /**

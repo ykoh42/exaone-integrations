@@ -7,7 +7,7 @@
     "@strands-agents/harness": "~0.1.1",
     "@strands-agents/sdk": "1.24.0",
     "strands-exaone": "file:../..",
-    "zod": "^4.5.4"
+    "zod": "^4.6.6"
   },
   "overrides": {
     "@strands-agents/cli": {

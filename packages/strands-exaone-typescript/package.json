@@ -36,12 +36,12 @@
   },
   "peerDependencies": {
     "@strands-agents/sdk": ">=1.24.0 <2.0.0",
-    "zod": "^4.5.4"
+    "zod": "^4.6.6"
   },
   "devDependencies": {
     "@strands-agents/harness": "~0.1.1",
     "@strands-agents/sdk": "1.24.0",
-    "zod": "^4.5.4"
+    "zod": "^4.6.6"
   },
   "license": "MIT"
 }
