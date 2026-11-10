@@ -313,7 +313,8 @@ class ExaoneModel(Model):
             reasoning_effort: EXAONE reasoning effort.
             preserve_thinking: Whether EXAONE should preserve previous reasoning in its input.
                 Reasoning present in the conversation is forwarded independently of this setting.
-            enable_thinking: Whether to enable reasoning, when supported by the service.
+            enable_thinking: EXAONE reasoning setting. False does not guarantee that
+                response content contains no reasoning.
             include_usage: Whether to request usage in a streaming response. Defaults to true.
             response_format: Output format for ordinary model calls.
             timeout: HTTPX timeout in seconds for each request attempt.

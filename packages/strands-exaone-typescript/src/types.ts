@@ -33,8 +33,8 @@ export interface ExaoneModelConfig extends BaseModelConfig {
    */
   preserveThinking?: boolean
   /**
-   * Empirically observed option; the official documentation currently disagrees.
-   * Setting this to false does not guarantee that content contains no reasoning.
+   * Request the EXAONE reasoning setting. Setting this to false does not guarantee
+   * that the response content contains no reasoning.
    */
   enableThinking?: boolean
   /** Additional API request parameters. Provider-managed fields cannot be overridden. */

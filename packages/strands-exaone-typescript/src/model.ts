@@ -381,8 +381,8 @@ async function fetchResponse(config: ExaoneModelConfig, body: string | undefined
  * EXAONE model provider for Strands Agents.
  *
  * The API key defaults to the `EXAONE_API_KEY` environment variable. Previous
- * reasoning is sent back with assistant messages; set `preserveThinking` to ask
- * EXAONE to keep it in the model input across user turns.
+ * reasoning is sent back with assistant messages. `preserveThinking` defaults
+ * to `true` to request retention across user turns.
  *
  * @example
  * ```typescript
