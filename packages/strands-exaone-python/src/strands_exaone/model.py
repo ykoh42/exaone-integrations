@@ -64,10 +64,14 @@ _SUPPORTED_CONFIG = {
 _MANAGED_PARAMS = {"model", "messages", "stream", "tools", "tool_choice", "response_format"}
 
 
-def _validate_config(config: dict[str, Any]) -> None:
+def _validate_config_keys(config: dict[str, Any]) -> None:
     unknown = set(config) - _SUPPORTED_CONFIG
     if unknown:
         raise ValueError(f"Unknown model configuration fields: {', '.join(sorted(unknown))}")
+
+
+def _validate_config(config: dict[str, Any]) -> None:
+    _validate_config_keys(config)
     if not isinstance(config.get("model_id"), str) or not config["model_id"]:
         raise ValueError("model_id must be a non-empty string")
     if not isinstance(config.get("base_url"), str) or not config["base_url"]:
@@ -384,6 +388,7 @@ class ExaoneModel(Model):
         Raises:
             ValueError: If an override is invalid. Existing settings remain unchanged.
         """
+        _validate_config_keys(model_config)
         updated = {**self._config, **deepcopy(model_config)}
         _validate_config(updated)
         self._config = updated

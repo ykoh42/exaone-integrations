@@ -872,6 +872,30 @@ def test_configuration_and_unsupported_media() -> None:
         model._request([{"role": "user", "content": [{"image": {}}]}], None, None, None, None, stream=True)
 
 
+async def test_update_config_rejects_unknown_fields_before_copying() -> None:
+    model = ExaoneModel(api_key="key", temperature=0.4, params={"custom": ["original"]})
+    before = model.get_config()
+    async with httpx.AsyncClient() as client:
+        with pytest.raises(ValueError, match="^Unknown model configuration fields: http_client$"):
+            model.update_config(http_client=client)
+        with pytest.raises(
+            ValueError, match="^Unknown model configuration fields: api_key, http_client, metadata_callback$"
+        ):
+            model.update_config(
+                temperature=0.8,
+                metadata_callback=threading.Lock(),
+                http_client=client,
+                api_key="other",
+            )
+    assert model.get_config() == before
+
+    params = {"custom": ["updated"]}
+    model.update_config(temperature=0.8, params=params)
+    params["custom"].append("later")
+    assert model.get_config()["temperature"] == 0.8
+    assert model.get_config()["params"] == {"custom": ["updated"]}
+
+
 async def test_cancellation_while_waiting_for_stream_closes_response() -> None:
     entered = asyncio.Event()
 
