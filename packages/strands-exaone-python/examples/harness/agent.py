@@ -15,7 +15,6 @@ from strands_exaone import ExaoneModel
 
 def make_agent(*, model: Model | None = None, web_search: bool = False) -> Agent:
     """Create a harness that can read files and optionally search with Exa."""
-    # Harness 0.1.x accepts the read config at runtime, although its type only exposes bool.
     builtin_tools = cast(BuiltinToolsConfig, {"*": False, "read": {"media": False}})
     if web_search:
         builtin_tools["web_search"] = "exa"

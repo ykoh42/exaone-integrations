@@ -26,7 +26,7 @@ npm run check
 npm pack --workspace=strands-exaone --dry-run
 ```
 
-The packages use pytest and Vitest. Python and TypeScript checks enforce a cognitive complexity threshold of 15; the scores from the two tools are not directly comparable. CI builds a Python wheel and installs the npm tarball in a separate project.
+The packages use pytest and Vitest. Python and TypeScript checks enforce a cognitive complexity threshold of 15; the scores from the two tools are not directly comparable. CI tests Harness 0.1.x and 0.3.4, builds a Python wheel, and installs the npm tarball in a separate project.
 
 For TypeScript watch mode, run `npm run test:watch`. The Harness example tests run a separate process that imports the built package, so source changes require a fresh build. Either restart watch mode after each change, or run the following in another terminal and wait for compilation to finish before pressing `a` in Vitest to rerun all tests:
 

@@ -34,7 +34,7 @@ describe('Harness example', () => {
     const address = server.address()
     if (address === null || typeof address === 'string') throw new Error('No local test port')
     try {
-      await writeFile(image, Uint8Array.of(137, 80, 78, 71))
+      await writeFile(image, Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/aXcAAAAASUVORK5CYII=', 'base64'))
       const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !/KEY|TOKEN|SECRET/i.test(name) && !name.startsWith('AWS_')))
       const { stdout } = await run(process.execPath, ['--import', 'tsx', example, 'Read the synthetic image'], { env: {
         ...env,

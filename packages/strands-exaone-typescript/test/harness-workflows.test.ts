@@ -131,9 +131,14 @@ describe('isolated harness file workflows', () => {
       } else if (requests.length === 3) {
         const history = requests[2]!.messages as Record<string, unknown>[]
         const result = history.find((item) => item.role === 'tool' && item.tool_call_id === 'large-read')
-        const reference = String(result?.content).match(/\[Stored references:\]\n\s+(\S+)/)?.[1]
+        const content = String(result?.content)
+        const currentReference = content.match(/\[ref: ([^\]]+)\]/)?.[1]
+        const reference = currentReference ?? content.match(/\[Stored references:\]\n\s+(\S+)/)?.[1]
         if (!reference) throw new Error('Expected a synthetic offloaded reference')
-        name = 'retrieve_offloaded_content'; id = 'large-retrieve'; args = { reference, pattern: '종료표식', context_lines: 0 }
+        name = currentReference ? 'retrieve_context' : 'retrieve_offloaded_content'
+        const tools = requests[2]!.tools as { function: { name: string } }[]
+        if (!tools.some((tool) => tool.function.name === name)) throw new Error('Expected the matching retrieval tool')
+        id = 'large-retrieve'; args = { reference, pattern: '종료표식', context_lines: 0 }
       } else {
         if (requests.length !== 4) throw new Error('Unexpected synthetic request')
         return response([chunk({ content: 'Done.' }), chunk({}, 'stop')])

@@ -30,7 +30,7 @@ describe('Strands harness built-in tools', () => {
       throw new Error('Unexpected synthetic request')
     }
     try {
-      await writeFile(path, Uint8Array.of(0x89, 0x50, 0x4e, 0x47))
+      await writeFile(path, Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/aXcAAAAASUVORK5CYII=', 'base64'))
       const model = new ExaoneModel({ apiKey: 'test-key', fetch: fetcher })
       const agent = await createHarness({ model, builtinTools: { '*': false, read: { media: false } }, builtinPlugins: [], session: false, memory: false, skills: false, caching: false, retryStrategy: null, printer: false })
       await agent.invoke('Read the image file')

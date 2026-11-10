@@ -488,12 +488,18 @@ async def test_harness_large_file_read_and_offloaded_search(tmp_path: Any) -> No
                 result = next(
                     message for message in requests[-1]["messages"] if message.get("tool_call_id") == "read_1"
                 )
-                match = re.search(r"\[Stored references:\]\s+(\S+)\s+\(text,", result["content"])
+                legacy_ref = re.search(r"\[Stored references:\]\s+(\S+)\s+\(text,", result["content"])
+                context_ref = re.search(r"\[ref:\s*([^\]]+)\]", result["content"])
+                assert bool(legacy_ref) != bool(context_ref)
+                match = legacy_ref or context_ref
                 assert match is not None
+                reference = match.group(1)
+                retrieval_tool = "retrieve_offloaded_content" if legacy_ref else "retrieve_context"
+                assert any(tool["function"]["name"] == retrieval_tool for tool in requests[-1]["tools"])
                 ident, name, arguments = (
                     "retrieve_1",
-                    "retrieve_offloaded_content",
-                    {"reference": match.group(1), "pattern": "TARGET_SYNTHETIC", "context_lines": 0},
+                    retrieval_tool,
+                    {"reference": reference, "pattern": "TARGET_SYNTHETIC", "context_lines": 0},
                 )
             case 4:
                 return response(events(chunk({"content": "done"}), chunk(finish="stop")))
@@ -528,9 +534,15 @@ async def test_harness_large_file_read_and_offloaded_search(tmp_path: Any) -> No
     results = {
         message["tool_call_id"]: message["content"] for message in requests[-1]["messages"] if message["role"] == "tool"
     }
-    assert "offloaded" in results["read_1"].lower()
+    assert "offloaded" in results["read_1"].lower() or "[Truncated:" in results["read_1"]
     assert "TARGET_SYNTHETIC" in results["retrieve_1"]
     assert "행 0200" in results["retrieve_1"]
+    assert any(
+        tool["id"] == "retrieve_1"
+        for message in requests[-1]["messages"]
+        if message["role"] == "assistant"
+        for tool in message.get("tool_calls", [])
+    )
 
 
 async def test_harness_parallel_background_shell_and_file_write(tmp_path: Any) -> None:

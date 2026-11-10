@@ -14,6 +14,7 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ['3.10', '3.12', '3.13']
+        harness-version: ['0.1.2', '0.3.4']
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -22,6 +23,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - run: python -m pip install -e './packages/strands-exaone-python[dev]'
+      - run: python -m pip install 'strands-harness==${{ matrix.harness-version }}'
       - run: ruff check packages/strands-exaone-python
       - run: ruff format --check packages/strands-exaone-python
       - run: complexipy packages/strands-exaone-python/src --max-complexity-allowed 15
@@ -38,6 +40,7 @@ jobs:
       fail-fast: false
       matrix:
         node-version: ['22.13.0', '24']
+        harness-version: ['0.1.1', '0.3.4']
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -48,6 +51,8 @@ jobs:
           cache: npm
       - run: npm install --global npm@11.20.0
       - run: npm ci
+      - if: matrix.harness-version == '0.1.1'
+        run: npm install --no-save --workspace=strands-exaone @strands-agents/harness@0.1.1
       - run: npm run check
       - name: Verify npm package in an independent project
         run: |
