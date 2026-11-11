@@ -15,6 +15,8 @@ import pytest
 from pydantic import BaseModel
 
 from strands_exaone import ExaoneError, ExaoneModel, ExaoneThrottledError
+from strands_exaone import model as model_module
+from strands_exaone import retry as retry_module
 
 MESSAGE = [{"role": "user", "content": [{"text": "test"}]}]
 
@@ -52,6 +54,89 @@ async def test_retry_429_honors_longer_header_and_success() -> None:
     assert any("messageStop" in event for event in result)
 
 
+@pytest.mark.parametrize(
+    ("retry_after", "retry_after_ms", "delay"),
+    [("10", "9598", 10.0), ("16", "15659", 16.0)],
+)
+async def test_captured_exaone_retry_hints_honor_the_longer_value(
+    retry_after: str, retry_after_ms: str, delay: float, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    attempts = 0
+    delays: list[float] = []
+
+    async def record_sleep(seconds: float) -> None:
+        delays.append(seconds)
+
+    monkeypatch.setattr(model_module.asyncio, "sleep", record_sleep)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return httpx.Response(
+                429,
+                headers={
+                    "retry-after": retry_after,
+                    "retry-after-ms": retry_after_ms,
+                    "x-second-rate-limit": "1",
+                    "x-second-rate-limit-remaining": "1",
+                    "x-minute-rate-limit": "60",
+                    "x-minute-rate-limit-remaining": "60",
+                    "x-day-rate-limit": "86400",
+                    "x-day-rate-limit-remaining": "86086",
+                },
+                json={},
+            )
+        return httpx.Response(200, content=success())
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        model = ExaoneModel(api_key="key", http_client=client, max_retries=1)
+        await events(model)
+    assert attempts == 2
+    assert delays == [delay]
+
+
+async def test_captured_429_without_retry_hints_uses_bounded_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
+    attempts = 0
+    delays: list[float] = []
+    random_bounds: list[tuple[float, float]] = []
+
+    def midpoint(low: float, high: float) -> float:
+        random_bounds.append((low, high))
+        return (low + high) / 2
+
+    async def record_sleep(seconds: float) -> None:
+        delays.append(seconds)
+
+    monkeypatch.setattr(retry_module.random, "uniform", midpoint)
+    monkeypatch.setattr(model_module.asyncio, "sleep", record_sleep)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return httpx.Response(
+                429,
+                headers={
+                    "x-second-rate-limit": "1",
+                    "x-second-rate-limit-remaining": "1",
+                    "x-minute-rate-limit": "60",
+                    "x-minute-rate-limit-remaining": "60",
+                    "x-day-rate-limit": "86400",
+                    "x-day-rate-limit-remaining": "86086",
+                },
+                json={},
+            )
+        return httpx.Response(200, content=success())
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        model = ExaoneModel(api_key="key", http_client=client, max_retries=1, base_retry_delay=1, max_retry_delay=30)
+        await events(model)
+    assert attempts == 2
+    assert random_bounds == [(0, 1)]
+    assert delays == [0.5]
+
+
 @pytest.mark.parametrize("status", [400, 401, 404, 422])
 async def test_non_retryable_http_errors_are_not_repeated(status: int) -> None:
     count = 0
@@ -66,6 +151,65 @@ async def test_non_retryable_http_errors_are_not_repeated(status: int) -> None:
         with pytest.raises(ExaoneError):
             await events(model)
     assert count == 1
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "error_type", "code", "param", "message"),
+    [
+        (
+            400,
+            {"error": {"type": "invalid_request_error", "code": None, "param": "top_k", "message": "invalid value"}},
+            "invalid_request_error",
+            None,
+            "top_k",
+            "invalid value",
+        ),
+        (
+            400,
+            {"result_code": "INVALID_INPUT", "description": "invalid request"},
+            None,
+            "INVALID_INPUT",
+            None,
+            "invalid request",
+        ),
+        (
+            422,
+            {"result_code": "INVALID_INPUT", "description": "invalid request"},
+            None,
+            "INVALID_INPUT",
+            None,
+            "invalid request",
+        ),
+    ],
+)
+async def test_http_errors_expose_normalized_diagnostics(
+    status: int, body: dict[str, Any], error_type: str | None, code: Any, param: Any, message: str
+) -> None:
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda _: httpx.Response(status, json=body, headers={"x-request-id": "request-1"})
+        )
+    ) as client:
+        model = ExaoneModel(api_key="key", http_client=client)
+        with pytest.raises(ExaoneError) as caught:
+            await events(model)
+    error = caught.value
+    assert str(error) == message
+    assert error.status_code == status
+    assert error.error_type == error_type
+    assert error.code == code
+    assert error.param == param
+    assert error.request_id == "request-1"
+    assert error.body == body
+
+
+async def test_success_status_error_envelope_uses_generic_message_without_http_status() -> None:
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, content=sse({"error": {"code": "bad_response"}})))
+    ) as client:
+        model = ExaoneModel(api_key="key", http_client=client)
+        with pytest.raises(ExaoneError, match="^EXAONE returned an error in the response body$"):
+            await events(model)
 
 
 async def test_retry_limit_and_server_delay_ceiling_preserve_error() -> None:

@@ -1,4 +1,27 @@
 import type { ExaoneModelConfig } from './types.js'
+import { validateRetryConfig } from './retry.js'
+
+function validateFiniteRange(name: string, value: number | undefined, minimum: number, maximum?: number): void {
+  if (value === undefined) return
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < minimum || (maximum !== undefined && value > maximum)) {
+    const range = maximum === undefined ? `at least ${minimum}` : `between ${minimum} and ${maximum}`
+    throw new TypeError(`${name} must be a finite number ${range}`)
+  }
+}
+
+/** Validate first-class options before storing or updating model configuration. */
+export function validateModelConfig(config: ExaoneModelConfig): void {
+  validateRetryConfig(config)
+  if (config.maxTokens !== undefined && (!Number.isInteger(config.maxTokens) || config.maxTokens < 0)) {
+    throw new TypeError('maxTokens must be a non-negative integer')
+  }
+  validateFiniteRange('temperature', config.temperature, 0)
+  validateFiniteRange('topP', config.topP, 0, 1)
+  validateFiniteRange('presencePenalty', config.presencePenalty, -2, 2)
+  if (config.topK !== undefined && (!Number.isInteger(config.topK) || (config.topK !== -1 && config.topK < 1))) {
+    throw new TypeError('topK must be -1 or a positive integer')
+  }
+}
 
 function emptyCopy(value: object): object | undefined {
   const prototype = Object.getPrototypeOf(value)

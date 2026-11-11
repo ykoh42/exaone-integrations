@@ -15,8 +15,9 @@ class ExaoneError(Exception):
         message: str,
         *,
         status_code: int | None = None,
-        code: str | None = None,
-        param: str | None = None,
+        code: Any = None,
+        error_type: str | None = None,
+        param: Any = None,
         request_id: str | None = None,
         headers: dict[str, str] | None = None,
         body: Any = None,
@@ -25,6 +26,7 @@ class ExaoneError(Exception):
         super().__init__(message)
         self.status_code = status_code
         self.code = code
+        self.error_type = error_type
         self.param = param
         self.request_id = request_id
         self.headers = headers or {}
@@ -39,10 +41,12 @@ class ExaoneThrottledError(ModelThrottledException):
         super().__init__(str(details))
         self.details = details
         self.status_code = details.status_code
+        self.error_type = details.error_type
         self.request_id = details.request_id
         self.headers = details.headers
         self.body = details.body
         self.code = details.code
+        self.param = details.param
 
 
 class ExaoneContextWindowError(ContextWindowOverflowException):
@@ -52,10 +56,12 @@ class ExaoneContextWindowError(ContextWindowOverflowException):
         super().__init__(str(details))
         self.details = details
         self.status_code = details.status_code
+        self.error_type = details.error_type
         self.request_id = details.request_id
         self.headers = details.headers
         self.body = details.body
         self.code = details.code
+        self.param = details.param
 
 
 def redact(value: Any, secret: str) -> Any:
@@ -70,16 +76,22 @@ def redact(value: Any, secret: str) -> Any:
 
 
 def response_error(status: int, body: Any, headers: dict[str, str], secret: str) -> Exception:
-    """Map an HTTP error without conflating arbitrary bad requests with context overflow."""
+    """Map an error envelope without conflating arbitrary bad requests with context overflow."""
     body = redact(body, secret)
-    nested = body.get("error", {}) if isinstance(body, dict) else {}
+    envelope = body if isinstance(body, dict) else {}
+    nested = envelope.get("error", {})
     if not isinstance(nested, dict):
         nested = {}
-    message = nested.get("message") or (body.get("description") if isinstance(body, dict) else None) or f"HTTP {status}"
+    fallback = f"HTTP {status}"
+    if 200 <= status < 300:
+        fallback = "EXAONE returned an error in the response body"
+    message = nested.get("message") or envelope.get("description") or fallback
+    code = nested["code"] if "code" in nested else envelope.get("result_code")
     details = ExaoneError(
         str(message),
         status_code=status,
-        code=nested.get("code"),
+        code=code,
+        error_type=nested.get("type") if isinstance(nested.get("type"), str) else None,
         param=nested.get("param"),
         request_id=headers.get("x-request-id"),
         headers=headers,

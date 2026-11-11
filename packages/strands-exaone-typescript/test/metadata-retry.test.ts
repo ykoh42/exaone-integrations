@@ -226,6 +226,66 @@ describe('opt-in retry policy', () => {
     expect(cancel).toHaveBeenCalledOnce()
   })
 
+  it.each([
+    { retryAfter: '10', retryAfterMs: '9598', delay: 10_000 },
+    { retryAfter: '16', retryAfterMs: '15659', delay: 16_000 },
+  ])('honors captured EXAONE retry headers for at least $delay ms', async ({ retryAfter, retryAfterMs, delay }) => {
+    vi.useFakeTimers()
+    let attempts = 0
+    const fetcher = fakeFetch(async () => ++attempts === 1
+      ? new Response('{}', {
+        status: 429,
+        headers: {
+          'retry-after': retryAfter,
+          'retry-after-ms': retryAfterMs,
+          'x-second-rate-limit': '1',
+          'x-second-rate-limit-remaining': '1',
+          'x-minute-rate-limit': '60',
+          'x-minute-rate-limit-remaining': '60',
+          'x-day-rate-limit': '86400',
+          'x-day-rate-limit-remaining': '86086',
+        },
+      })
+      : ok())
+    const result = collect(new ExaoneModel({ apiKey: 'key', fetch: fetcher, stream: false, maxRetries: 1 }))
+    await vi.advanceTimersByTimeAsync(delay - 1)
+    expect(attempts).toBe(1)
+    await vi.advanceTimersByTimeAsync(1)
+    await result
+    expect(attempts).toBe(2)
+  })
+
+  it('uses bounded backoff when captured 429 responses omit retry hints', async () => {
+    vi.useFakeTimers()
+    const random = vi.spyOn(Math, 'random').mockReturnValue(0.5)
+    let attempts = 0
+    const fetcher = fakeFetch(async () => ++attempts === 1
+      ? new Response('{}', {
+        status: 429,
+        headers: {
+          'x-second-rate-limit': '1',
+          'x-second-rate-limit-remaining': '1',
+          'x-minute-rate-limit': '60',
+          'x-minute-rate-limit-remaining': '60',
+          'x-day-rate-limit': '86400',
+          'x-day-rate-limit-remaining': '86086',
+        },
+      })
+      : ok())
+    try {
+      const result = collect(new ExaoneModel({
+        apiKey: 'key', fetch: fetcher, stream: false, maxRetries: 1, baseRetryDelayMs: 1_000,
+      }))
+      await vi.advanceTimersByTimeAsync(499)
+      expect(attempts).toBe(1)
+      await vi.advanceTimersByTimeAsync(1)
+      await result
+      expect(attempts).toBe(2)
+    } finally {
+      random.mockRestore()
+    }
+  })
+
   it('does not shorten a server retry delay beyond the configured cap', async () => {
     const fetcher = fakeFetch(async () => new Response('{"error":{"message":"limit"}}', { status: 429, headers: { 'retry-after-ms': '1000' } }))
     const model = new ExaoneModel({ apiKey: 'key', fetch: fetcher, maxRetries: 3, maxRetryDelayMs: 10 })

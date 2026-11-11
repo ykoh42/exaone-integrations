@@ -25,6 +25,18 @@ async function collect(model: ExaoneModel, messages: Message[] = [user()]) {
 }
 
 describe('ExaoneModel', () => {
+  it('validates named EXAONE options at construction and preserves configuration after a rejected update', () => {
+    expect(() => new ExaoneModel({ topK: 0 })).toThrow('topK must be -1 or a positive integer')
+    expect(() => new ExaoneModel({ topP: 1.01 })).toThrow('topP must be a finite number between 0 and 1')
+    expect(() => new ExaoneModel({ temperature: -0.1 })).toThrow('temperature must be a finite number at least 0')
+    expect(() => new ExaoneModel({ presencePenalty: 2.01 })).toThrow('presencePenalty must be a finite number between -2 and 2')
+    expect(() => new ExaoneModel({ maxTokens: -1 })).toThrow('maxTokens must be a non-negative integer')
+
+    const model = new ExaoneModel({ topK: 1, topP: 0, temperature: 0, presencePenalty: -2, maxTokens: 0 })
+    expect(() => model.updateConfig({ topP: 1.01 })).toThrow('topP must be a finite number between 0 and 1')
+    expect(model.getConfig()).toMatchObject({ topK: 1, topP: 0, temperature: 0, presencePenalty: -2, maxTokens: 0 })
+  })
+
   it('explains both ways to provide the API key', async () => {
     await expect(collect(new ExaoneModel({ apiKey: '' }))).rejects.toThrow(/apiKey.*EXAONE_API_KEY/)
   })
@@ -33,7 +45,7 @@ describe('ExaoneModel', () => {
     const data = sse([event({ reasoning_content: '생각' }), event({ content: ' 답' }), event({}, 'stop'), wire([], { usage })])
     const fetcher = vi.fn(async () => response(data, 200, { 'x-request-id': 'request-1' }))
     const onMetadata = vi.fn()
-    const model = new ExaoneModel({ apiKey: 'private-key', fetch: fetcher as typeof fetch, reasoningEffort: 'medium', preserveThinking: true, enableThinking: false, topK: 0, maxTokens: 0, includeUsage: false, onMetadata })
+    const model = new ExaoneModel({ apiKey: 'private-key', fetch: fetcher as typeof fetch, reasoningEffort: 'medium', preserveThinking: true, enableThinking: false, topK: 1, maxTokens: 0, includeUsage: false, onMetadata })
     const result = await aggregate(model)
     expect(result.message.content.map((b) => b.type)).toEqual(['reasoningBlock', 'textBlock'])
     expect(result.message.content[0]).toMatchObject({ text: '생각' })
@@ -43,7 +55,7 @@ describe('ExaoneModel', () => {
     expect(onMetadata).toHaveBeenCalledOnce()
     const init = (fetcher.mock.calls as unknown as [string, RequestInit][])[0]![1]
     const body = JSON.parse(String(init.body))
-    expect(body).toMatchObject({ model: 'k-exaone_v2.5', max_tokens: 0, top_k: 0, reasoning_effort: 'medium', stream_options: { include_usage: false }, chat_template_kwargs: { preserve_thinking: true, enable_thinking: false } })
+    expect(body).toMatchObject({ model: 'k-exaone_v2.5', max_tokens: 0, top_k: 1, reasoning_effort: 'medium', stream_options: { include_usage: false }, chat_template_kwargs: { preserve_thinking: true, enable_thinking: false } })
     expect(JSON.stringify(model.getConfig())).not.toContain('private-key')
   })
 
@@ -351,7 +363,9 @@ describe('ExaoneModel', () => {
       expect(error).toBeInstanceOf(ExaoneResponseError)
       expect(error).toBeInstanceOf(ModelError)
       expect((error as ExaoneResponseError).body).toEqual({ error: { message: '[REDACTED]', code: 'code-[REDACTED]', type: 'model_error' }, '[REDACTED]': 'secret' })
+      expect((error as ExaoneResponseError).errorType).toBe('model_error')
       expect((error as ExaoneResponseError).code).toBe('code-[REDACTED]')
+      expect((error as Error).message).toBe('[REDACTED]')
       expect(String(error)).not.toContain('HTTP 200')
       expect(JSON.stringify(error)).not.toContain('private-key')
     }
@@ -400,6 +414,9 @@ describe('ExaoneModel', () => {
       const cause = (error as Error).cause as ExaoneAPIError
       expect(cause).toBeInstanceOf(ExaoneAPIError)
       expect(cause.status).toBe(429)
+      expect(cause.errorType).toBe('rate_limit_error')
+      expect(cause.code).toBe('rate_limit_exceeded')
+      expect(cause.param).toBeUndefined()
       expect(cause.headers['retry-after-ms']).toBe('631')
       expect(JSON.stringify(cause.body)).not.toContain('private-key')
     }
@@ -411,6 +428,35 @@ describe('ExaoneModel', () => {
     await expect(collect(validation)).rejects.toMatchObject({ status: 422, body: detail })
     const badRequest = new ExaoneModel({ apiKey: 'key', fetch: transport(response('{"error":{"message":"invalid request to model"}}', 400)) })
     await expect(collect(badRequest)).rejects.toBeInstanceOf(ExaoneAPIError)
+  })
+
+  it('exposes diagnostics from both EXAONE error envelope shapes', async () => {
+    const openAIShape = new ExaoneModel({
+      apiKey: 'key',
+      fetch: transport(response(JSON.stringify({ error: { type: 'invalid_request_error', code: null, param: 'top_k', message: 'invalid value' } }), 400, { 'x-request-id': 'request-openai' })),
+    })
+    await expect(collect(openAIShape)).rejects.toMatchObject({
+      message: 'invalid value',
+      status: 400,
+      errorType: 'invalid_request_error',
+      code: null,
+      param: 'top_k',
+      requestId: 'request-openai',
+    })
+
+    const documentedShape = new ExaoneModel({
+      apiKey: 'key',
+      fetch: transport(response(JSON.stringify({ result_code: 'INVALID_INPUT', description: 'invalid request' }), 422, { 'x-request-id': 'request-documented' })),
+    })
+    await expect(collect(documentedShape)).rejects.toMatchObject({
+      message: 'invalid request',
+      status: 422,
+      errorType: undefined,
+      code: 'INVALID_INPUT',
+      param: undefined,
+      requestId: 'request-documented',
+      body: { result_code: 'INVALID_INPUT', description: 'invalid request' },
+    })
   })
 
   it('formats structured output without overriding forced tool calls', async () => {

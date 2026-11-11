@@ -6,10 +6,10 @@
 import { Model, ModelError, ModelNetworkError, ModelThrottledError, ContextWindowOverflowError } from '@strands-agents/sdk'
 import type { Message, ModelStreamEvent, StreamOptions, StopReason } from '@strands-agents/sdk'
 import { z } from 'zod'
-import { copyConfig } from './config.js'
+import { copyConfig, validateModelConfig } from './config.js'
 import { formatMessages } from './messages.js'
 import { redactMetadata, ResponseMetadataCollector } from './metadata.js'
-import { sendWithRetry, validateRetryConfig } from './retry.js'
+import { sendWithRetry } from './retry.js'
 import { readSSE, ResponseReadError } from './sse.js'
 import type { ExaoneMetadata, ExaoneModelConfig } from './types.js'
 
@@ -31,27 +31,55 @@ export class ExaoneAPIError extends ModelError {
   readonly body: unknown
   readonly requestId: string | undefined
   readonly headers: Record<string, string>
+  readonly errorType: string | undefined
+  readonly code: unknown
+  readonly param: unknown
   constructor(status: number, body: unknown, requestId: string | undefined, headers: Record<string, string>) {
-    super(`EXAONE request failed with HTTP ${status}`)
+    super(errorMessage(body, `HTTP ${status}`))
     this.name = 'ExaoneAPIError'
     this.status = status
     this.body = body
     this.requestId = requestId
     this.headers = headers
+    const details = errorDetails(body)
+    this.errorType = details.errorType
+    this.code = details.code
+    this.param = details.param
   }
 }
 
 /** An error returned in a successful HTTP response body or event stream. */
 export class ExaoneResponseError extends ModelError {
   readonly body: unknown
+  readonly errorType: string | undefined
   readonly code: unknown
+  readonly param: unknown
 
   constructor(body: unknown) {
-    super('EXAONE returned an error in the response body')
+    super(errorMessage(body, 'EXAONE returned an error in the response body'))
     this.name = 'ExaoneResponseError'
     this.body = body
-    const nested = body && typeof body === 'object' && 'error' in body ? body.error : undefined
-    this.code = nested && typeof nested === 'object' && 'code' in nested ? nested.code : undefined
+    const details = errorDetails(body)
+    this.errorType = details.errorType
+    this.code = details.code
+    this.param = details.param
+  }
+}
+
+function errorMessage(body: unknown, fallback: string): string {
+  const envelope = isRecord(body) ? body : {}
+  const nested = isRecord(envelope.error) ? envelope.error : {}
+  const message = nested.message || envelope.description
+  return message === undefined || message === null || message === '' ? fallback : String(message)
+}
+
+function errorDetails(body: unknown): { errorType: string | undefined; code: unknown; param: unknown } {
+  const envelope = isRecord(body) ? body : {}
+  const nested = isRecord(envelope.error) ? envelope.error : {}
+  return {
+    errorType: typeof nested.type === 'string' ? nested.type : undefined,
+    code: 'code' in nested ? nested.code : envelope.result_code,
+    param: nested.param,
   }
 }
 
@@ -438,13 +466,13 @@ export class ExaoneModel extends Model<ExaoneModelConfig> {
   private _config: ExaoneModelConfig
   constructor(config: ExaoneModelConfig = {}) {
     super()
-    validateRetryConfig(config)
     this._config = { modelId: 'k-exaone_v2.5', contextWindowLimit: 524288, ...copyConfig(config) }
+    validateModelConfig(this._config)
   }
-  /** Update the model configuration. Invalid retry settings leave the current configuration unchanged. */
+  /** Update the model configuration. Invalid options leave the current configuration unchanged. */
   override updateConfig(config: Partial<ExaoneModelConfig>): void {
     const updated = { ...this._config, ...copyConfig(config) }
-    validateRetryConfig(updated)
+    validateModelConfig(updated)
     this._config = updated
   }
   /** Get the model configuration without the API key. */
