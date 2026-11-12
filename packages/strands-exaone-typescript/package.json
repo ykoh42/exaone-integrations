@@ -32,6 +32,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",
+    "check": "npm run typecheck && npm run build",
     "prepack": "npm run build"
   },
   "peerDependencies": {
@@ -41,6 +42,7 @@
   "devDependencies": {
     "@strands-agents/harness": "~0.3.4",
     "@strands-agents/sdk": "1.24.0",
+    "typescript": "~6.0.3",
     "zod": "^4.6.6"
   },
   "license": "MIT"

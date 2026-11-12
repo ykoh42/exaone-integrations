@@ -119,6 +119,37 @@ jobs:
           npm install --ignore-scripts "$RUNNER_TEMP"/strands-exaone-*.tgz
           node --input-type=module -e "import { ExaoneModel } from 'strands-exaone'; import { Model } from '@strands-agents/sdk'; if (!(new ExaoneModel() instanceof Model)) process.exit(1)"
 
+  strands-typescript-package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ['22.18.0', '24']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+          cache-dependency-path: packages/strands-exaone-typescript/package-lock.json
+      - run: npm install --global npm@11.20.0
+      - working-directory: packages/strands-exaone-typescript
+        run: npm ci --ignore-scripts --workspaces=false
+      - working-directory: packages/strands-exaone-typescript
+        run: npm run check --workspaces=false
+      - name: Verify npm package in an independent project
+        working-directory: packages/strands-exaone-typescript
+        run: |
+          npm pack --pack-destination "$RUNNER_TEMP"
+          mkdir "$RUNNER_TEMP/strands-exaone-package-check"
+          cd "$RUNNER_TEMP/strands-exaone-package-check"
+          printf '%s\n' '{"private":true}' > package.json
+          npm install --ignore-scripts "$RUNNER_TEMP"/strands-exaone-*.tgz
+          node --input-type=module -e "import { ExaoneModel } from 'strands-exaone'; import { Model } from '@strands-agents/sdk'; if (!(new ExaoneModel() instanceof Model)) process.exit(1)"
+
   langchain-typescript:
     runs-on: ubuntu-24.04
     timeout-minutes: 25

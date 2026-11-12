@@ -9,6 +9,7 @@ Use Python 3.10 or newer, uv for the LangChain Python lockfile, the Node.js vers
 ```bash
 python -m pip install -e './packages/strands-exaone-python[dev]'
 npm ci
+(cd packages/strands-exaone-typescript && npm ci --ignore-scripts --workspaces=false)
 (cd packages/langchain-exaone-python && uv sync --locked --all-groups)
 (cd packages/langchain-exaone-typescript && npm ci --ignore-scripts --workspaces=false)
 ```
@@ -32,6 +33,7 @@ python -m pytest packages/strands-exaone-python/tests
 # TypeScript
 npm run check
 npm pack --workspace=strands-exaone --dry-run
+(cd packages/strands-exaone-typescript && npm run check --workspaces=false)
 
 # LangChain TypeScript
 (cd packages/langchain-exaone-typescript && npm run check --workspaces=false)
