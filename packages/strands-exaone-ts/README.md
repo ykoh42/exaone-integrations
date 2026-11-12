@@ -6,11 +6,10 @@ Users are responsible for reviewing and complying with the terms that apply to t
 
 ## Quick start
 
-The package requires Node.js 22 or newer and uses `@strands-agents/sdk` and Zod 4.6.6 or newer within major version 4 as peer dependencies. It has not been published to npm. Use the Node.js version in `.node-version` and npm 11.20.0 for the checkout's development tools. From the checkout root, install the workspace and build the package:
+The package is published on npm as `strands-exaone@0.1.0`. It requires Node.js 22 or newer and uses `@strands-agents/sdk` and Zod 4.6.6 or newer within major version 4 as peer dependencies. Install it in your project with:
 
 ```bash
-npm ci
-npm run build --workspace=strands-exaone
+npm install strands-exaone
 export EXAONE_API_KEY='your-api-key'
 ```
 

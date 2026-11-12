@@ -1,0 +1,195 @@
+name: Publish
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Package tag, for example strands-exaone-py-v0.1.0
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    if: github.repository == 'ykoh42/exaone-integrations' && (github.event_name == 'workflow_dispatch' || !github.event.release.prerelease)
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.metadata.outputs.tag }}
+      commit_sha: ${{ steps.metadata.outputs.commit_sha }}
+      package_dir: ${{ steps.metadata.outputs.package_dir }}
+      package_name: ${{ steps.metadata.outputs.package_name }}
+      ecosystem: ${{ steps.metadata.outputs.ecosystem }}
+      version: ${{ steps.metadata.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ github.event.release.tag_name || inputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate release tag and package metadata
+        id: metadata
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          git merge-base --is-ancestor HEAD origin/main
+          python - <<'PY'
+          import json
+          import os
+          import pathlib
+          import re
+          import subprocess
+          import tomllib
+
+          tag = os.environ["RELEASE_TAG"]
+          match = re.fullmatch(
+              r"(?P<framework>strands|langchain)-exaone-(?P<language>py|ts)-v(?P<version>\d+\.\d+\.\d+)",
+              tag,
+          )
+          if match is None:
+              raise SystemExit("Use a stable package tag such as strands-exaone-py-v0.1.0.")
+
+          framework = match.group("framework")
+          language = match.group("language")
+          version = match.group("version")
+          expected_name = f"{framework}-exaone"
+          package_dir = f"{framework}-exaone-{language}"
+          package_path = pathlib.Path("packages") / package_dir
+
+          if language == "py":
+              metadata = tomllib.loads((package_path / "pyproject.toml").read_text())["project"]
+              ecosystem = "pypi"
+          else:
+              metadata = json.loads((package_path / "package.json").read_text())
+              ecosystem = "npm"
+              if metadata.get("private", False):
+                  raise SystemExit("Refusing to publish a private npm package.")
+              repository = metadata.get("repository", {})
+              repository_url = repository.get("url") if isinstance(repository, dict) else repository
+              if repository_url != "git+https://github.com/ykoh42/exaone-integrations.git":
+                  raise SystemExit("npm repository metadata must point to ykoh42/exaone-integrations.")
+
+          if metadata.get("version") != version:
+              raise SystemExit(f"Tag version {version} does not match package version {metadata.get('version')}.")
+          if metadata.get("name") != expected_name:
+              raise SystemExit(f"Tag identifies {expected_name}, but package metadata names {metadata.get('name')}.")
+
+          values = {
+              "tag": tag,
+              "commit_sha": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
+              "package_dir": package_dir,
+              "package_name": metadata["name"],
+              "ecosystem": ecosystem,
+              "version": version,
+          }
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              for key, value in values.items():
+                  print(f"{key}={value}", file=output)
+          PY
+
+  check:
+    needs: validate
+    uses: ./.github/workflows/ci.yml
+    with:
+      ref: ${{ needs.validate.outputs.commit_sha }}
+
+  build_npm:
+    if: needs.validate.outputs.ecosystem == 'npm'
+    needs: [validate, check]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate.outputs.commit_sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - run: npm install --global npm@11.20.0
+      - run: npm ci
+      - name: Pack npm distribution
+        env:
+          PACKAGE_NAME: ${{ needs.validate.outputs.package_name }}
+        run: npm pack --workspace="$PACKAGE_NAME" --pack-destination "$RUNNER_TEMP"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: npm-package
+          path: ${{ runner.temp }}/${{ needs.validate.outputs.package_name }}-${{ needs.validate.outputs.version }}.tgz
+          if-no-files-found: error
+
+  publish_npm:
+    if: github.event_name == 'release' && needs.validate.outputs.ecosystem == 'npm'
+    needs: [validate, check, build_npm]
+    runs-on: ubuntu-24.04
+    environment:
+      name: npm
+      url: https://www.npmjs.com/package/${{ needs.validate.outputs.package_name }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - run: npm install --global npm@11.20.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: npm-package
+          path: ${{ runner.temp }}
+      - name: Stage npm release for maintainer approval
+        env:
+          PACKAGE_TARBALL: ${{ runner.temp }}/${{ needs.validate.outputs.package_name }}-${{ needs.validate.outputs.version }}.tgz
+        run: npm stage publish "$PACKAGE_TARBALL" --access public
+
+  build_pypi:
+    if: needs.validate.outputs.ecosystem == 'pypi'
+    needs: [validate, check]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate.outputs.commit_sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          version: 0.13.7
+          enable-cache: true
+      - name: Build distributions
+        working-directory: packages/${{ needs.validate.outputs.package_dir }}
+        run: uv build
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pypi-distributions
+          path: packages/${{ needs.validate.outputs.package_dir }}/dist/*
+          if-no-files-found: error
+
+  publish_pypi:
+    if: github.event_name == 'release' && needs.validate.outputs.ecosystem == 'pypi'
+    needs: [validate, check, build_pypi]
+    runs-on: ubuntu-24.04
+    environment:
+      name: pypi
+      url: https://pypi.org/project/${{ needs.validate.outputs.package_name }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pypi-distributions
+          path: dist
+      - name: Publish to PyPI with trusted publishing
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3

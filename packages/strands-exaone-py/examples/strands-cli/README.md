@@ -4,7 +4,7 @@ Run a Python Strands harness with the EXAONE model provider and a local example 
 
 ## Setup
 
-Python 3.10 or newer and Node.js 22 or newer are required. The `strands-exaone` package is not published yet. From the root of this checkout, create an environment for the agent and install the provider from the local package:
+Python 3.10 or newer and Node.js 22 or newer are required. The Python distribution is awaiting its PyPI release. From the root of this checkout, create an environment for the agent and install the provider from the local package:
 
 ```bash
 cd packages/strands-exaone-py/examples/strands-cli

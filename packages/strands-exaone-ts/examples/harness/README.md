@@ -4,7 +4,7 @@ Run a prompt with the EXAONE provider and Strands Harness. File reading is disab
 
 ## Setup
 
-The provider runs on Node.js 22 or newer. Building this checkout requires Node.js 22.13.0 or newer and npm 11.20.0. The `strands-exaone` package is not published yet, so install it from this checkout:
+The provider runs on Node.js 22 or newer. Building this checkout requires Node.js 22.13.0 or newer and npm 11.20.0. The published `strands-exaone@0.1.0` package is available on npm; this example installs the local checkout so you can test source changes:
 
 ```bash
 npm ci

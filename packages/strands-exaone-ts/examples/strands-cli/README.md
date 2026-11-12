@@ -4,7 +4,7 @@ Run a TypeScript Strands harness with the EXAONE model provider and a local exam
 
 ## Setup
 
-The provider runs on Node.js 22 or newer. Building this checkout requires Node.js 22.13.0 or newer and npm 11.20.0; `.node-version` selects the checkout's development version. The `strands-exaone` package is not published yet, so the example installs it from this checkout. From the repository root, install the workspace dependencies and build the provider:
+The provider runs on Node.js 22 or newer. Building this checkout requires Node.js 22.13.0 or newer and npm 11.20.0; `.node-version` selects the checkout's development version. The published `strands-exaone@0.1.0` package is available on npm; this example installs the local checkout to exercise source changes. From the repository root, install the workspace dependencies and build the provider:
 
 ```bash
 npm ci

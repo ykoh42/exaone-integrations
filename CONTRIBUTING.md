@@ -61,3 +61,9 @@ node scripts/live-smoke-typescript.mjs
 The TypeScript smoke test includes a comparison with the Strands OpenAI chat provider. To run the Python comparison, install `strands-agents[openai]` and run `python scripts/live-compare-python.py`.
 
 The scripts do not load `.env` automatically. Run live checks serially within the account's limits and use synthetic inputs. Never commit API keys, generated responses, or reasoning. Logprob tokens and other response metadata can also contain generated or user-provided content.
+
+## Releases
+
+The `Publish` workflow releases one distribution at a time. Create a tag named `<package-directory>-v<version>` from `main`, then publish a stable GitHub release from that tag. For example, the Strands Python distribution uses `strands-exaone-py-v0.1.0`. Running `workflow_dispatch` with a tag validates and builds the release without publishing it.
+
+Before publishing, configure OIDC trusted publishers for each registry package. For npm, use the GitHub Actions publisher for `ykoh42/exaone-integrations`, workflow `publish.yml`, and environment `npm`; leave direct publishing disabled so the workflow can only stage a package. A maintainer must review and approve the staged npm package with 2FA. For PyPI, configure a trusted publisher for each project with owner `ykoh42`, repository `exaone-integrations`, workflow `publish.yml`, and environment `pypi`. New PyPI projects can use a pending publisher. Protect the GitHub `pypi` environment with a required reviewer before enabling the publisher; PyPI uploads immediately after that job is approved. See the [npm trusted publishing guide](https://docs.npmjs.com/trusted-publishers/) and [PyPI trusted publishers guide](https://docs.pypi.org/trusted-publishers/) for account setup.

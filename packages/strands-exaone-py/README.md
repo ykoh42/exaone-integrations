@@ -6,7 +6,7 @@ Users are responsible for reviewing and complying with the terms that apply to t
 
 ## Quick start
 
-The package requires Python 3.10 or newer and `strands-agents` 1.64.x. It has not been published to PyPI. From the root of a checkout, install it in your virtual environment:
+The Python distribution requires Python 3.10 or newer and `strands-agents` 1.64.x. It is awaiting its PyPI release. From the root of a checkout, install it in your virtual environment:
 
 ```bash
 python -m pip install -e ./packages/strands-exaone-py
