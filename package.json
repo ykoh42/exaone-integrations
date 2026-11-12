@@ -17,7 +17,7 @@
   "scripts": {
     "build": "npm run build --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
-    "lint": "oxlint packages/strands-exaone-typescript packages/langchain-exaone-typescript --deny-warnings",
+    "lint": "oxlint --config .oxlintrc.json packages/strands-exaone-typescript packages/langchain-exaone-typescript --deny-warnings",
     "pretest": "npm run build",
     "test": "vitest run",
     "pretest:watch": "npm run build",
