@@ -13,7 +13,7 @@ concurrency:
 
 jobs:
   python:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     strategy:
       fail-fast: false
@@ -51,7 +51,7 @@ jobs:
       - run: python -c 'from importlib.resources import files; assert files("strands_exaone").joinpath("py.typed").is_file()'
 
   langchain-python:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     strategy:
       fail-fast: false
@@ -89,7 +89,7 @@ jobs:
           "$RUNNER_TEMP/langchain-exaone-python-venv/bin/python" -c 'from importlib.resources import files; assert files("langchain_exaone").joinpath("py.typed").is_file()'
 
   typescript:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     strategy:
       fail-fast: false
@@ -120,7 +120,7 @@ jobs:
           node --input-type=module -e "import { ExaoneModel } from 'strands-exaone'; import { Model } from '@strands-agents/sdk'; if (!(new ExaoneModel() instanceof Model)) process.exit(1)"
 
   langchain-typescript:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     strategy:
       fail-fast: false
