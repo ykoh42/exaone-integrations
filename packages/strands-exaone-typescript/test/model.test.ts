@@ -31,18 +31,72 @@ describe('ExaoneModel', () => {
     expect(() => new ExaoneModel({ temperature: -0.1 })).toThrow('temperature must be a finite number at least 0')
     expect(() => new ExaoneModel({ presencePenalty: 2.01 })).toThrow('presencePenalty must be a finite number between -2 and 2')
     expect(() => new ExaoneModel({ maxTokens: -1 })).toThrow('maxTokens must be a non-negative integer')
+    expect(() => new ExaoneModel({ maxTokens: 524289 })).toThrow('maxTokens cannot exceed the EXAONE context limit')
+    expect(() => new ExaoneModel({ contextWindowLimit: 0 })).toThrow('contextWindowLimit must be a positive integer')
+    expect(() => new ExaoneModel({ reasoningEffort: 'extreme' as never })).toThrow('reasoningEffort must be one of')
+    expect(() => new ExaoneModel({ includeUsage: 'yes' as never })).toThrow('includeUsage must be a boolean')
+    expect(() => new ExaoneModel({ timeoutMs: 1.5 })).toThrow(RangeError)
+    expect(() => new ExaoneModel({ modelInfo: { limits: { contextWindow: 0 } } })).toThrow('modelInfo.limits.contextWindow must be a positive integer')
+    expect(() => new ExaoneModel({ params: { n: 2 } })).toThrow('Strands supports exactly one completion choice')
+    expect(() => new ExaoneModel({ params: { stream_options: [] } })).toThrow('stream_options must be an object or null')
 
     const model = new ExaoneModel({ topK: 1, topP: 0, temperature: 0, presencePenalty: -2, maxTokens: 0 })
     expect(() => model.updateConfig({ topP: 1.01 })).toThrow('topP must be a finite number between 0 and 1')
     expect(model.getConfig()).toMatchObject({ topK: 1, topP: 0, temperature: 0, presencePenalty: -2, maxTokens: 0 })
   })
 
+  it.each([
+    'http://api.example/v1',
+    'ftp://api.example/v1',
+    'https://user:password@api.example/v1',
+    'https://api.example/v1?token=secret',
+    'https://api.example/v1#fragment',
+  ])('rejects unsafe baseURL values: %s', (baseURL) => {
+    expect(() => new ExaoneModel({ apiKey: 'key', baseURL })).toThrow(/baseURL/)
+  })
+
+  it.each(['localhost', '127.0.0.1', '[::1]'])('allows loopback HTTP for local test servers: %s', (host) => {
+    const model = new ExaoneModel({ apiKey: 'key', baseURL: `http://${host}:8000/v1` })
+    expect(model.getConfig().baseURL).toBe(`http://${host}:8000/v1`)
+  })
+
   it('explains both ways to provide the API key', async () => {
     await expect(collect(new ExaoneModel({ apiKey: '' }))).rejects.toThrow(/apiKey.*EXAONE_API_KEY/)
   })
 
+  it('uses modelInfo limits according to the Strands merge contract', () => {
+    const model = new ExaoneModel({
+      apiKey: 'key',
+      contextWindowLimit: 4096,
+      modelInfo: { limits: { contextWindow: 2048, maxOutputTokens: 1024 } },
+    })
+    expect(model.modelInfo.limits.contextWindow).toBe(2048)
+    expect(model.modelInfo.limits.maxOutputTokens).toBe(1024)
+    const capabilitiesOnly = new ExaoneModel({ modelInfo: { capabilities: { nativeStructuredOutput: true } } })
+    expect(capabilitiesOnly.modelInfo.limits.contextWindow).toBe(524_288)
+  })
+
+  it.each(['low', 'medium', 'high', 'max'] as const)('sends reasoning effort %s', async (reasoningEffort) => {
+    const fetcher = vi.fn(async () => response(sse([event({ content: 'ok' }), event({}, 'stop')])))
+    await collect(new ExaoneModel({ apiKey: 'key', reasoningEffort, fetch: fetcher as typeof fetch }))
+    const init = (fetcher.mock.calls as unknown as [string, RequestInit][])[0]![1]
+    expect(JSON.parse(String(init.body))).toMatchObject({ reasoning_effort: reasoningEffort })
+  })
+
+  it('omits an unspecified reasoning effort', async () => {
+    const fetcher = vi.fn(async () => response(sse([event({ content: 'ok' }), event({}, 'stop')])))
+    await collect(new ExaoneModel({ apiKey: 'key', fetch: fetcher as typeof fetch }))
+    const init = (fetcher.mock.calls as unknown as [string, RequestInit][])[0]![1]
+    expect(JSON.parse(String(init.body))).not.toHaveProperty('reasoning_effort')
+  })
+
   it('preserves reasoning, text and usage while formatting request options', async () => {
-    const data = sse([event({ reasoning_content: '생각' }), event({ content: ' 답' }), event({}, 'stop'), wire([], { usage })])
+    const data = sse([
+      event({ reasoning_content: '생각' }),
+      event({ content: ' 답' }),
+      event({}, 'stop'),
+      wire([], { usage, result_code: 'SUCCESS', description: 'Synthetic success metadata' }),
+    ])
     const fetcher = vi.fn(async () => response(data, 200, { 'x-request-id': 'request-1' }))
     const onMetadata = vi.fn()
     const model = new ExaoneModel({ apiKey: 'private-key', fetch: fetcher as typeof fetch, reasoningEffort: 'medium', preserveThinking: true, enableThinking: false, topK: 1, maxTokens: 0, includeUsage: false, onMetadata })
@@ -53,10 +107,74 @@ describe('ExaoneModel', () => {
     expect(result.metadata?.usage).toEqual({ inputTokens: 3, outputTokens: 5, totalTokens: 8 })
     expect(result.metadata?.trace).toMatchObject({ exaone: { requestId: 'request-1', usage: { reasoning_tokens: 2 } } })
     expect(onMetadata).toHaveBeenCalledOnce()
+    expect(onMetadata.mock.calls[0]![0]).toMatchObject({
+      status: 200,
+      response: { result_code: 'SUCCESS', description: 'Synthetic success metadata' },
+    })
     const init = (fetcher.mock.calls as unknown as [string, RequestInit][])[0]![1]
     const body = JSON.parse(String(init.body))
     expect(body).toMatchObject({ model: 'k-exaone_v2.5', max_tokens: 0, top_k: 1, reasoning_effort: 'medium', stream_options: { include_usage: false }, chat_template_kwargs: { preserve_thinking: true, enable_thinking: false } })
     expect(JSON.stringify(model.getConfig())).not.toContain('private-key')
+  })
+
+  it('passes through additional Chat Completions parameters and stream options', async () => {
+    const fetcher = vi.fn(async () => response(sse([event({ content: 'ok' }), event({}, 'stop')])))
+    const model = new ExaoneModel({
+      apiKey: 'key',
+      includeUsage: true,
+      params: {
+        frequency_penalty: 0.25,
+        seed: 0,
+        stop: ['<END>'],
+        logprobs: true,
+        top_logprobs: 3,
+        parallel_tool_calls: false,
+        response_format: { type: 'json_object' },
+        stream_options: { include_usage: false, custom_extension: 'retained' },
+      },
+      fetch: fetcher as typeof fetch,
+    })
+    await collect(model)
+    const init = (fetcher.mock.calls as unknown as [string, RequestInit][])[0]![1]
+    const body = JSON.parse(String(init.body))
+    expect(body).toMatchObject({
+      frequency_penalty: 0.25,
+      seed: 0,
+      stop: ['<END>'],
+      logprobs: true,
+      top_logprobs: 3,
+      parallel_tool_calls: false,
+      response_format: { type: 'json_object' },
+      stream_options: { include_usage: true, custom_extension: 'retained' },
+    })
+  })
+
+  it.each([
+    ['length', 'maxTokens'],
+    ['content_filter', 'contentFiltered'],
+  ] as const)('maps finish_reason=%s into the Strands stop reason', async (finish, expected) => {
+    const model = new ExaoneModel({ apiKey: 'key', fetch: transport(response(sse([event({ content: 'partial' }), event({}, finish)]))) })
+    const events = await collect(model)
+    expect(events.find((item) => item.type === 'modelMessageStopEvent')).toMatchObject({ stopReason: expected })
+  })
+
+  it.each([true, false])('exposes refusal-only responses as assistant text (stream=%s)', async (streaming) => {
+    const refusal = 'I cannot help with that request.'
+    const fetcher = transport(streaming
+      ? response(sse([event({ refusal }), event({}, 'stop')]))
+      : response(JSON.stringify(wire([{ index: 0, message: { refusal }, finish_reason: 'stop' }]))))
+    const result = await aggregate(new ExaoneModel({ apiKey: 'key', stream: streaming, fetch: fetcher }))
+    expect(result.message.content).toContainEqual(expect.objectContaining({ type: 'textBlock', text: refusal }))
+  })
+
+  it.each([true, false])('preserves refusal when content contains only whitespace (stream=%s)', async (streaming) => {
+    const refusal = 'I cannot help with that request.'
+    const fetcher = transport(streaming
+      ? response(sse([event({ content: '\n\n', refusal }), event({}, 'stop')]))
+      : response(JSON.stringify(wire([{ index: 0, message: { content: '\n\n', refusal }, finish_reason: 'stop' }]))))
+    const result = await aggregate(new ExaoneModel({ apiKey: 'key', stream: streaming, fetch: fetcher }))
+    const text = result.message.content.filter((block) => block.type === 'textBlock').map((block) => block.text).join('')
+    expect(text).toBe(`\n\n${refusal}`)
   })
 
   it('executes tools and returns reasoning and tool results in the next agent turn', async () => {
@@ -99,7 +217,7 @@ describe('ExaoneModel', () => {
     const model = new ExaoneModel({ apiKey: 'key', fetch: fetcher as typeof fetch, stream: false })
     const messages = [
       Message.fromMessageData({ role: 'assistant', content: [{ reasoning: { text: 'reason' } }, { toolUse: { name: 'tool', toolUseId: 'id1', input: { x: 2 } } }] }),
-      Message.fromMessageData({ role: 'user', content: [{ toolResult: { toolUseId: 'id1', status: 'success', content: [{ text: '7' }] } }, { text: 'next' }] }),
+      Message.fromMessageData({ role: 'user', content: [{ text: 'next' }, { toolResult: { toolUseId: 'id1', status: 'success', content: [{ text: '7' }] } }] }),
     ]
     await collect(model, messages)
     const init = (fetcher.mock.calls as unknown as [string, RequestInit][])[0]![1]
@@ -391,7 +509,7 @@ describe('ExaoneModel', () => {
     }
   })
 
-  it.each(['', '{', 'null', '42', '[]'])('rejects incomplete or non-object tool arguments %s', async (args) => {
+  it.each(['{', 'null', '42', '[]'])('rejects incomplete or non-object tool arguments %s', async (args) => {
     const data = sse([event({ tool_calls: [{ index: 0, id: 'id', function: { name: 'fn', arguments: args } }] }), event({}, 'tool_calls')])
     const model = new ExaoneModel({ apiKey: 'key', fetch: transport(response(data)) })
     await expect(collect(model)).rejects.toThrow(ModelError)
@@ -468,9 +586,8 @@ describe('ExaoneModel', () => {
     expect(body.response_format).toMatchObject({ type: 'json_schema', json_schema: { strict: true } })
   })
 
-  it('rejects multiple requested choices and unsupported image input', async () => {
-    const model = new ExaoneModel({ apiKey: 'key', params: { n: 2 } })
-    await expect(collect(model)).rejects.toThrow('n must be 1')
+  it('rejects multiple requested choices during configuration validation', () => {
+    expect(() => new ExaoneModel({ apiKey: 'key', params: { n: 2 } })).toThrow('Strands supports exactly one completion choice')
   })
 })
 

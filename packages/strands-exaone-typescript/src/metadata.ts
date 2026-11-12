@@ -1,6 +1,6 @@
 /** Extract provider metadata without collecting assistant content, reasoning, or tool calls. */
 const RESPONSE_FIELDS = [
-  'id', 'object', 'created', 'model', 'metadata', 'service_tier', 'system_fingerprint', 'moderation',
+  'id', 'object', 'created', 'model', 'metadata', 'service_tier', 'system_fingerprint', 'moderation', 'result_code', 'description',
 ] as const
 const CHOICE_FIELDS = ['finish_reason', 'matched_stop'] as const
 const MESSAGE_FIELDS = ['refusal', 'annotations', 'audio', 'function_call'] as const

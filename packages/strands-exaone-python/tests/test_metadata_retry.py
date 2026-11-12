@@ -8,6 +8,7 @@ import threading
 from collections.abc import AsyncIterator
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -133,8 +134,12 @@ async def test_captured_429_without_retry_hints_uses_bounded_backoff(monkeypatch
         model = ExaoneModel(api_key="key", http_client=client, max_retries=1, base_retry_delay=1, max_retry_delay=30)
         await events(model)
     assert attempts == 2
-    assert random_bounds == [(0, 1)]
-    assert delays == [0.5]
+    assert random_bounds == [(1, 1)]
+    assert delays == [1]
+
+
+def test_retry_without_hints_stops_when_cap_is_below_minimum() -> None:
+    assert retry_module.retry_delay({}, attempt=0, base=1, maximum=0.5) is None
 
 
 @pytest.mark.parametrize("status", [400, 401, 404, 422])
@@ -411,6 +416,33 @@ async def test_nonstream_and_structured_output_metadata() -> None:
             {"index": 0, "finish_reason": "stop", "matched_stop": "end", "logprobs": None}
         ]
         assert "secret" not in str(record["response"])
+
+
+async def test_latency_metric_excludes_metadata_callback_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = [100.0]
+
+    async def on_metadata(_metadata: dict[str, Any]) -> None:
+        clock[0] += 12.0
+
+    monkeypatch.setattr(model_module, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                content=sse(
+                    {"choices": [{"index": 0, "delta": {"content": "ok"}, "finish_reason": "stop"}]},
+                    {"choices": [], "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}},
+                ),
+            )
+        )
+    ) as client:
+        model = ExaoneModel(api_key="key", http_client=client, metadata_callback=on_metadata)
+        result = await events(model)
+
+    metrics = next(
+        event["metadata"]["metrics"] for event in result if "metadata" in event and "metrics" in event["metadata"]
+    )
+    assert metrics["latencyMs"] == 0
 
 
 async def test_message_metadata_keeps_stream_fragments_and_nonstream_fields() -> None:

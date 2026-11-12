@@ -7,19 +7,35 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   python:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
-        python-version: ['3.10', '3.12', '3.13']
-        harness-version: ['0.1.2', '0.3.4']
+        include:
+          - python-version: '3.10'
+            harness-version: '0.1.2'
+          - python-version: '3.10'
+            harness-version: '0.3.4'
+          - python-version: '3.11'
+            harness-version: '0.3.4'
+          - python-version: '3.12'
+            harness-version: '0.3.4'
+          - python-version: '3.13'
+            harness-version: '0.3.4'
+          - python-version: '3.14'
+            harness-version: '0.3.4'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ matrix.python-version }}
       - run: python -m pip install -e './packages/strands-exaone-python[dev]'
@@ -34,12 +50,51 @@ jobs:
       - run: python -c 'from strands_exaone import ExaoneModel; print(ExaoneModel.__name__)'
       - run: python -c 'from importlib.resources import files; assert files("strands_exaone").joinpath("py.typed").is_file()'
 
-  typescript:
+  langchain-python:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
-        node-version: ['22.13.0', '24']
+        python-version: ['3.10', '3.11', '3.12', '3.13', '3.14']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          version: 0.13.7
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          working-directory: packages/langchain-exaone-python
+      - working-directory: packages/langchain-exaone-python
+        run: uv sync --locked --all-groups
+      - working-directory: packages/langchain-exaone-python
+        run: uv run --locked ruff check src tests
+      - working-directory: packages/langchain-exaone-python
+        run: uv run --locked ruff format --check src tests
+      - working-directory: packages/langchain-exaone-python
+        run: uv run --locked pytest
+      - working-directory: packages/langchain-exaone-python
+        run: uv build
+      - name: Verify wheel in an independent environment
+        working-directory: packages/langchain-exaone-python
+        run: |
+          python -m venv "$RUNNER_TEMP/langchain-exaone-python-venv"
+          "$RUNNER_TEMP/langchain-exaone-python-venv/bin/python" -m pip install dist/*.whl
+          "$RUNNER_TEMP/langchain-exaone-python-venv/bin/python" -c 'from langchain_core.language_models import BaseChatModel; from langchain_exaone import ChatEXAONE; assert isinstance(ChatEXAONE(api_key="package-check"), BaseChatModel)'
+          "$RUNNER_TEMP/langchain-exaone-python-venv/bin/python" -c 'from importlib.resources import files; assert files("langchain_exaone").joinpath("py.typed").is_file()'
+
+  typescript:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ['22.18.0', '24']
         harness-version: ['0.1.1', '0.3.4']
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -63,3 +118,37 @@ jobs:
           test "$(npm prefix)" = "$(pwd -P)"
           npm install --ignore-scripts "$RUNNER_TEMP"/strands-exaone-*.tgz
           node --input-type=module -e "import { ExaoneModel } from 'strands-exaone'; import { Model } from '@strands-agents/sdk'; if (!(new ExaoneModel() instanceof Model)) process.exit(1)"
+
+  langchain-typescript:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ['22.18.0', '24']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+          cache-dependency-path: packages/langchain-exaone-typescript/package-lock.json
+      - run: npm install --global npm@11.20.0
+      - working-directory: packages/langchain-exaone-typescript
+        run: npm ci --ignore-scripts --workspaces=false
+      - working-directory: packages/langchain-exaone-typescript
+        run: npm run check --workspaces=false
+      - name: Verify npm package in an independent project
+        working-directory: packages/langchain-exaone-typescript
+        run: |
+          npm pack --pack-destination "$RUNNER_TEMP"
+          mkdir -p "$RUNNER_TEMP/langchain-exaone-package-check"
+          cd "$RUNNER_TEMP/langchain-exaone-package-check"
+          cat > package.json <<'JSON'
+          {"private":true}
+          JSON
+          npm install --ignore-scripts "$RUNNER_TEMP"/langchain-exaone-*.tgz
+          node --input-type=module -e "import { BaseChatModel } from '@langchain/core/language_models/chat_models'; import { ChatExaone } from 'langchain-exaone'; if (!(new ChatExaone({ apiKey: 'package-check' }) instanceof BaseChatModel)) process.exit(1)"
+          node -e "const { ChatExaone } = require('langchain-exaone'); if (new ChatExaone({ apiKey: 'package-check' })._llmType() !== 'exaone') process.exit(1)"

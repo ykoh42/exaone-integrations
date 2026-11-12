@@ -52,8 +52,7 @@ describe('request timeout lifetime', () => {
   })
 
   it.each([1.5, -1, 4_294_967_296, Infinity, NaN])('rejects an out-of-range timeout %s', async (timeoutMs) => {
-    const model = new ExaoneModel({ apiKey: 'key', timeoutMs, fetch: stalledFetch })
-    await expect(collect(model)).rejects.toBeInstanceOf(RangeError)
+    expect(() => new ExaoneModel({ apiKey: 'key', timeoutMs, fetch: stalledFetch })).toThrow(RangeError)
   })
 
   it('supports a zero timeout', async () => {

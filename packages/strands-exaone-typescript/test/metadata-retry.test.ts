@@ -50,6 +50,27 @@ describe('response metadata', () => {
     expect(onMetadata.mock.calls[0]![0].usage).toMatchObject({ prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 })
   })
 
+  it.each([
+    ['string', 'malformed'],
+    ['array', [{ prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 }]],
+    ['number', 42],
+    ['boolean', true],
+  ])('omits a malformed %s usage container from typed metadata', async (_name, usage) => {
+    const onMetadata = vi.fn()
+    const model = new ExaoneModel({
+      apiKey: 'test-key',
+      fetch: async () => stream([{ choices: [{ index: 0, delta: { content: 'ok' }, finish_reason: 'stop' }], usage }]),
+      onMetadata,
+    })
+
+    const events = await collect(model)
+    const metadataEvent = events.find((item) => item.type === 'modelMetadataEvent')
+    expect(metadataEvent).not.toHaveProperty('usage')
+    expect(metadataEvent).not.toHaveProperty('trace.exaone.usage')
+    expect(onMetadata).toHaveBeenCalledOnce()
+    expect(onMetadata.mock.calls[0]![0]).not.toHaveProperty('usage')
+  })
+
   it('requests streaming usage by default, respects updates, and omits stream options for non-streaming requests', async () => {
     const requests: Record<string, unknown>[] = []
     const fetcher = fakeFetch(async (_url, init) => {
@@ -276,7 +297,7 @@ describe('opt-in retry policy', () => {
       const result = collect(new ExaoneModel({
         apiKey: 'key', fetch: fetcher, stream: false, maxRetries: 1, baseRetryDelayMs: 1_000,
       }))
-      await vi.advanceTimersByTimeAsync(499)
+      await vi.advanceTimersByTimeAsync(999)
       expect(attempts).toBe(1)
       await vi.advanceTimersByTimeAsync(1)
       await result
@@ -284,6 +305,21 @@ describe('opt-in retry policy', () => {
     } finally {
       random.mockRestore()
     }
+  })
+
+  it('does not retry a hintless 429 when the cap is below the base delay', async () => {
+    let attempts = 0
+    const fetcher = fakeFetch(async () => {
+      attempts++
+      return new Response('{"error":{"message":"limited"}}', { status: 429 })
+    })
+    const model = new ExaoneModel({
+      apiKey: 'key', fetch: fetcher, stream: false, maxRetries: 1,
+      baseRetryDelayMs: 1_000, maxRetryDelayMs: 100,
+    })
+
+    await expect(collect(model)).rejects.toBeInstanceOf(ModelThrottledError)
+    expect(attempts).toBe(1)
   })
 
   it('does not shorten a server retry delay beyond the configured cap', async () => {

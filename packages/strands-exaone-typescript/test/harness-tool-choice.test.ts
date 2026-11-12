@@ -47,6 +47,32 @@ describe('tool choice and content boundaries', () => {
     expect(callback).toHaveBeenCalledOnce()
   })
 
+  it.each(['', ' \t\n'])('executes a zero-argument tool when EXAONE sends blank arguments (%j)', async (argumentsText) => {
+    const requests: Record<string, unknown>[] = []
+    const callback = vi.fn(() => 'synthetic result')
+    const noArguments = tool({ name: 'no_arguments', description: 'Return a fixed value', inputSchema: z.object({}), callback })
+    const fetcher: typeof fetch = async (_url, init) => {
+      requests.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
+      if (requests.length === 1) return response([
+        chunk({ tool_calls: [{ index: 0, id: 'empty-args', type: 'function', function: { name: 'no_arguments', arguments: argumentsText } }] }),
+        chunk({}, 'tool_calls'),
+      ])
+      if (requests.length === 2) return response([chunk({ content: 'Done.' }), chunk({}, 'stop')])
+      throw new Error('Unexpected synthetic request')
+    }
+    const model = new ExaoneModel({ apiKey: 'test-key', fetch: fetcher })
+    const agent = await createHarness({ ...options, model, tools: [noArguments] })
+
+    await agent.invoke('Use the tool')
+
+    expect(callback).toHaveBeenCalledOnce()
+    expect(requests).toHaveLength(2)
+    const history = requests[1]!.messages as Record<string, unknown>[]
+    const assistant = history.find((message) => message.role === 'assistant')!
+    const toolCalls = assistant.tool_calls as { function: { arguments: string } }[]
+    expect(JSON.parse(toolCalls[0]!.function.arguments)).toEqual({})
+  })
+
   it('joins SDK system text blocks without changing whitespace', async () => {
     const requests: Record<string, unknown>[] = []
     const fetcher: typeof fetch = async (_url, init) => {
@@ -60,12 +86,23 @@ describe('tool choice and content boundaries', () => {
     expect(messages[0]).toEqual({ role: 'system', content: 'First\n\nSecond ' })
   })
 
-  it('rejects an unsupported system cache point before sending a request', async () => {
-    const fetcher = vi.fn(async () => response([chunk({ content: 'unexpected' }, 'stop')]))
+  it('ignores system cache points and keeps the surrounding text', async () => {
+    const requests: Record<string, unknown>[] = []
+    const fetcher: typeof fetch = async (_url, init) => {
+      requests.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
+      return response([chunk({ content: 'Done.' }), chunk({}, 'stop')])
+    }
     const model = new ExaoneModel({ apiKey: 'test-key', fetch: fetcher })
     const agent = await createHarness({ ...options, model, systemPrompt: [new TextBlock('Context'), new CachePointBlock({ cacheType: 'default' })] })
-    await expect(agent.invoke('Hello')).rejects.toThrow('Unsupported EXAONE system content: cachePointBlock')
-    expect(fetcher).not.toHaveBeenCalled()
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    try {
+      await agent.invoke('Hello')
+      const messages = requests[0]!.messages as Record<string, unknown>[]
+      expect(messages[0]).toEqual({ role: 'system', content: 'Context' })
+      expect(warning).toHaveBeenCalledWith('cache points are not supported in EXAONE system prompts, ignoring cache points')
+    } finally {
+      warning.mockRestore()
+    }
   })
 
   it('rejects an unsupported user image before sending a request', async () => {

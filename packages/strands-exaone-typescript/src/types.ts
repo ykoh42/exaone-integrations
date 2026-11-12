@@ -4,16 +4,16 @@ import type { BaseModelConfig } from '@strands-agents/sdk'
 export interface ExaoneModelConfig extends BaseModelConfig {
   /** EXAONE API key; defaults to EXAONE_API_KEY. Never returned by getConfig(). */
   apiKey?: string
-  /** API base URL, including /v1. */
+  /** API base URL, including /v1. Remote endpoints require HTTPS; loopback HTTP is allowed for tests. */
   baseURL?: string
-  /** Total request timeout in milliseconds, including retry attempts, delays, and stream consumption. */
+  /** Deadline for attempts, retry waits, response reads, and stream consumption; custom fetch must honor abort. */
   timeoutMs?: number
   /**
    * Additional attempts for retryable HTTP responses before events are exposed.
    * Defaults to 0. Fetch failures are not retried because the request may have been sent.
    */
   maxRetries?: number
-  /** Initial exponential backoff window in milliseconds; defaults to 500. */
+  /** Minimum and initial exponential backoff delay in milliseconds; defaults to 1000. */
   baseRetryDelayMs?: number
   /** Maximum permitted delay, including server retry headers; defaults to 30000. */
   maxRetryDelayMs?: number
@@ -56,6 +56,8 @@ export interface ExaoneModelConfig extends BaseModelConfig {
  * Some fields can contain sensitive text or encoded data even after the API key is redacted.
  */
 export interface ExaoneMetadata {
+  /** Successful HTTP response status. */
+  status: number
   /** Request ID from the response headers, when present. */
   requestId?: string
   /** Raw API usage fields, including reasoning_tokens when present. */

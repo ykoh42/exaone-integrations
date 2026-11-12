@@ -89,6 +89,26 @@ async def test_native_structured_output_custom_validation_failure_is_sanitized()
     assert caught.value.__context__ is None
 
 
+async def test_native_structured_output_refusal_is_exposed_safely() -> None:
+    refusal = "Cannot return JSON for test-only-key."
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"choices": [{"finish_reason": "stop", "message": {"content": None, "refusal": refusal}}]},
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        model = ExaoneModel(api_key="test-only-key", http_client=client)
+        with pytest.raises(ExaoneError, match="refused the structured output request") as caught:
+            _ = [
+                event
+                async for event in model.structured_output(Report, [{"role": "user", "content": [{"text": "Report."}]}])
+            ]
+    assert caught.value.body == {"refusal": "Cannot return JSON for [REDACTED]."}
+    assert "test-only-key" not in str(caught.value)
+
+
 async def test_harness_forced_structured_tool_nested_failure_then_retry() -> None:
     requests: list[dict[str, Any]] = []
     calls: list[bool] = []

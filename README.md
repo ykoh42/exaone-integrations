@@ -1,15 +1,17 @@
 # EXAONE Integrations
 
-Model providers for using the EXAONE Chat Completions API with [Strands Agents](https://strandsagents.com/). This is a community-maintained project and is not affiliated with LG AI Research or the Strands Agents project.
+Community-maintained model providers for the EXAONE Chat Completions API. This project is not affiliated with LG AI Research, Strands Agents, or LangChain.
 
-Use of the EXAONE API is subject to the [EXAONE API Platform terms](https://docs.exaone.ai/en/terms/terms-of-service), including non-commercial use and restrictions on third-party access through products or services.
+Users are responsible for reviewing and complying with the terms that apply to their EXAONE API use.
 
-| Language | Package | Status |
-| --- | --- | --- |
-| Python | [`strands-exaone`](packages/strands-exaone-python/) | Implemented; not published |
-| TypeScript | [`strands-exaone`](packages/strands-exaone-typescript/) | Implemented; not published |
+| Framework | Language | Package | Status |
+| --- | --- | --- | --- |
+| Strands | Python | [`strands-exaone`](packages/strands-exaone-python/) | Implemented; not published |
+| Strands | TypeScript | [`strands-exaone`](packages/strands-exaone-typescript/) | Implemented; not published |
+| LangChain | Python | [`langchain-exaone`](packages/langchain-exaone-python/) | Implemented; not published |
+| LangChain | TypeScript | [`langchain-exaone`](packages/langchain-exaone-typescript/) | Implemented; not published |
 
-Both providers support streamed and non-streamed responses, reasoning history, tool calls, structured output, and EXAONE response metadata. Select a language above for installation, examples, configuration, and API limitations.
+Each package documents its supported framework features, installation, examples, configuration, and API limitations.
 
 ## Get started
 
@@ -22,13 +24,19 @@ python -m pip install -e ./packages/strands-exaone-python
 # TypeScript / Node.js
 npm ci
 npm run build --workspace=strands-exaone
+
+# LangChain Python
+python -m pip install ./packages/langchain-exaone-python
+
+# LangChain.js
+npm run build --workspace=langchain-exaone
 ```
 
 Set `EXAONE_API_KEY` in your environment before running an agent. See the package READMEs for examples and [CONTRIBUTING.md](CONTRIBUTING.md) for development checks.
 
-For runnable examples, see the Python [Harness](packages/strands-exaone-python/examples/harness/) and [CLI](packages/strands-exaone-python/examples/strands-cli/) examples, or the TypeScript [Harness](packages/strands-exaone-typescript/examples/harness/) and [CLI](packages/strands-exaone-typescript/examples/strands-cli/) examples.
+For runnable Strands examples, see the Python [Harness](packages/strands-exaone-python/examples/harness/) and [CLI](packages/strands-exaone-python/examples/strands-cli/) examples, or the TypeScript [Harness](packages/strands-exaone-typescript/examples/harness/) and [CLI](packages/strands-exaone-typescript/examples/strands-cli/) examples. LangChain examples are in each provider's `examples/` directory.
 
-The providers adapt a single completion choice to Strands. EXAONE Tabular is a separate API and is outside this project's scope.
+The Strands integrations adapt one completion choice to Strands' single-message model contract. EXAONE Tabular is a separate API and is outside this project's scope.
 
 ## License
 

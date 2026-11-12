@@ -124,6 +124,39 @@ async def test_harness_respects_provider_defaults_and_user_overrides(
     ) == expected
 
 
+@pytest.mark.parametrize("arguments", ["", " \t\n"])
+async def test_harness_executes_zero_argument_tool_with_empty_input(arguments: str) -> None:
+    calls: list[str] = []
+    requests: list[dict[str, Any]] = []
+
+    @tool
+    def no_arguments() -> str:
+        """Return a fixed value without arguments."""
+        calls.append("called")
+        return "7"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        if len(requests) == 1:
+            return response(
+                events(
+                    chunk(tool_delta("call_1", "no_arguments", arguments)),
+                    chunk(finish="tool_calls"),
+                )
+            )
+        return response(events(chunk({"content": "done"}), chunk(finish="stop")))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        model = ExaoneModel(api_key="test-only-key", http_client=client)
+        await make_harness(model, [no_arguments]).invoke_async("Use the tool.")
+
+    assert calls == ["called"]
+    assert len(requests) == 2
+    assistant = next(message for message in requests[1]["messages"] if message["role"] == "assistant")
+    assert assistant["content"] == ""
+    assert json.loads(assistant["tool_calls"][0]["function"]["arguments"]) == {}
+
+
 @pytest.mark.parametrize("failure", ["truncated", "invalid_arguments", "stream_error"])
 async def test_harness_does_not_execute_incomplete_tool_calls(failure: str) -> None:
     calls: list[str] = []
@@ -402,13 +435,12 @@ async def test_harness_tool_choice_and_system_text_blocks(choice: dict[str, Any]
     "block",
     [{"cachePoint": {"type": "default"}}, {"image": {"format": "png", "source": {"bytes": b"synthetic"}}}],
 )
-async def test_harness_rejects_nontext_system_blocks_before_request(block: dict[str, Any]) -> None:
-    request_count = 0
+async def test_harness_ignores_system_blocks_without_text(block: dict[str, Any]) -> None:
+    requests: list[dict[str, Any]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal request_count
-        request_count += 1
-        raise AssertionError("No request should be sent")
+        requests.append(json.loads(request.content))
+        return response(events(chunk(finish="stop")))
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         agent = create_harness(
@@ -423,9 +455,11 @@ async def test_harness_rejects_nontext_system_blocks_before_request(block: dict[
             callback_handler=None,
             retry_strategy=None,
         )
-        with pytest.raises(ValueError, match="text-only system prompt blocks"):
-            await agent.invoke_async("Hello.")
-    assert request_count == 0
+        await agent.invoke_async("Hello.")
+    assert len(requests) == 1
+    assert [message for message in requests[0]["messages"] if message["role"] == "system"] == [
+        {"role": "system", "content": "Synthetic instruction."}
+    ]
 
 
 async def test_harness_accepts_initial_split_utf8_bom() -> None:

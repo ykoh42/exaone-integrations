@@ -11,13 +11,13 @@
     "fsevents": false
   },
   "engines": {
-    "node": ">=22.13.0",
+    "node": "^22.18.0 || ^24.11.0 || >=26.0.0",
     "npm": ">=11.20.0"
   },
   "scripts": {
     "build": "npm run build --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
-    "lint": "oxlint packages/strands-exaone-typescript --deny-warnings",
+    "lint": "oxlint packages/strands-exaone-typescript packages/langchain-exaone-typescript --deny-warnings",
     "pretest": "npm run build",
     "test": "vitest run",
     "pretest:watch": "npm run build",

@@ -33,8 +33,8 @@ def events(*chunks: dict[str, Any], done: bool = True) -> bytes:
     return (payload + ("data: [DONE]\n\n" if done else "")).encode()
 
 
-def tool_delta(ident: str, name: str) -> dict[str, Any]:
-    return {"tool_calls": [{"index": 0, "id": ident, "function": {"name": name, "arguments": "{}"}}]}
+def tool_delta(ident: str, name: str, arguments: str = "{}") -> dict[str, Any]:
+    return {"tool_calls": [{"index": 0, "id": ident, "function": {"name": name, "arguments": arguments}}]}
 
 
 def response(data: bytes) -> httpx.Response:

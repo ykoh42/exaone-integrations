@@ -70,10 +70,8 @@ def _system_messages(
     system_prompt: str | None, system_prompt_content: list[SystemContentBlock] | None
 ) -> list[dict[str, Any]]:
     if system_prompt_content is not None:
-        if any(set(block) != {"text"} for block in system_prompt_content):
-            raise ValueError("EXAONE supports text-only system prompt blocks")
-        return [{"role": "system", "content": block["text"]} for block in system_prompt_content]
-    return [{"role": "system", "content": system_prompt}] if system_prompt is not None else []
+        return [{"role": "system", "content": block["text"]} for block in system_prompt_content if "text" in block]
+    return [{"role": "system", "content": system_prompt}] if system_prompt else []
 
 
 def _format_message(message: Message) -> list[dict[str, Any]]:
@@ -82,7 +80,7 @@ def _format_message(message: Message) -> list[dict[str, Any]]:
         raise ValueError(f"Unsupported Strands message role: {role}")
     text, reasoning, calls, results = _message_parts(message)
     if role == "assistant":
-        assistant: dict[str, Any] = {"role": "assistant", "content": "".join(text) if text else None}
+        assistant: dict[str, Any] = {"role": "assistant", "content": "".join(text)}
         if reasoning:
             assistant["reasoning_content"] = "".join(reasoning)
         if calls:

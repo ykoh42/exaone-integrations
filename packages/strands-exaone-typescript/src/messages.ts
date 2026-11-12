@@ -53,14 +53,17 @@ function userMessages(message: Message): WireMessage[] {
 }
 
 function systemMessages(system: StreamOptions['systemPrompt']): WireMessage[] {
-  if (typeof system === 'string') {
-    return system.length ? [{ role: 'system', content: system }] : []
-  }
+  if (typeof system === 'string') return system.trim().length ? [{ role: 'system', content: system }] : []
   const text: string[] = []
+  let hasCachePoints = false
+  let hasGuardContent = false
   for (const block of system ?? []) {
-    if (block.type !== 'textBlock') throw new TypeError(`Unsupported EXAONE system content: ${block.type}`)
-    text.push(block.text)
+    if (block.type === 'textBlock') text.push(block.text)
+    else if (block.type === 'cachePointBlock') hasCachePoints = true
+    else if (block.type === 'guardContentBlock') hasGuardContent = true
   }
+  if (hasCachePoints) console.warn('cache points are not supported in EXAONE system prompts, ignoring cache points')
+  if (hasGuardContent) console.warn('guard content is not supported in EXAONE system prompts, removing guard content block')
   return text.length ? [{ role: 'system', content: text.join('') }] : []
 }
 

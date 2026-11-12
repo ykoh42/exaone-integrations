@@ -19,7 +19,7 @@ type WireCall = {
   type?: string | null
   function?: { name?: string | null; arguments?: string | null } | null
 }
-type WireMessage = { content?: string | null; reasoning_content?: string | null; tool_calls?: WireCall[] | null }
+type WireMessage = { content?: string | null; reasoning_content?: string | null; refusal?: string | null; tool_calls?: WireCall[] | null }
 type WireChoice = { index?: number; delta?: WireMessage; message?: WireMessage; finish_reason?: string | null }
 type WireResponse = { choices?: WireChoice[]; usage?: Record<string, unknown> | null; error?: unknown } & Record<string, unknown>
 type AccumulatedCall = { id: string; name: string; arguments: string }
@@ -89,7 +89,7 @@ const RATE_LIMIT_HEADERS = [
   'x-minute-rate-limit', 'x-minute-rate-limit-remaining',
   'x-day-rate-limit', 'x-day-rate-limit-remaining',
 ]
-const MANAGED_PARAMS: ReadonlySet<string> = new Set(['model', 'messages', 'stream', 'stream_options', 'tools', 'tool_choice'])
+const MANAGED_PARAMS: ReadonlySet<string> = new Set(['model', 'messages', 'stream', 'tools', 'tool_choice'])
 
 function rateHeaders(headers: Headers): Record<string, string> {
   const result: Record<string, string> = {}
@@ -196,7 +196,18 @@ function requestParameters(config: ExaoneModelConfig, messages: Message[], optio
     messages: formatMessages(messages, options),
     stream,
   }
-  if (stream) result.stream_options = { include_usage: config.includeUsage ?? true }
+  if (stream) {
+    const streamOptions = params.stream_options
+    if (streamOptions !== undefined && streamOptions !== null && (typeof streamOptions !== 'object' || Array.isArray(streamOptions))) {
+      throw new TypeError('stream_options must be an object or null')
+    }
+    const options = { ...(streamOptions as Record<string, unknown> | null | undefined) }
+    if (config.includeUsage !== undefined) options.include_usage = config.includeUsage
+    else if (!('include_usage' in options)) options.include_usage = true
+    result.stream_options = options
+  } else {
+    delete result.stream_options
+  }
   if (options?.toolSpecs?.length) {
     result.tools = options.toolSpecs.map((tool) => ({
       type: 'function',
@@ -271,6 +282,8 @@ class EventMapper {
   private active: TextKind | undefined
   private readonly calls = new Map<number, AccumulatedCall>()
   private finished: string | undefined
+  private refusal = ''
+  private hasNonWhitespaceContent = false
   usage: Record<string, unknown> | undefined
   readonly responseMetadata = new ResponseMetadataCollector()
 
@@ -308,45 +321,83 @@ class EventMapper {
   }
 
   accept(event: WireResponse, streaming: boolean): ModelStreamEvent[] {
-    if (event.error != null) throw new ExaoneResponseError(redactMetadata(event, this.key))
+    this.validateResponse(event)
     this.responseMetadata.accept(event)
-    if (event.usage) this.usage = event.usage
-    if ((event.choices?.length ?? 0) > 1) throw new ModelError('EXAONE returned multiple choices, which Strands cannot represent')
+    if (isRecord(event.usage)) this.usage = event.usage
     const result: ModelStreamEvent[] = []
-    for (const choice of event.choices ?? []) {
-      if ((choice.index ?? 0) !== 0) throw new ModelError('EXAONE returned multiple choices, which Strands cannot represent')
-      const delta = choice.delta ?? choice.message ?? {}
-      result.push(...this.textEvents('reasoning', delta.reasoning_content))
-      result.push(...this.textEvents('text', delta.content))
-      if (delta.tool_calls) this.updateCalls(delta.tool_calls, streaming)
-      if (choice.finish_reason) {
-        if (this.finished && this.finished !== choice.finish_reason) throw new ModelError('EXAONE returned conflicting finish reasons')
-        this.finished = choice.finish_reason
-      }
-    }
+    for (const choice of event.choices ?? []) result.push(...this.acceptChoice(choice, streaming))
     return result
+  }
+
+  private validateResponse(event: WireResponse): void {
+    if (event.error != null) throw new ExaoneResponseError(redactMetadata(event, this.key))
+    if ((event.choices?.length ?? 0) > 1) throw new ModelError('EXAONE returned multiple choices, which Strands cannot represent')
+  }
+
+  private acceptChoice(choice: WireChoice, streaming: boolean): ModelStreamEvent[] {
+    if ((choice.index ?? 0) !== 0) throw new ModelError('EXAONE returned multiple choices, which Strands cannot represent')
+    const delta = choice.delta ?? choice.message ?? {}
+    const result = this.textEvents('reasoning', delta.reasoning_content)
+    this.acceptRefusal(delta.refusal)
+    if (typeof delta.content === 'string' && delta.content.trim().length > 0) this.hasNonWhitespaceContent = true
+    result.push(...this.textEvents('text', delta.content))
+    if (delta.tool_calls) this.updateCalls(delta.tool_calls, streaming)
+    this.acceptFinishReason(choice.finish_reason)
+    return result
+  }
+
+  private acceptRefusal(refusal: unknown): void {
+    if (refusal !== null && refusal !== undefined && typeof refusal !== 'string') {
+      throw new ModelError('EXAONE returned invalid refusal content; expected a string')
+    }
+    if (refusal) this.refusal += refusal
+  }
+
+  private acceptFinishReason(reason: string | null | undefined): void {
+    if (!reason) return
+    if (this.finished && this.finished !== reason) throw new ModelError('EXAONE returned conflicting finish reasons')
+    this.finished = reason
   }
 
   finish(key: string): ModelStreamEvent[] {
     if (!this.finished) throw new ModelError('EXAONE stream ended without a finish reason')
     const result: ModelStreamEvent[] = []
+    this.appendRefusal(result)
     if (this.active) result.push({ type: 'modelContentBlockStopEvent' })
-    const ids = new Set<string>()
-    for (const [, call] of [...this.calls].sort(([a], [b]) => a - b)) {
-      if (!call.id || !call.name) throw new ModelError('EXAONE returned an incomplete tool call')
-      if (ids.has(call.id)) throw new ModelError('EXAONE returned duplicate tool call IDs')
-      ids.add(call.id)
-      let args: unknown
-      try { args = JSON.parse(call.arguments) as unknown } catch { throw new ModelError('EXAONE returned invalid tool call arguments') }
-      if (!args || typeof args !== 'object' || Array.isArray(args)) throw new ModelError('EXAONE tool call arguments must be an object')
-      result.push({ type: 'modelContentBlockStartEvent', start: { type: 'toolUseStart', name: call.name, toolUseId: call.id } })
-      result.push({ type: 'modelContentBlockDeltaEvent', delta: { type: 'toolUseInputDelta', input: call.arguments } })
-      result.push({ type: 'modelContentBlockStopEvent' })
-    }
-    if (this.finished === 'tool_calls' && !this.calls.size) throw new ModelError('EXAONE returned tool_calls without a tool call')
-    if (this.calls.size && this.finished !== 'tool_calls') throw new ModelError('EXAONE returned tool calls without a tool_calls finish reason')
+    this.appendToolCalls(result)
+    this.validateToolFinishReason()
     result.push({ type: 'modelMessageStopEvent', stopReason: finishReason(this.finished, key) })
     return result
+  }
+
+  private appendRefusal(events: ModelStreamEvent[]): void {
+    if (!this.refusal || this.hasNonWhitespaceContent) return
+    if (this.calls.size) throw new ModelError('EXAONE returned refusal text together with tool calls')
+    events.push(...this.textEvents('text', this.refusal))
+  }
+
+  private appendToolCalls(events: ModelStreamEvent[]): void {
+    const ids = new Set<string>()
+    for (const [, call] of [...this.calls].sort(([a], [b]) => a - b)) this.appendToolCall(call, ids, events)
+  }
+
+  private appendToolCall(call: AccumulatedCall, ids: Set<string>, events: ModelStreamEvent[]): void {
+    if (!call.id || !call.name) throw new ModelError('EXAONE returned an incomplete tool call')
+    if (ids.has(call.id)) throw new ModelError('EXAONE returned duplicate tool call IDs')
+    ids.add(call.id)
+    // Blank arguments represent a zero-argument tool; emit JSON the SDK can aggregate as an object.
+    const input = call.arguments.trim() ? call.arguments : '{}'
+    let args: unknown
+    try { args = JSON.parse(input) as unknown } catch { throw new ModelError('EXAONE returned invalid tool call arguments') }
+    if (!args || typeof args !== 'object' || Array.isArray(args)) throw new ModelError('EXAONE tool call arguments must be an object')
+    events.push({ type: 'modelContentBlockStartEvent', start: { type: 'toolUseStart', name: call.name, toolUseId: call.id } })
+    events.push({ type: 'modelContentBlockDeltaEvent', delta: { type: 'toolUseInputDelta', input } })
+    events.push({ type: 'modelContentBlockStopEvent' })
+  }
+
+  private validateToolFinishReason(): void {
+    if (this.finished === 'tool_calls' && !this.calls.size) throw new ModelError('EXAONE returned tool_calls without a tool call')
+    if (this.calls.size && this.finished !== 'tool_calls') throw new ModelError('EXAONE returned tool calls without a tool_calls finish reason')
   }
 }
 
@@ -356,7 +407,7 @@ function validTokenCount(value: unknown): value is number {
 
 function metadataEvent(mapper: EventMapper, response: Response, key: string): { event: ModelStreamEvent; metadata: ExaoneMetadata } {
   const usage = mapper.usage
-  const metadata: ExaoneMetadata = { rateLimit: rateHeaders(response.headers) }
+  const metadata: ExaoneMetadata = { status: response.status, rateLimit: rateHeaders(response.headers) }
   const requestId = response.headers.get('x-request-id')
   if (requestId !== null) metadata.requestId = requestId
   if (usage) metadata.usage = usage
@@ -526,7 +577,7 @@ export class ExaoneModel extends Model<ExaoneModelConfig> {
         signal.throwIfAborted()
       }
       const metadata = metadataEvent(mapper, response, key)
-      await notifyMetadata(config.onMetadata, metadata.metadata, signal)
+      await notifyMetadata(config.onMetadata, structuredClone(metadata.metadata), signal)
       signal.throwIfAborted()
       yield metadata.event
     } finally { timeout?.dispose(); controller.abort() }

@@ -66,13 +66,15 @@ export async function sendWithRetry(
 ): Promise<Response> {
   const retries = config.maxRetries ?? 0
   const cap = config.maxRetryDelayMs ?? 30_000
-  const base = config.baseRetryDelayMs ?? 500
+  const base = config.baseRetryDelayMs ?? 1_000
   for (let attempt = 0; ; attempt++) {
     const response = await send()
     if (!RETRYABLE_STATUSES.has(response.status) || attempt >= retries) return response
     const requested = retryAfterDelay(response.headers)
     if (requested !== undefined && requested > cap) return response
-    const delay = requested ?? Math.random() * Math.min(cap, base * 2 ** attempt)
+    const ceiling = Math.min(cap, base * 2 ** attempt)
+    if (requested === undefined && ceiling < base) return response
+    const delay = requested ?? base + Math.random() * (ceiling - base)
     // Some transports reject or never resolve cancellation. Cleanup must not
     // block the retry policy or prevent the caller from cancelling the request.
     try {

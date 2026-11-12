@@ -5,7 +5,18 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
-_FIELDS = ("id", "object", "created", "model", "metadata", "service_tier", "system_fingerprint", "moderation")
+_FIELDS = (
+    "id",
+    "object",
+    "created",
+    "model",
+    "metadata",
+    "service_tier",
+    "system_fingerprint",
+    "moderation",
+    "result_code",
+    "description",
+)
 _CHOICE_FIELDS = ("index", "finish_reason", "logprobs", "matched_stop")
 _MESSAGE_FIELDS = ("refusal", "annotations", "audio", "function_call")
 

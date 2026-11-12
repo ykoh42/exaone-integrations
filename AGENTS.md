@@ -2,6 +2,7 @@
 
 - Keep each framework package independently buildable and installable. Test the built package when changing its packaging or public exports.
 - Preserve EXAONE reasoning, content, and metadata that the framework can represent. Reject unsupported input or response shapes explicitly, and document framework and API limitations separately.
+- **No task-specific overfitting:** Treat one-off prompts, outputs, and harness traces as observations. Change provider behavior only when an API/SDK contract or repeatable evidence across representative tasks supports a general rule; preserve model capability and avoid task-specific branches.
 - Keep equivalent Python and TypeScript behavior aligned when their framework interfaces allow it.
 - **Absolute SDK rule:** Treat the Strands Harness SDK and its underlying Strands SDK contracts as law, including behavior that appears surprising. Providers MUST follow their public APIs and conventions; adapt the provider, never modify, bypass, or “correct” an SDK. Document unsupported behavior as a provider limitation and propose changes upstream.
 - Keep the provider's community-maintained status clear.

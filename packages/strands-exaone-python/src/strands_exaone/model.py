@@ -18,10 +18,12 @@ from contextlib import aclosing, asynccontextmanager, suppress
 from copy import deepcopy
 from functools import wraps
 from typing import Any, Concatenate, ParamSpec, TypeVar, cast
+from urllib.parse import urlsplit
 
 import httpx
 import truststore
 from pydantic import BaseModel, ValidationError
+from strands.models import ModelInfo
 from strands.models.model import Model
 from strands.types.content import Messages, SystemContentBlock
 from strands.types.event_loop import Usage
@@ -40,6 +42,7 @@ T = TypeVar("T", bound=BaseModel)
 R = TypeVar("R")
 P = ParamSpec("P")
 MetadataCallback = Callable[[dict[str, Any]], Any]
+MAX_CONTEXT_TOKENS = 524_288
 _SUPPORTED_CONFIG = {
     "model_id",
     "base_url",
@@ -57,11 +60,12 @@ _SUPPORTED_CONFIG = {
     "timeout",
     "params",
     "context_window_limit",
+    "model_info",
     "max_retries",
     "base_retry_delay",
     "max_retry_delay",
 }
-_MANAGED_PARAMS = {"model", "messages", "stream", "tools", "tool_choice", "response_format"}
+_MANAGED_PARAMS = {"model", "messages", "stream", "tools", "tool_choice"}
 
 
 def _validate_config_keys(config: dict[str, Any]) -> None:
@@ -72,21 +76,63 @@ def _validate_config_keys(config: dict[str, Any]) -> None:
 
 def _validate_config(config: dict[str, Any]) -> None:
     _validate_config_keys(config)
-    if not isinstance(config.get("model_id"), str) or not config["model_id"]:
-        raise ValueError("model_id must be a non-empty string")
-    if not isinstance(config.get("base_url"), str) or not config["base_url"]:
-        raise ValueError("base_url must be a non-empty string")
-    for field in ("stream", "preserve_thinking", "enable_thinking", "include_usage"):
-        if config.get(field) is not None and not isinstance(config[field], bool):
-            raise ValueError(f"{field} must be a boolean")
-    if config.get("response_format") is not None and not isinstance(config["response_format"], dict):
-        raise ValueError("response_format must be a dictionary")
+    _validate_identity(config)
+    _validate_boolean_options(config)
+    _validate_response_format(config)
+    _validate_model_info(config)
     _validate_params(config)
     _validate_numbers(config)
 
 
+def _validate_identity(config: dict[str, Any]) -> None:
+    if not isinstance(config.get("model_id"), str) or not config["model_id"]:
+        raise ValueError("model_id must be a non-empty string")
+    if not isinstance(config.get("base_url"), str) or not config["base_url"]:
+        raise ValueError("base_url must be a non-empty string")
+    _validate_base_url(config["base_url"])
+
+
+def _validate_base_url(value: str) -> None:
+    try:
+        parsed = urlsplit(value)
+        hostname = parsed.hostname
+    except ValueError as error:
+        raise ValueError("base_url must be a valid absolute URL") from error
+    loopback = hostname in {"localhost", "127.0.0.1", "::1"}
+    if not hostname or (parsed.scheme != "https" and not (parsed.scheme == "http" and loopback)):
+        raise ValueError("base_url must use HTTPS, except for loopback HTTP test servers")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("base_url must not include URL credentials")
+    if parsed.query or parsed.fragment:
+        raise ValueError("base_url must not include a query or fragment")
+
+
+def _validate_boolean_options(config: dict[str, Any]) -> None:
+    for field in ("stream", "preserve_thinking", "enable_thinking", "include_usage"):
+        if config.get(field) is not None and not isinstance(config[field], bool):
+            raise ValueError(f"{field} must be a boolean")
+
+
+def _validate_response_format(config: dict[str, Any]) -> None:
+    if config.get("response_format") is not None and not isinstance(config["response_format"], dict):
+        raise ValueError("response_format must be a dictionary")
+
+
+def _validate_model_info(config: dict[str, Any]) -> None:
+    model_info = config.get("model_info")
+    if model_info is not None and not isinstance(model_info, ModelInfo):
+        raise ValueError("model_info must be a ModelInfo or None")
+    if model_info is not None:
+        for field in ("context_window", "max_output_tokens"):
+            value = getattr(model_info.limits, field)
+            if value is not None and (type(value) is not int or value <= 0):
+                raise ValueError(f"model_info.limits.{field} must be a positive integer")
+
+
 def _validate_params(config: dict[str, Any]) -> None:
-    params = config.get("params") or {}
+    params = config.get("params")
+    if params is None:
+        params = {}
     if not isinstance(params, dict):
         raise ValueError("params must be a dictionary")
     if reserved := set(params) & _MANAGED_PARAMS:
@@ -112,24 +158,53 @@ def _apply_stream_options(body: dict[str, Any], *, stream: bool, include_usage: 
 
 
 def _validate_numbers(config: dict[str, Any]) -> None:
+    _validate_sampling_numbers(config)
+    _validate_token_limits(config)
+    _validate_reasoning_effort(config)
+    _validate_timeout(config)
+    _validate_retry_config(config)
+
+
+def _validate_sampling_numbers(config: dict[str, Any]) -> None:
     for field, minimum, maximum in (("temperature", 0, None), ("top_p", 0, 1), ("presence_penalty", -2, 2)):
         value = config.get(field)
         _validate_number(field, value, minimum, maximum)
-    for field in ("max_tokens", "top_k", "context_window_limit"):
+
+    for field in ("max_tokens", "top_k"):
         value = config.get(field)
         if value is not None and type(value) is not int:
             raise ValueError(f"{field} must be an integer")
-    if config.get("max_tokens") is not None and config["max_tokens"] < 0:
-        raise ValueError("max_tokens cannot be negative")
+
     if config.get("top_k") is not None and config["top_k"] != -1 and config["top_k"] < 1:
         raise ValueError("top_k must be -1 or a positive integer")
+
+
+def _validate_token_limits(config: dict[str, Any]) -> None:
+    value = config.get("context_window_limit")
+    if value is not None and type(value) is not int:
+        raise ValueError("context_window_limit must be an integer")
+    if config.get("max_tokens") is not None and config["max_tokens"] < 0:
+        raise ValueError("max_tokens cannot be negative")
     if (
-        type(config.get("timeout")) not in (int, float)
-        or not math.isfinite(config["timeout"])
-        or config["timeout"] <= 0
+        config.get("max_tokens") is not None
+        and config["model_id"] == "k-exaone_v2.5"
+        and config["max_tokens"] > MAX_CONTEXT_TOKENS
     ):
-        raise ValueError("timeout must be positive and finite")
-    _validate_retry_config(config)
+        raise ValueError(f"max_tokens cannot exceed the EXAONE context limit of {MAX_CONTEXT_TOKENS}")
+    if config.get("context_window_limit") is not None and config["context_window_limit"] <= 0:
+        raise ValueError("context_window_limit must be a positive integer")
+
+
+def _validate_reasoning_effort(config: dict[str, Any]) -> None:
+    effort = config.get("reasoning_effort")
+    if effort is not None and effort not in ("low", "medium", "high", "max"):
+        raise ValueError("reasoning_effort must be one of low, medium, high, or max")
+
+
+def _validate_timeout(config: dict[str, Any]) -> None:
+    timeout = config.get("timeout")
+    if timeout is not None and (type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout < 0):
+        raise ValueError("timeout must be non-negative and finite, or None")
 
 
 def _validate_retry_config(config: dict[str, Any]) -> None:
@@ -150,16 +225,22 @@ def _validate_number(field: str, value: Any, minimum: int, maximum: int | None) 
         raise ValueError(f"Invalid {field}")
 
 
-async def _cancellable(awaitable: Awaitable[R], signal: threading.Event | None) -> R:
-    """Abort in-flight HTTP reads when a Strands cancellation signal is set."""
-    if signal is None:
+async def _cancellable(awaitable: Awaitable[R], signal: threading.Event | None, deadline: float | None = None) -> R:
+    """Abort an in-flight operation when cancelled or when its total deadline expires."""
+    if signal is None and deadline is None:
         return await awaitable
     task = asyncio.ensure_future(awaitable)
     try:
         while not task.done():
-            if signal.is_set():
-                raise asyncio.CancelledError
-            await asyncio.wait({task}, timeout=0.05)
+            _check_cancel(signal, deadline)
+            wait_timeout = 0.05 if signal is not None else None
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("EXAONE request timed out")
+                wait_timeout = remaining if wait_timeout is None else min(wait_timeout, remaining)
+            await asyncio.wait({task}, timeout=wait_timeout)
+        _check_cancel(signal, deadline)
         return task.result()
     finally:
         if not task.done():
@@ -168,9 +249,15 @@ async def _cancellable(awaitable: Awaitable[R], signal: threading.Event | None) 
                 await task
 
 
-def _check_cancel(signal: threading.Event | None) -> None:
+def _check_cancel(signal: threading.Event | None, deadline: float | None = None) -> None:
     if signal is not None and signal.is_set():
         raise asyncio.CancelledError
+    if deadline is not None and time.monotonic() >= deadline:
+        raise TimeoutError("EXAONE request timed out")
+
+
+def _operation_deadline(timeout: float | None) -> float | None:
+    return None if timeout is None else time.monotonic() + timeout
 
 
 def _copy_transport_error(error: Exception, secret: str) -> Exception:
@@ -299,13 +386,14 @@ class ExaoneModel(Model):
         enable_thinking: bool | None = None,
         include_usage: bool | None = None,
         response_format: dict[str, Any] | None = None,
-        timeout: float = 120.0,
+        timeout: float | None = None,
         params: dict[str, Any] | None = None,
-        context_window_limit: int = 524288,
+        context_window_limit: int | None = 524288,
+        model_info: ModelInfo | None = None,
         metadata_callback: MetadataCallback | None = None,
         http_client: httpx.AsyncClient | None = None,
         max_retries: int = 0,
-        base_retry_delay: float = 0.5,
+        base_retry_delay: float = 1.0,
         max_retry_delay: float = 30.0,
     ) -> None:
         """Initialize the EXAONE model provider.
@@ -327,15 +415,19 @@ class ExaoneModel(Model):
                 response content contains no reasoning.
             include_usage: Whether to request usage in a streaming response. Defaults to true.
             response_format: Output format for ordinary model calls.
-            timeout: HTTPX timeout in seconds for each request attempt.
+            timeout: Deadline for requests, retry waits, response reads, asynchronous metadata callbacks, and
+                pauses between yielded events while the caller consumes a stream. An uncooperative custom
+                transport may delay cleanup beyond the deadline. Defaults to no provider-imposed timeout.
             params: Additional EXAONE Chat Completions parameters.
             context_window_limit: Model context window in tokens.
+            model_info: Overrides the model facts exposed to Strands. This follows the SDK merge
+                contract and takes precedence over the context_window_limit shorthand.
             metadata_callback: Callback for response metadata after a successful response.
                 It is not called if the response fails or is interrupted before completion. Metadata may contain
                 generated tokens and other sensitive content even after API key redaction.
             http_client: Caller-owned async client; the provider does not close it.
             max_retries: Maximum number of retries before a response is exposed.
-            base_retry_delay: Initial retry delay ceiling, in seconds.
+            base_retry_delay: Minimum and initial exponential retry delay, in seconds.
             max_retry_delay: Maximum permitted retry delay, in seconds.
 
         Raises:
@@ -361,8 +453,9 @@ class ExaoneModel(Model):
             "include_usage": include_usage,
             "response_format": deepcopy(response_format),
             "timeout": timeout,
-            "params": deepcopy(params or {}),
+            "params": deepcopy({} if params is None else params),
             "context_window_limit": context_window_limit,
+            "model_info": deepcopy(model_info),
             "max_retries": max_retries,
             "base_retry_delay": base_retry_delay,
             "max_retry_delay": max_retry_delay,
@@ -449,38 +542,63 @@ class ExaoneModel(Model):
         body: dict[str, Any],
         signal: threading.Event | None,
         config: dict[str, Any],
+        deadline: float | None,
     ) -> httpx.Response:
+        request_options = {"timeout": config["timeout"]} if config["timeout"] is not None else {}
         request = client.build_request(
             "POST",
             config["base_url"].rstrip("/") + "/chat/completions",
             json=body,
             headers={"Authorization": f"Bearer {self._api_key}", "Content-Type": "application/json"},
-            timeout=config["timeout"],
+            **request_options,
         )
         for attempt in range(config["max_retries"] + 1):
             try:
-                response = await _cancellable(client.send(request, stream=True), signal)
+                response = await _cancellable(client.send(request, stream=True), signal, deadline)
             except (httpx.ConnectError, httpx.ConnectTimeout):
-                if attempt == config["max_retries"]:
+                if not await self._retry_connection(attempt, signal, config, deadline):
                     raise
-                delay = retry_delay({}, attempt, config["base_retry_delay"], config["max_retry_delay"])
-                assert delay is not None
-                await _cancellable(asyncio.sleep(delay), signal)
                 continue
             if response.is_success:
                 return response
-            if response.status_code in RETRY_STATUSES and attempt < config["max_retries"]:
-                delay = retry_delay(response.headers, attempt, config["base_retry_delay"], config["max_retry_delay"])
-                if delay is not None:
-                    await response.aclose()
-                    await _cancellable(asyncio.sleep(delay), signal)
-                    continue
-            await self._raise_response_error(response, signal)
+            if await self._retry_response(response, attempt, signal, config, deadline):
+                continue
+            await self._raise_response_error(response, signal, deadline)
         raise AssertionError("Retry loop ended without a response")
 
-    async def _raise_response_error(self, response: httpx.Response, signal: threading.Event | None) -> None:
+    async def _retry_connection(
+        self, attempt: int, signal: threading.Event | None, config: dict[str, Any], deadline: float | None
+    ) -> bool:
+        if attempt >= config["max_retries"]:
+            return False
+        delay = retry_delay({}, attempt, config["base_retry_delay"], config["max_retry_delay"])
+        if delay is None:
+            return False
+        await _cancellable(asyncio.sleep(delay), signal, deadline)
+        return True
+
+    async def _retry_response(
+        self,
+        response: httpx.Response,
+        attempt: int,
+        signal: threading.Event | None,
+        config: dict[str, Any],
+        deadline: float | None,
+    ) -> bool:
+        if response.status_code not in RETRY_STATUSES or attempt >= config["max_retries"]:
+            return False
+        delay = retry_delay(response.headers, attempt, config["base_retry_delay"], config["max_retry_delay"])
+        if delay is None:
+            return False
+        await response.aclose()
+        await _cancellable(asyncio.sleep(delay), signal, deadline)
+        return True
+
+    async def _raise_response_error(
+        self, response: httpx.Response, signal: threading.Event | None, deadline: float | None
+    ) -> None:
         try:
-            payload = await _cancellable(response.aread(), signal)
+            payload = await _cancellable(response.aread(), signal, deadline)
             try:
                 data = json.loads(payload)
             except ValueError:
@@ -498,8 +616,9 @@ class ExaoneModel(Model):
         usage: dict[str, Any] | None,
         metadata: ResponseMetadata,
         signal: threading.Event | None,
+        deadline: float | None,
     ) -> None:
-        _check_cancel(signal)
+        _check_cancel(signal, deadline)
         if callback is not None:
             headers = _safe_headers(response.headers, self._api_key)
             try:
@@ -513,13 +632,13 @@ class ExaoneModel(Model):
                     }
                 )
                 if inspect.isawaitable(result):
-                    await _cancellable(result, signal)
+                    await _cancellable(result, signal, deadline)
             except Exception as error:
-                _check_cancel(signal)
+                _check_cancel(signal, deadline)
                 if isinstance(error, (ModelThrottledException, ContextWindowOverflowException)):
                     raise ExaoneError("EXAONE metadata callback failed") from error
                 raise
-        _check_cancel(signal)
+        _check_cancel(signal, deadline)
 
     async def _decode_stream(
         self,
@@ -527,11 +646,12 @@ class ExaoneModel(Model):
         decoder: StreamDecoder,
         signal: threading.Event | None,
         metadata: ResponseMetadata,
+        deadline: float | None,
     ) -> AsyncIterator[dict[str, Any]]:
         iterator = sse_data(response).__aiter__()
         while True:
             try:
-                raw = await _cancellable(iterator.__anext__(), signal)
+                raw = await _cancellable(iterator.__anext__(), signal, deadline)
             except StopAsyncIteration:
                 return
             if raw == "[DONE]":
@@ -551,8 +671,9 @@ class ExaoneModel(Model):
         decoder: StreamDecoder,
         signal: threading.Event | None,
         metadata: ResponseMetadata,
+        deadline: float | None,
     ) -> AsyncIterator[dict[str, Any]]:
-        data = _parse_response(await _cancellable(response.aread(), signal))
+        data = _parse_response(await _cancellable(response.aread(), signal, deadline))
         _check_response_error(data, response, self._api_key)
         metadata.add(data)
         for event in decoder.feed(nonstream_chunk(data)):
@@ -589,6 +710,7 @@ class ExaoneModel(Model):
             ExaoneError: If the service returns an error or an invalid response.
             ExaoneThrottledError: If the service returns HTTP 429 after retries.
             ExaoneContextWindowError: If the input exceeds the model context window.
+            TimeoutError: If the configured operation deadline expires.
         """
         config = self._config
         streaming = config["stream"]
@@ -599,26 +721,28 @@ class ExaoneModel(Model):
         decoder = StreamDecoder()
         metadata = ResponseMetadata(enabled=callback is not None)
         started = time.monotonic()
+        deadline = _operation_deadline(config["timeout"])
         async with self._client(config) as client:
-            response = await self._send(client, body, cancel_signal, config)
+            response = await self._send(client, body, cancel_signal, config, deadline)
             try:
-                _check_cancel(cancel_signal)
+                _check_cancel(cancel_signal, deadline)
                 yield {"messageStart": {"role": "assistant"}}
                 if streaming:
-                    events = self._decode_stream(response, decoder, cancel_signal, metadata)
+                    events = self._decode_stream(response, decoder, cancel_signal, metadata, deadline)
                 else:
-                    events = self._decode_nonstream(response, decoder, cancel_signal, metadata)
+                    events = self._decode_nonstream(response, decoder, cancel_signal, metadata, deadline)
                 async for event in events:
-                    _check_cancel(cancel_signal)
+                    _check_cancel(cancel_signal, deadline)
                     yield cast(StreamEvent, event)
                 for event in decoder.finish(require_done=streaming, secret=self._api_key):
-                    _check_cancel(cancel_signal)
+                    _check_cancel(cancel_signal, deadline)
                     yield cast(StreamEvent, event)
-                await self._metadata(callback, response, decoder.usage, metadata, cancel_signal)
                 usage = _standard_usage(decoder.usage)
+                latency_ms = round((time.monotonic() - started) * 1000) if usage is not None else None
+                await self._metadata(callback, response, decoder.usage, metadata, cancel_signal, deadline)
                 if usage is not None:
-                    latency_ms = round((time.monotonic() - started) * 1000)
-                    _check_cancel(cancel_signal)
+                    _check_cancel(cancel_signal, deadline)
+                    assert latency_ms is not None
                     yield {"metadata": {"usage": usage, "metrics": {"latencyMs": latency_ms}}}
             finally:
                 await response.aclose()
@@ -643,6 +767,7 @@ class ExaoneModel(Model):
             ExaoneError: If the response is invalid or does not finish normally.
             ExaoneThrottledError: If the service returns HTTP 429 after retries.
             ExaoneContextWindowError: If the input exceeds the model context window.
+            TimeoutError: If the configured operation deadline expires.
         """
         config = self._config
         fmt = {
@@ -651,10 +776,11 @@ class ExaoneModel(Model):
         }
         body = self._request(prompt, None, system_prompt, None, None, stream=False, response_format=fmt, config=config)
         signal = kwargs.get("cancel_signal")
+        deadline = _operation_deadline(config["timeout"])
         async with self._client(config) as client:
-            response = await self._send(client, body, signal, config)
+            response = await self._send(client, body, signal, config, deadline)
             try:
-                data = _parse_response(await _cancellable(response.aread(), signal))
+                data = _parse_response(await _cancellable(response.aread(), signal, deadline))
                 _check_response_error(data, response, self._api_key)
                 choices = data.get("choices")
                 if not isinstance(choices, list) or len(choices) != 1:
@@ -670,14 +796,24 @@ class ExaoneModel(Model):
                 if not isinstance(message, dict):
                     raise ExaoneError("Structured output did not include a message")
                 content = message.get("content")
+                refusal = message.get("refusal")
+                if (
+                    isinstance(refusal, str)
+                    and refusal.strip()
+                    and (not isinstance(content, str) or not content.strip())
+                ):
+                    raise ExaoneError(
+                        "EXAONE refused the structured output request",
+                        body={"refusal": redact(refusal, self._api_key)},
+                    )
                 if not isinstance(content, str):
                     raise ExaoneError("Structured output did not include JSON text")
                 result = _validate_output(output_model, content)
                 callback = kwargs.get("metadata_callback", self._callback)
                 metadata = ResponseMetadata(enabled=callback is not None)
                 metadata.add(data)
-                await self._metadata(callback, response, data.get("usage"), metadata, signal)
-                _check_cancel(signal)
+                await self._metadata(callback, response, data.get("usage"), metadata, signal, deadline)
+                _check_cancel(signal, deadline)
                 yield {"output": result}
             finally:
                 await response.aclose()

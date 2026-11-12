@@ -46,4 +46,6 @@ def retry_delay(headers: Mapping[str, str], attempt: int, base: float, maximum: 
         value = max(present)
         return value if value <= maximum else None
     ceiling = min(maximum, base * 2 ** min(attempt, 60))
-    return random.uniform(0, ceiling)
+    if ceiling < base:
+        return None
+    return random.uniform(base, ceiling)

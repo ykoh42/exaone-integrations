@@ -13,8 +13,31 @@ import httpx
 import pytest
 from pydantic import BaseModel
 from strands import Agent, tool
+from strands.models import ModelCapabilities, ModelInfo, ModelLimits
 
 from strands_exaone import ExaoneError, ExaoneModel, ExaoneThrottledError
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "http://api.example/v1",
+        "ftp://api.example/v1",
+        "https://user:password@api.example/v1",
+        "https://api.example/v1?token=secret",
+        "https://api.example/v1#fragment",
+    ],
+)
+def test_rejects_unsafe_base_urls(base_url: str) -> None:
+    with pytest.raises(ValueError, match="base_url"):
+        ExaoneModel(api_key="test-secret", base_url=base_url)
+
+
+@pytest.mark.parametrize("hostname", ["localhost", "127.0.0.1", "[::1]"])
+def test_allows_loopback_http_for_local_test_servers(hostname: str) -> None:
+    model = ExaoneModel(api_key="test-secret", base_url=f"http://{hostname}:8000/v1")
+
+    assert model.get_config()["base_url"] == f"http://{hostname}:8000/v1"
 
 
 class Chunks(httpx.AsyncByteStream):
@@ -59,6 +82,8 @@ async def test_stream_sse_utf8_and_usage_callback() -> None:
         chunk(finish="stop"),
         {
             "choices": [],
+            "result_code": "SUCCESS",
+            "description": "Synthetic success metadata",
             "usage": {"prompt_tokens": 3, "completion_tokens": 4, "total_tokens": 7, "reasoning_tokens": 2},
         },
     )
@@ -81,6 +106,8 @@ async def test_stream_sse_utf8_and_usage_callback() -> None:
         assert events[-1]["metadata"]["usage"] == {"inputTokens": 3, "outputTokens": 4, "totalTokens": 7}
         assert observed[0]["usage"]["reasoning_tokens"] == 2
         assert observed[0]["request_id"] == "req-1"
+        assert observed[0]["response"]["result_code"] == "SUCCESS"
+        assert observed[0]["response"]["description"] == "Synthetic success metadata"
         assert chunks.closed
     finally:
         await client.aclose()
@@ -235,6 +262,7 @@ async def test_interleaved_tools_are_assembled_and_replayed() -> None:
         ]
         body = model._request(history, None, None, None, None, stream=True)
         assert body["messages"][0]["reasoning_content"] == "reason"
+        assert body["messages"][0]["content"] == ""
         assert [m["tool_call_id"] for m in body["messages"][1:]] == ["a", "b"]
         assert json.loads(body["messages"][0]["tool_calls"][1]["function"]["arguments"]) == {"x": 2}
     finally:
@@ -375,6 +403,265 @@ async def test_non_stream_and_structured_output() -> None:
         assert "stream_options" not in bodies[1]
     finally:
         await client.aclose()
+
+
+@pytest.mark.parametrize("stream", [True, False])
+async def test_refusal_without_content_is_exposed_as_assistant_text(stream: bool) -> None:
+    refusal = "I cannot help with that request."
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if stream:
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=sse(chunk({"refusal": refusal}), chunk(finish="stop")),
+            )
+        return httpx.Response(
+            200,
+            json={"choices": [{"index": 0, "message": {"refusal": refusal}, "finish_reason": "stop"}]},
+        )
+
+    model, client = model_for(handler, stream=stream)
+    try:
+        received = await collect(model)
+    finally:
+        await client.aclose()
+    assert any(event.get("contentBlockDelta", {}).get("delta", {}).get("text") == refusal for event in received)
+
+
+@pytest.mark.parametrize("stream", [True, False])
+async def test_refusal_is_not_suppressed_by_whitespace_only_content(stream: bool) -> None:
+    refusal = "I cannot help with that request."
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if stream:
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=sse(chunk({"content": "\n\n", "refusal": refusal}), chunk(finish="stop")),
+            )
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"index": 0, "message": {"content": "\n\n", "refusal": refusal}, "finish_reason": "stop"}]
+            },
+        )
+
+    model, client = model_for(handler, stream=stream)
+    try:
+        received = await collect(model)
+    finally:
+        await client.aclose()
+    assert any(event.get("contentBlockDelta", {}).get("delta", {}).get("text") == refusal for event in received)
+
+
+@pytest.mark.parametrize(("finish", "expected"), [("length", "max_tokens"), ("content_filter", "content_filtered")])
+async def test_documented_finish_reasons_map_to_strands_stop_reasons(finish: str, expected: str) -> None:
+    model, client = model_for(
+        lambda request: httpx.Response(200, content=sse(chunk({"content": "partial"}), chunk(finish=finish)))
+    )
+    try:
+        received = await collect(model)
+    finally:
+        await client.aclose()
+    assert received[-1]["messageStop"]["stopReason"] == expected
+
+
+async def test_timeout_covers_stream_reads_retry_waits_and_async_metadata_callbacks() -> None:
+    stream_reading = asyncio.Event()
+    callback_started = asyncio.Event()
+
+    class StalledAfterContent(httpx.AsyncByteStream):
+        closed = False
+
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            yield sse(chunk({"content": "partial"}), done=False)
+            stream_reading.set()
+            await asyncio.Event().wait()
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    stalled = StalledAfterContent()
+    model, client = model_for(lambda request: httpx.Response(200, stream=stalled), timeout=0.2)
+    try:
+        with pytest.raises(TimeoutError, match="EXAONE request timed out"):
+            await asyncio.wait_for(collect(model), timeout=2)
+        assert stream_reading.is_set()
+        assert stalled.closed
+    finally:
+        await client.aclose()
+
+    async def slow_callback(metadata: dict[str, Any]) -> None:
+        callback_started.set()
+        await asyncio.Event().wait()
+
+    model, client = model_for(
+        lambda request: httpx.Response(200, content=sse(chunk({"content": "done"}), chunk(finish="stop"))),
+        timeout=0.2,
+        metadata_callback=slow_callback,
+    )
+    try:
+        with pytest.raises(TimeoutError, match="EXAONE request timed out"):
+            await asyncio.wait_for(collect(model), timeout=2)
+        assert callback_started.is_set()
+    finally:
+        await client.aclose()
+
+    requests = 0
+
+    def rate_limited(request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        return httpx.Response(429, headers={"retry-after-ms": "500"}, json={"error": {"message": "limited"}})
+
+    model, client = model_for(rate_limited, timeout=0.2, max_retries=1, max_retry_delay=1)
+    try:
+        with pytest.raises(TimeoutError, match="EXAONE request timed out"):
+            await collect(model)
+        assert requests == 1
+    finally:
+        await client.aclose()
+
+
+async def test_timeout_includes_consumer_pauses_between_stream_events() -> None:
+    model, client = model_for(
+        lambda request: httpx.Response(200, content=sse(chunk({"content": "answer"}), chunk(finish="stop"))),
+        timeout=0.5,
+    )
+    stream = model.stream([{"role": "user", "content": [{"text": "hello"}]}])
+    try:
+        assert await anext(stream) == {"messageStart": {"role": "assistant"}}
+        await asyncio.sleep(0.6)
+        with pytest.raises(TimeoutError, match="EXAONE request timed out"):
+            await anext(stream)
+    finally:
+        await stream.aclose()
+        await client.aclose()
+
+
+async def test_params_pass_through_extended_chat_fields_and_response_format() -> None:
+    requests: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=sse(chunk({"content": "ok"}), chunk(finish="stop")),
+        )
+
+    model, client = model_for(
+        handler,
+        params={
+            "frequency_penalty": 0.25,
+            "seed": 0,
+            "stop": ["<END>"],
+            "logprobs": True,
+            "top_logprobs": 3,
+            "parallel_tool_calls": False,
+            "response_format": {"type": "json_object"},
+            "stream_options": {"include_usage": False, "custom_extension": "retained"},
+        },
+    )
+    try:
+        await collect(model)
+    finally:
+        await client.aclose()
+
+    assert {
+        name: requests[0][name]
+        for name in (
+            "frequency_penalty",
+            "seed",
+            "stop",
+            "logprobs",
+            "top_logprobs",
+            "parallel_tool_calls",
+            "response_format",
+            "stream_options",
+        )
+    } == {
+        "frequency_penalty": 0.25,
+        "seed": 0,
+        "stop": ["<END>"],
+        "logprobs": True,
+        "top_logprobs": 3,
+        "parallel_tool_calls": False,
+        "response_format": {"type": "json_object"},
+        "stream_options": {"include_usage": False, "custom_extension": "retained"},
+    }
+
+
+@pytest.mark.parametrize("effort", ["low", "medium", "high", "max", None])
+async def test_reasoning_options_are_sent(effort: str | None) -> None:
+    requests: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=sse(chunk({"content": "ok"}), chunk(finish="stop")),
+        )
+
+    model, client = model_for(handler, reasoning_effort=effort, enable_thinking=False)
+    try:
+        await collect(model)
+    finally:
+        await client.aclose()
+    if effort is None:
+        assert "reasoning_effort" not in requests[0]
+    else:
+        assert requests[0]["reasoning_effort"] == effort
+    assert requests[0]["chat_template_kwargs"]["enable_thinking"] is False
+
+
+def test_strands_model_info_override_is_supported() -> None:
+    info = ModelInfo(
+        capabilities=ModelCapabilities(native_structured_output=True),
+        limits=ModelLimits(context_window=4096, max_output_tokens=2048),
+    )
+    model = ExaoneModel(api_key="key", model_info=info)
+    assert model.model_info.limits.context_window == 4096
+    assert model.model_info.limits.max_output_tokens == 2048
+    assert model.model_info.capabilities.native_structured_output is True
+    model.update_config(model_info=ModelInfo(limits=ModelLimits(context_window=2048)))
+    assert model.model_info.limits.context_window == 2048
+    assert model.model_info.limits.max_output_tokens is None
+
+    capabilities_only = ExaoneModel(
+        api_key="key", model_info=ModelInfo(capabilities=ModelCapabilities(native_structured_output=True))
+    )
+    assert capabilities_only.model_info.limits.context_window == 524288
+    assert ExaoneModel(api_key="key", context_window_limit=None).get_config()["context_window_limit"] is None
+
+
+@pytest.mark.parametrize(
+    ("config", "message"),
+    [
+        ({"context_window_limit": 0}, "context_window_limit must be a positive integer"),
+        ({"context_window_limit": -1}, "context_window_limit must be a positive integer"),
+        ({"context_window_limit": 1.5}, "context_window_limit must be an integer"),
+        ({"max_tokens": 524289}, "max_tokens cannot exceed the EXAONE context limit"),
+        ({"reasoning_effort": 1}, "reasoning_effort must be one of"),
+        ({"reasoning_effort": "extreme"}, "reasoning_effort must be one of"),
+    ],
+)
+def test_invalid_model_limits_and_reasoning_effort_fail_early(config: dict[str, Any], message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        ExaoneModel(api_key="key", **config)
+
+
+def test_invalid_model_info_limits_fail_early() -> None:
+    with pytest.raises(ValueError, match="model_info.limits.context_window must be a positive integer"):
+        ExaoneModel(api_key="key", model_info=ModelInfo(limits=ModelLimits(context_window=0)))
+
+
+@pytest.mark.parametrize("params", [[], False, ""])
+def test_params_must_be_a_mapping(params: Any) -> None:
+    with pytest.raises(ValueError, match="params must be a dictionary"):
+        ExaoneModel(api_key="key", params=params)
 
 
 async def test_http_error_shapes_redact_key_and_preserve_retry_headers() -> None:
@@ -1014,6 +1301,21 @@ async def test_system_block_argument_is_authoritative(blocks: Any, expected: lis
         await client.aclose()
     assert [message for message in requests[0]["messages"] if message["role"] == "system"] == expected
     assert "tool_choice" not in requests[0]
+
+
+async def test_empty_system_prompt_string_matches_strands_openai_contract() -> None:
+    requests: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=sse(chunk(finish="stop")))
+
+    model, client = model_for(handler)
+    try:
+        await collect(model, system_prompt="")
+    finally:
+        await client.aclose()
+    assert all(message["role"] != "system" for message in requests[0]["messages"])
 
 
 async def test_unsupported_tool_choice_fails_before_http_request() -> None:

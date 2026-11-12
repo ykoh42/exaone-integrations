@@ -67,6 +67,8 @@ def _reject_json_constant(value: str) -> NoReturn:
 
 def _validate_tool_arguments(raw: str) -> None:
     """Require JSON object arguments without retaining invalid data in an error."""
+    if not raw.strip():
+        return
     try:
         arguments = json.loads(raw, parse_constant=_reject_json_constant)
     except (TypeError, ValueError):
@@ -97,6 +99,8 @@ class StreamDecoder:
     finish_reason: str | None = None
     usage: dict[str, Any] | None = None
     done: bool = False
+    refusal: str = ""
+    has_non_whitespace_content: bool = False
 
     def _switch(self, kind: str) -> Iterator[dict[str, Any]]:
         if self.active != kind:
@@ -116,8 +120,15 @@ class StreamDecoder:
         if text is not None and not isinstance(text, str):
             raise ExaoneError("Invalid content delta")
         if text:
+            if text.strip():
+                self.has_non_whitespace_content = True
             yield from self._switch("text")
             yield {"contentBlockDelta": {"delta": {"text": text}}}
+        refusal = delta.get("refusal")
+        if refusal is not None and not isinstance(refusal, str):
+            raise ExaoneError("Invalid refusal delta")
+        if refusal:
+            self.refusal += refusal
 
     def _store_tool(self, fragment: Any) -> None:
         if not isinstance(fragment, dict):
@@ -182,7 +193,7 @@ class StreamDecoder:
         for index in sorted(self.tools):
             item = self.tools[index]
             arguments = "".join(item.arguments)
-            if not item.ident or not item.name or not arguments:
+            if not item.ident or not item.name:
                 raise ExaoneError("Incomplete tool call in EXAONE response")
             if item.ident in ids:
                 raise ExaoneError("Duplicate tool call IDs in EXAONE response")
@@ -210,6 +221,13 @@ class StreamDecoder:
         if bool(self.tools) != (self.finish_reason == "tool_calls"):
             raise ExaoneError("Tool calls and finish reason are inconsistent")
         if self.active is not None:
+            yield {"contentBlockStop": {}}
+            self.active = None
+        if self.refusal and not self.has_non_whitespace_content:
+            if self.tools:
+                raise ExaoneError("EXAONE returned refusal text together with tool calls")
+            yield from self._switch("text")
+            yield {"contentBlockDelta": {"delta": {"text": self.refusal}}}
             yield {"contentBlockStop": {}}
             self.active = None
         yield from self._tool_events()

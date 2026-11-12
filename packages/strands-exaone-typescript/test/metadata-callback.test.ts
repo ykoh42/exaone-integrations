@@ -76,6 +76,27 @@ describe('metadata callbacks', () => {
     expect((await result).some(event => event.type === 'modelMetadataEvent')).toBe(true)
   })
 
+  it('keeps callback mutations from changing the emitted metadata event', async () => {
+    const model = new ExaoneModel({
+      apiKey: 'key',
+      stream: false,
+      fetch: async () => new Response(JSON.stringify({
+        choices: [{ index: 0, message: { content: 'text' }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 },
+      })),
+      onMetadata: metadata => {
+        metadata.status = 500
+        metadata.usage!.prompt_tokens = 999
+      },
+    })
+
+    const events = await collect(model)
+    const metadataEvent = events.find(event => event.type === 'modelMetadataEvent')
+    expect(metadataEvent).toMatchObject({
+      trace: { exaone: { status: 200, usage: { prompt_tokens: 1 } } },
+    })
+  })
+
   it.each([ModelNetworkError, ModelThrottledError])('does not classify a callback %s as a retryable model failure after partial output', async (RetryableError) => {
     const failure = new RetryableError('synthetic callback failure')
     const callback = vi.fn(() => 'unexpected')
