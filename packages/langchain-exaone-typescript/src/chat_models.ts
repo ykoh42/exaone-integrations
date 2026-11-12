@@ -724,6 +724,10 @@ async function* parseSse<T>(body: ReadableStream<Uint8Array>, signal?: AbortSign
   const decoder = new TextDecoder();
   let buffer = "";
   let streamEnded = false;
+  const cancelReader = () => {
+    void reader.cancel().catch(() => undefined);
+  };
+  signal?.addEventListener("abort", cancelReader, { once: true });
   try {
     while (true) {
       signal?.throwIfAborted();
@@ -743,6 +747,7 @@ async function* parseSse<T>(body: ReadableStream<Uint8Array>, signal?: AbortSign
       }
     }
   } finally {
+    signal?.removeEventListener("abort", cancelReader);
     if (!streamEnded) await reader.cancel().catch(() => undefined);
     reader.releaseLock();
   }
