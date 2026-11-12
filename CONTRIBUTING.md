@@ -7,37 +7,37 @@ This repository contains independently installable Python and TypeScript provide
 Use Python 3.10 or newer, uv for the LangChain Python lockfile, the Node.js version in `.node-version`, and npm 11.20.0. The npm version supports this repository's install-script settings. Create and activate a Python virtual environment, then install the Strands development dependencies:
 
 ```bash
-python -m pip install -e './packages/strands-exaone-python[dev]'
+python -m pip install -e './packages/strands-exaone-py[dev]'
 npm ci
-(cd packages/strands-exaone-typescript && npm ci --ignore-scripts --workspaces=false)
-(cd packages/langchain-exaone-python && uv sync --locked --all-groups)
-(cd packages/langchain-exaone-typescript && npm ci --ignore-scripts --workspaces=false)
+(cd packages/strands-exaone-ts && npm ci --ignore-scripts --workspaces=false)
+(cd packages/langchain-exaone-py && uv sync --locked --all-groups)
+(cd packages/langchain-exaone-ts && npm ci --ignore-scripts --workspaces=false)
 ```
 
 ## Checks
 
 ```bash
 # Python
-ruff check packages/strands-exaone-python
-ruff format --check packages/strands-exaone-python
-complexipy packages/strands-exaone-python/src --max-complexity-allowed 15
-python -m pytest packages/strands-exaone-python/tests
-(cd packages/strands-exaone-python && hatch build)
+ruff check packages/strands-exaone-py
+ruff format --check packages/strands-exaone-py
+complexipy packages/strands-exaone-py/src --max-complexity-allowed 15
+python -m pytest packages/strands-exaone-py/tests
+(cd packages/strands-exaone-py && hatch build)
 
 # LangChain Python
-(cd packages/langchain-exaone-python && uv run --locked ruff check src tests)
-(cd packages/langchain-exaone-python && uv run --locked ruff format --check src tests)
-(cd packages/langchain-exaone-python && uv run --locked pytest)
-(cd packages/langchain-exaone-python && uv build)
+(cd packages/langchain-exaone-py && uv run --locked ruff check src tests)
+(cd packages/langchain-exaone-py && uv run --locked ruff format --check src tests)
+(cd packages/langchain-exaone-py && uv run --locked pytest)
+(cd packages/langchain-exaone-py && uv build)
 
 # TypeScript
 npm run check
 npm pack --workspace=strands-exaone --dry-run
-(cd packages/strands-exaone-typescript && npm run check --workspaces=false)
+(cd packages/strands-exaone-ts && npm run check --workspaces=false)
 
 # LangChain TypeScript
-(cd packages/langchain-exaone-typescript && npm run check --workspaces=false)
-(cd packages/langchain-exaone-typescript && npm pack --pack-destination "${TMPDIR:-/tmp}")
+(cd packages/langchain-exaone-ts && npm run check --workspaces=false)
+(cd packages/langchain-exaone-ts && npm pack --pack-destination "${TMPDIR:-/tmp}")
 ```
 
 All four packages have fixture-based tests. The Strands packages enforce a cognitive complexity threshold of 15 in Python and TypeScript; those scores are not directly comparable. CI tests Strands against Harness 0.1.x and 0.3.4, exercises both LangChain packages across supported runtime versions, builds Python wheels and npm tarballs, and smoke-tests the artifacts in independent environments.
@@ -45,7 +45,7 @@ All four packages have fixture-based tests. The Strands packages enforce a cogni
 For TypeScript watch mode, run `npm run test:watch`. The Harness example tests run a separate process that imports the built package, so source changes require a fresh build. Either restart watch mode after each change, or run the following in another terminal and wait for compilation to finish before pressing `a` in Vitest to rerun all tests:
 
 ```bash
-npx tsc -p packages/strands-exaone-typescript/tsconfig.json --watch
+npx tsc -p packages/strands-exaone-ts/tsconfig.json --watch
 ```
 
 ## Live tests

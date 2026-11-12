@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { Agent, Message, tool } from '@strands-agents/sdk'
 import { OpenAIModel } from '@strands-agents/sdk/models/openai'
 import { z } from 'zod'
-import { ExaoneModel } from '../packages/strands-exaone-typescript/dist/index.js'
+import { ExaoneModel } from '../packages/strands-exaone-ts/dist/index.js'
 
 if (!process.env.EXAONE_API_KEY) throw new Error('Set EXAONE_API_KEY to run this opt-in live test')
 const requests = []

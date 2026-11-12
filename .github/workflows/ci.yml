@@ -38,15 +38,15 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ matrix.python-version }}
-      - run: python -m pip install -e './packages/strands-exaone-python[dev]'
+      - run: python -m pip install -e './packages/strands-exaone-py[dev]'
       - run: python -m pip install 'strands-harness==${{ matrix.harness-version }}'
-      - run: ruff check packages/strands-exaone-python
-      - run: ruff format --check packages/strands-exaone-python
-      - run: complexipy packages/strands-exaone-python/src --max-complexity-allowed 15
-      - run: python -m pytest packages/strands-exaone-python/tests
+      - run: ruff check packages/strands-exaone-py
+      - run: ruff format --check packages/strands-exaone-py
+      - run: complexipy packages/strands-exaone-py/src --max-complexity-allowed 15
+      - run: python -m pytest packages/strands-exaone-py/tests
       - run: python -c 'import strands_exaone'
-      - run: cd packages/strands-exaone-python && hatch build
-      - run: python -m pip install --force-reinstall --no-deps packages/strands-exaone-python/dist/*.whl
+      - run: cd packages/strands-exaone-py && hatch build
+      - run: python -m pip install --force-reinstall --no-deps packages/strands-exaone-py/dist/*.whl
       - run: python -c 'from strands_exaone import ExaoneModel; print(ExaoneModel.__name__)'
       - run: python -c 'from importlib.resources import files; assert files("strands_exaone").joinpath("py.typed").is_file()'
 
@@ -69,19 +69,19 @@ jobs:
           version: 0.13.7
           enable-cache: true
           cache-dependency-glob: uv.lock
-          working-directory: packages/langchain-exaone-python
-      - working-directory: packages/langchain-exaone-python
+          working-directory: packages/langchain-exaone-py
+      - working-directory: packages/langchain-exaone-py
         run: uv sync --locked --all-groups
-      - working-directory: packages/langchain-exaone-python
+      - working-directory: packages/langchain-exaone-py
         run: uv run --locked ruff check src tests
-      - working-directory: packages/langchain-exaone-python
+      - working-directory: packages/langchain-exaone-py
         run: uv run --locked ruff format --check src tests
-      - working-directory: packages/langchain-exaone-python
+      - working-directory: packages/langchain-exaone-py
         run: uv run --locked pytest
-      - working-directory: packages/langchain-exaone-python
+      - working-directory: packages/langchain-exaone-py
         run: uv build
       - name: Verify wheel in an independent environment
-        working-directory: packages/langchain-exaone-python
+        working-directory: packages/langchain-exaone-py
         run: |
           python -m venv "$RUNNER_TEMP/langchain-exaone-python-venv"
           "$RUNNER_TEMP/langchain-exaone-python-venv/bin/python" -m pip install dist/*.whl
@@ -134,14 +134,14 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
           cache: npm
-          cache-dependency-path: packages/strands-exaone-typescript/package-lock.json
+          cache-dependency-path: packages/strands-exaone-ts/package-lock.json
       - run: npm install --global npm@11.20.0
-      - working-directory: packages/strands-exaone-typescript
+      - working-directory: packages/strands-exaone-ts
         run: npm ci --ignore-scripts --workspaces=false
-      - working-directory: packages/strands-exaone-typescript
+      - working-directory: packages/strands-exaone-ts
         run: npm run check --workspaces=false
       - name: Verify npm package in an independent project
-        working-directory: packages/strands-exaone-typescript
+        working-directory: packages/strands-exaone-ts
         run: |
           npm pack --pack-destination "$RUNNER_TEMP"
           mkdir "$RUNNER_TEMP/strands-exaone-package-check"
@@ -165,14 +165,14 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
           cache: npm
-          cache-dependency-path: packages/langchain-exaone-typescript/package-lock.json
+          cache-dependency-path: packages/langchain-exaone-ts/package-lock.json
       - run: npm install --global npm@11.20.0
-      - working-directory: packages/langchain-exaone-typescript
+      - working-directory: packages/langchain-exaone-ts
         run: npm ci --ignore-scripts --workspaces=false
-      - working-directory: packages/langchain-exaone-typescript
+      - working-directory: packages/langchain-exaone-ts
         run: npm run check --workspaces=false
       - name: Verify npm package in an independent project
-        working-directory: packages/langchain-exaone-typescript
+        working-directory: packages/langchain-exaone-ts
         run: |
           npm pack --pack-destination "$RUNNER_TEMP"
           mkdir -p "$RUNNER_TEMP/langchain-exaone-package-check"
