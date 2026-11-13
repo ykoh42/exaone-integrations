@@ -9,7 +9,7 @@ from typing import Any
 import httpx
 import pytest
 from harness_support import chunk, events, make_harness, response, tool_delta
-from strands import tool
+from strands import Agent, tool
 from strands_harness import create_harness
 
 from strands_exaone import ExaoneError, ExaoneModel, ExaoneRetryStrategy, ExaoneThrottledError
@@ -173,6 +173,48 @@ async def test_exaone_retry_strategy_bounds_total_attempts(monkeypatch: pytest.M
             await agent.invoke_async("Say ok.")
 
     assert requests == 3
+
+
+@pytest.mark.parametrize("use_exaone_strategy", [False, True])
+async def test_retry_strategy_does_not_replay_after_stream_events_are_exposed(use_exaone_strategy: bool) -> None:
+    requests = 0
+
+    class Interrupted(httpx.AsyncByteStream):
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            yield events(chunk({"content": "partial"}), done=False)
+            raise httpx.ConnectError("synthetic connection failure during response body")
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    stream = Interrupted()
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=stream)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        agent_options: dict[str, Any] = {}
+        if use_exaone_strategy:
+            agent_options["retry_strategy"] = ExaoneRetryStrategy(max_attempts=2, base_retry_delay=0, max_retry_delay=0)
+        agent = Agent(
+            model=ExaoneModel(api_key="test-only-key", http_client=client), callback_handler=None, **agent_options
+        )
+        observed = []
+        with pytest.raises(httpx.ConnectError, match="synthetic connection failure") as caught:
+            async for event in agent.stream_async("Say hello."):
+                observed.append(event)
+
+    assert requests == 1
+    assert observed
+    assert any("partial" in str(event) for event in observed)
+    assert stream.closed
+    assert "test-only-key" not in str(caught.value)
+    assert getattr(caught.value, "_exaone_events_exposed", False)
 
 
 async def test_exaone_retry_strategy_does_not_retry_model_generated_invalid_tool_arguments() -> None:

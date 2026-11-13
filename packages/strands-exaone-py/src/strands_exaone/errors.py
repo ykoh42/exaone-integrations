@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
+from urllib.parse import quote, quote_plus
 
 from strands.types.exceptions import ContextWindowOverflowException, ModelThrottledException
 
@@ -66,18 +68,46 @@ class ExaoneContextWindowError(ContextWindowOverflowException):
 
 def redact(value: Any, secret: str) -> Any:
     """Remove a credential from a response before exposing it."""
+    return _redact_value(value, _secret_patterns(secret))
+
+
+def _redact_value(value: Any, patterns: tuple[tuple[str, re.Pattern[str] | None], ...]) -> Any:
     if isinstance(value, str):
-        return value.replace(secret, "[REDACTED]") if secret else value
+        for literal, pattern in patterns:
+            value = value.replace(literal, "[REDACTED]")
+            if pattern is not None:
+                value = pattern.sub("[REDACTED]", value)
+        return value
     if isinstance(value, dict):
-        return {redact(key, secret): redact(item, secret) for key, item in value.items()}
+        return {_redact_value(key, patterns): _redact_value(item, patterns) for key, item in value.items()}
     if isinstance(value, list):
-        return [redact(item, secret) for item in value]
+        return [_redact_value(item, patterns) for item in value]
     return value
+
+
+def _secret_patterns(secret: str) -> tuple[tuple[str, re.Pattern[str] | None], ...]:
+    if not secret:
+        return ()
+    try:
+        variants = {secret, quote(secret, safe=""), quote_plus(secret, safe="")}
+    except UnicodeError:
+        variants = {secret}
+    patterns = []
+    for variant in sorted(variants, key=len, reverse=True):
+        if re.search(r"%[0-9A-F]{2}", variant, re.IGNORECASE):
+            escaped = re.escape(variant)
+            encoded_pattern = re.sub(
+                r"%[0-9A-F]{2}", lambda match: f"(?i:{match.group()})", escaped, flags=re.IGNORECASE
+            )
+            patterns.append((variant, re.compile(encoded_pattern)))
+        else:
+            patterns.append((variant, None))
+    return tuple(patterns)
 
 
 def response_error(status: int, body: Any, headers: dict[str, str], secret: str) -> Exception:
     """Map an error envelope without conflating arbitrary bad requests with context overflow."""
-    body = redact(body, secret)
+    body, headers = redact([body, headers], secret)
     envelope = body if isinstance(body, dict) else {}
     nested = envelope.get("error", {})
     if not isinstance(nested, dict):

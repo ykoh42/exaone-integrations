@@ -23,6 +23,40 @@ const success = () => new Response([
 ].join('\n'), { headers: { 'content-type': 'text/event-stream' } })
 
 describe('EXAONE retry strategy through Strands Harness', () => {
+  it('retries a response-read failure before exposing a message start', async () => {
+    let attempts = 0
+    const encoder = new TextEncoder()
+    const fetcher: typeof fetch = async () => {
+      attempts += 1
+      if (attempts > 1) return success()
+      let sent = false
+      const body = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (!sent) {
+            sent = true
+            controller.enqueue(encoder.encode('data: {"choices":[{"index":0,"delta":{}}]}\n\n'))
+          } else {
+            controller.error(new TypeError('connection lost'))
+          }
+        },
+      })
+      return new Response(body)
+    }
+    const agent = await createHarness({
+      ...harnessOptions,
+      model: new ExaoneModel({ apiKey: 'test-key', fetch: fetcher }),
+      retryStrategy: new ExaoneRetryStrategy({ maxAttempts: 2, baseRetryDelayMs: 0, maxRetryDelayMs: 0 }),
+    })
+    const starts: string[] = []
+    for await (const event of agent.stream('Say ok.')) {
+      if (event.type === 'modelStreamUpdateEvent' && event.event.type === 'modelMessageStartEvent') starts.push(event.event.type)
+    }
+
+    expect(attempts).toBe(2)
+    expect(starts).toHaveLength(1)
+    await agent.shutdown()
+  })
+
   it('waits for the longest Retry-After hint before retrying a throttled request', async () => {
     let attempts = 0
     const requestTimes: number[] = []

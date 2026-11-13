@@ -1,5 +1,6 @@
 import { createHarness } from '@strands-agents/harness'
 import { Message, tool } from '@strands-agents/sdk'
+import type { ModelStreamEvent } from '@strands-agents/sdk'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 import { ExaoneModel } from '../src/index.js'
@@ -34,7 +35,7 @@ describe('cancellation between model events', () => {
       const callback = vi.fn()
       const model = new ExaoneModel({ apiKey: 'key', stream: streaming, fetch: async () => makeResponse(streaming), onMetadata: callback })
       const events: string[] = []
-      const isBoundary = (event: any) => boundary === 'messageStart' ? event.type === 'modelMessageStartEvent'
+      const isBoundary = (event: ModelStreamEvent): boolean => boundary === 'messageStart' ? event.type === 'modelMessageStartEvent'
         : boundary === 'textStart' ? event.type === 'modelContentBlockStartEvent' && !event.start
           : boundary === 'textDelta' ? event.type === 'modelContentBlockDeltaEvent' && event.delta.type === 'textDelta'
             : boundary === 'toolStart' ? event.type === 'modelContentBlockStartEvent' && event.start?.type === 'toolUseStart'

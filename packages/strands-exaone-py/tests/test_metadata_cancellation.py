@@ -142,6 +142,22 @@ async def test_cancelled_before_completion_without_metadata_callback(method: str
     assert not any("output" in event or "metadata" in event for event in observed)
 
 
+async def test_cancel_at_response_completion_closes_unreturned_response() -> None:
+    signal = threading.Event()
+    body = ResponseBody(payload("stream"))
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        signal.set()
+        return httpx.Response(200, stream=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        model = ExaoneModel(api_key="test-key", http_client=client)
+        with pytest.raises(asyncio.CancelledError):
+            _ = [event async for event in model.stream(MESSAGE, cancel_signal=signal)]
+
+    assert body.closed
+
+
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("with_callback", [False, True])
 async def test_cancel_after_tool_start_stops_buffered_events(stream: bool, with_callback: bool) -> None:

@@ -94,8 +94,42 @@ export class ResponseMetadataCollector {
 
 /** Remove the credential from every string and map key exposed in metadata. */
 export function redactMetadata(value: unknown, key: string): unknown {
-  if (typeof value === 'string') return value.replaceAll(key, '[REDACTED]')
-  if (Array.isArray(value)) return value.map((item) => redactMetadata(item, key))
-  if (isRecord(value)) return Object.fromEntries(Object.entries(value).map(([name, item]) => [name.replaceAll(key, '[REDACTED]'), redactMetadata(item, key)]))
+  const redactString = createSecretRedactor(key)
+  return redactValue(value, redactString)
+}
+
+interface SecretReplacement {
+  literal: string
+  pattern?: RegExp
+}
+
+function createSecretRedactor(secret: string): (value: string) => string {
+  if (!secret) return (value) => value
+  const variants = new Set([secret])
+  try { variants.add(encodeURIComponent(secret)) } catch { /* keep the literal variant */ }
+  try { variants.add(new URLSearchParams({ value: secret }).toString().slice('value='.length)) } catch { /* keep available variants */ }
+  const replacements: SecretReplacement[] = [...variants].sort((left, right) => right.length - left.length).map((literal) => {
+    if (!/%[0-9A-F]{2}/i.test(literal)) return { literal }
+    const pattern = escapeRegExp(literal).replace(/%[0-9A-F]{2}/gi,
+      (encoded) => encoded.replace(/[A-F]/gi, (hex) => `[${hex.toUpperCase()}${hex.toLowerCase()}]`))
+    return { literal, pattern: new RegExp(pattern, 'g') }
+  })
+  return (value) => {
+    for (const replacement of replacements) {
+      value = value.replaceAll(replacement.literal, '[REDACTED]')
+      if (replacement.pattern) value = value.replace(replacement.pattern, '[REDACTED]')
+    }
+    return value
+  }
+}
+
+function redactValue(value: unknown, redactString: (value: string) => string): unknown {
+  if (typeof value === 'string') return redactString(value)
+  if (Array.isArray(value)) return value.map((item) => redactValue(item, redactString))
+  if (isRecord(value)) return Object.fromEntries(Object.entries(value).map(([name, item]) => [redactString(name), redactValue(item, redactString)]))
   return value
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }

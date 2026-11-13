@@ -225,11 +225,18 @@ def _validate_number(field: str, value: Any, minimum: int, maximum: int | None) 
         raise ValueError(f"Invalid {field}")
 
 
-async def _cancellable(awaitable: Awaitable[R], signal: threading.Event | None, deadline: float | None = None) -> R:
+async def _cancellable(
+    awaitable: Awaitable[R],
+    signal: threading.Event | None,
+    deadline: float | None = None,
+    *,
+    cleanup: Callable[[R], Awaitable[Any]] | None = None,
+) -> R:
     """Abort an in-flight operation when cancelled or when its total deadline expires."""
-    if signal is None and deadline is None:
+    if signal is None and deadline is None and cleanup is None:
         return await awaitable
     task = asyncio.ensure_future(awaitable)
+    result_returned = False
     try:
         while not task.done():
             _check_cancel(signal, deadline)
@@ -241,16 +248,42 @@ async def _cancellable(awaitable: Awaitable[R], signal: threading.Event | None, 
                 wait_timeout = remaining if wait_timeout is None else min(wait_timeout, remaining)
             await asyncio.wait({task}, timeout=wait_timeout)
         _check_cancel(signal, deadline)
-        return task.result()
+        result = task.result()
+        result_returned = True
+        return result
     finally:
-        if not task.done():
-            task.cancel()
-            with suppress(asyncio.CancelledError):
-                await task
-        elif not task.cancelled():
-            # Cancellation may win after the operation has already failed.
-            # Retrieve that exception so asyncio does not report it as unhandled.
-            task.exception()
+        await _finish_cancellable_task(task, result_returned, cleanup)
+
+
+async def _finish_cancellable_task(
+    task: asyncio.Future[R], result_returned: bool, cleanup: Callable[[R], Awaitable[Any]] | None
+) -> None:
+    await _cancel_pending(task)
+    if cleanup is not None and not result_returned:
+        await _cleanup_task_result(task, cleanup)
+    elif not task.cancelled():
+        # Cancellation may win after the operation has already failed.
+        # Retrieve that exception so asyncio does not report it as unhandled.
+        task.exception()
+
+
+async def _cancel_pending(task: asyncio.Future[Any]) -> None:
+    if task.done():
+        return
+    task.cancel()
+    with suppress(asyncio.CancelledError, Exception):
+        await task
+
+
+async def _cleanup_task_result(task: asyncio.Future[R], cleanup: Callable[[R], Awaitable[Any]]) -> None:
+    if task.cancelled():
+        return
+    try:
+        result = task.result()
+    except BaseException:
+        return
+    with suppress(Exception):
+        await cleanup(result)
 
 
 def _check_cancel(signal: threading.Event | None, deadline: float | None = None) -> None:
@@ -290,14 +323,18 @@ def _safe_transport_errors(
     @wraps(method)
     async def wrapped(self: ExaoneModel, *args: P.args, **kwargs: P.kwargs) -> AsyncGenerator[R, None]:
         safe_error: Exception | None = None
+        events_exposed = False
         try:
             async with aclosing(method(self, *args, **kwargs)) as events:
                 async for event in events:
+                    events_exposed = True
                     yield event
         except (httpx.HTTPError, httpx.InvalidURL, httpx.CookieConflict, httpx.StreamError) as error:
             safe_error = _copy_transport_error(error, self._api_key)
         if safe_error is not None:
             # Raise outside the handler so the original error is not retained as context.
+            if events_exposed:
+                cast(Any, safe_error)._exaone_events_exposed = True
             raise safe_error
 
     return wrapped
@@ -306,7 +343,7 @@ def _safe_transport_errors(
 def _safe_headers(headers: httpx.Headers, key: str) -> dict[str, str]:
     names = {"x-request-id", "retry-after", "retry-after-ms", "content-type"}
     return {
-        name.lower(): value.replace(key, "[REDACTED]")
+        name.lower(): redact(value, key)
         for name, value in headers.items()
         if name.lower() in names
         or name.lower().startswith(("x-second-rate-limit", "x-minute-rate-limit", "x-day-rate-limit"))
@@ -575,7 +612,12 @@ class ExaoneModel(Model):
         )
         for attempt in range(config["max_retries"] + 1):
             try:
-                response = await _cancellable(client.send(request, stream=True), signal, deadline)
+                response = await _cancellable(
+                    client.send(request, stream=True),
+                    signal,
+                    deadline,
+                    cleanup=lambda response: response.aclose(),
+                )
             except (httpx.ConnectError, httpx.ConnectTimeout):
                 if not await self._retry_connection(attempt, signal, config, deadline):
                     raise
@@ -643,13 +685,14 @@ class ExaoneModel(Model):
         if callback is not None:
             headers = _safe_headers(response.headers, self._api_key)
             try:
+                safe_usage, safe_response = redact([usage, metadata.response], self._api_key)
                 result = callback(
                     {
                         "status_code": response.status_code,
                         "request_id": headers.get("x-request-id"),
                         "headers": headers,
-                        "usage": redact(deepcopy(usage), self._api_key),
-                        "response": redact(deepcopy(metadata.response), self._api_key),
+                        "usage": safe_usage,
+                        "response": safe_response,
                     }
                 )
                 if inspect.isawaitable(result):

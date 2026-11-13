@@ -2,6 +2,8 @@
 
 Use the EXAONE Chat Completions API as a model provider for [Strands Agents](https://strandsagents.com/). This community-maintained package is not affiliated with LG AI Research or the Strands Agents project.
 
+See the [changelog](CHANGELOG.md) for release notes.
+
 Users are responsible for reviewing and complying with the terms that apply to their EXAONE API use.
 
 ## API key

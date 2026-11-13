@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import math
 import random
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from typing import Mapping
 
 RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
 

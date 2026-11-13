@@ -13,16 +13,34 @@ import { sendWithRetry } from './retry.js'
 import { readSSE, ResponseReadError } from './sse.js'
 import type { ExaoneMetadata, ExaoneModelConfig } from './types.js'
 
-type WireCall = {
+interface WireCallFunction {
+  name?: string | null
+  arguments?: string | null
+}
+interface WireCall {
   index?: number
   id?: string | null
   type?: string | null
-  function?: { name?: string | null; arguments?: string | null } | null
+  function?: WireCallFunction | null
 }
-type WireMessage = { content?: string | null; reasoning_content?: string | null; refusal?: string | null; tool_calls?: WireCall[] | null }
-type WireChoice = { index?: number; delta?: WireMessage; message?: WireMessage; finish_reason?: string | null }
+interface WireMessage {
+  content?: string | null
+  reasoning_content?: string | null
+  refusal?: string | null
+  tool_calls?: WireCall[] | null
+}
+interface WireChoice {
+  index?: number
+  delta?: WireMessage
+  message?: WireMessage
+  finish_reason?: string | null
+}
 type WireResponse = { choices?: WireChoice[]; usage?: Record<string, unknown> | null; error?: unknown } & Record<string, unknown>
-type AccumulatedCall = { id: string; name: string; arguments: string }
+interface AccumulatedCall {
+  id: string
+  name: string
+  arguments: string
+}
 type TextKind = 'reasoning' | 'text'
 
 /** An HTTP error with EXAONE's response body and selected diagnostic headers. */
@@ -124,14 +142,15 @@ async function throwHttpError(response: Response, key: string, signal: AbortSign
   let body: unknown
   let readCause: Error | undefined
   try {
-    const raw = (await response.text()).replaceAll(key, '[REDACTED]')
+    const raw = redactMetadata(await response.text(), key) as string
     body = raw
     try { body = redactMetadata(JSON.parse(raw) as unknown, key) } catch { /* preserve non-JSON error */ }
   } catch (error) {
     if (signal.aborted) throw signal.reason
     readCause = safeResponseReadCause(error)
   }
-  const requestId = response.headers.get('x-request-id')?.replaceAll(key, '[REDACTED]')
+  const rawRequestId = response.headers.get('x-request-id')
+  const requestId = rawRequestId === null ? undefined : redactMetadata(rawRequestId, key) as string
   const headers = redactMetadata(rateHeaders(response.headers), key) as Record<string, string>
   const error = new ExaoneAPIError(response.status, body, requestId, headers)
   if (readCause) Object.defineProperty(error, 'cause', { value: readCause })
@@ -235,7 +254,7 @@ function finishReason(reason: string, key: string): StopReason {
     case 'length': return 'maxTokens'
     case 'content_filter': return 'contentFiltered'
     default: {
-      const safeReason = String(reason).replaceAll(key, '[REDACTED]').slice(0, 128)
+      const safeReason = (redactMetadata(String(reason), key) as string).slice(0, 128)
       throw new ModelError(`Unrecognized EXAONE finish reason: ${JSON.stringify(safeReason)}`)
     }
   }
@@ -530,6 +549,23 @@ async function notifyMetadata(callback: ExaoneModelConfig['onMetadata'], metadat
   })
 }
 
+async function* withMessageStart(
+  source: AsyncIterable<ModelStreamEvent> | Iterable<ModelStreamEvent>,
+  signal: AbortSignal,
+  state: { started: boolean },
+): AsyncGenerator<ModelStreamEvent> {
+  for await (const event of source) {
+    signal.throwIfAborted()
+    if (!state.started) {
+      state.started = true
+      yield { type: 'modelMessageStartEvent', role: 'assistant' }
+      signal.throwIfAborted()
+    }
+    yield event
+    signal.throwIfAborted()
+  }
+}
+
 async function readResponseJSON(response: Response): Promise<WireResponse> {
   let raw: string
   try { raw = await response.text() } catch (error) { throw new ResponseReadError(error) }
@@ -554,9 +590,9 @@ async function* responseEvents(response: Response, streaming: boolean, mapper: E
 /** Copy safe diagnostics without retaining an untrusted transport's nested cause or stack. */
 function safeTransportCause(error: unknown, key: string): Error {
   if (!(error instanceof Error)) return new Error('Transport failed')
-  const message = error.message.replaceAll(key, '[REDACTED]')
+  const message = redactMetadata(error.message, key) as string
   const safe = error instanceof TypeError ? new TypeError(message) : new Error(message)
-  safe.name = error.name.replaceAll(key, '[REDACTED]')
+  safe.name = redactMetadata(error.name, key) as string
   return safe
 }
 
@@ -597,33 +633,33 @@ async function fetchResponse(config: ExaoneModelConfig, body: string | undefined
  * ```
  */
 export class ExaoneModel extends Model<ExaoneModelConfig> {
-  private _config: ExaoneModelConfig
+  #config: ExaoneModelConfig
   constructor(config: ExaoneModelConfig = {}) {
     super()
-    this._config = { modelId: 'k-exaone_v2.5', contextWindowLimit: 524288, ...copyConfig(config) }
-    validateModelConfig(this._config)
+    this.#config = { modelId: 'k-exaone_v2.5', contextWindowLimit: 524288, ...copyConfig(config) }
+    validateModelConfig(this.#config)
   }
   /** Update the model configuration. Invalid options leave the current configuration unchanged. */
   override updateConfig(config: Partial<ExaoneModelConfig>): void {
-    const updated = { ...this._config, ...copyConfig(config) }
+    const updated = { ...this.#config, ...copyConfig(config) }
     validateModelConfig(updated)
-    this._config = updated
+    this.#config = updated
   }
   /** Get the model configuration without the API key. */
   override getConfig(): ExaoneModelConfig {
-    const { apiKey: _key, ...safe } = this._config
+    const { apiKey: _key, ...safe } = this.#config
     return copyConfig(safe)
   }
   /** Known EXAONE capabilities, with caller overrides taking precedence. */
   override get modelInfo(): ModelInfo {
     const info = super.modelInfo
-    if (this._config.modelId !== 'k-exaone_v2.5') return info
-    const overrides = this._config.modelInfo?.capabilities
+    if (this.#config.modelId !== 'k-exaone_v2.5') return info
+    const overrides = this.#config.modelInfo?.capabilities
     return Object.freeze({
       ...info,
       limits: Object.freeze({
         ...info.limits,
-        contextWindow: this._config.modelInfo?.limits?.contextWindow ?? this._config.contextWindowLimit ?? 524_288,
+        contextWindow: this.#config.modelInfo?.limits?.contextWindow ?? this.#config.contextWindowLimit ?? 524_288,
       }),
       capabilities: Object.freeze({
         ...info.capabilities,
@@ -641,7 +677,7 @@ export class ExaoneModel extends Model<ExaoneModelConfig> {
    * @yields Strands model events translated from the response.
    */
   override async *stream(messages: Message[], options?: StreamOptions): AsyncGenerator<ModelStreamEvent> {
-    const config = { ...this._config }
+    const config = { ...this.#config }
     const key = getKey(config)
     const request = requestParameters(config, messages, options)
     const body = requestBody(request)
@@ -654,32 +690,21 @@ export class ExaoneModel extends Model<ExaoneModelConfig> {
       signal.throwIfAborted()
       if (!response.ok) await throwHttpError(response, key, signal)
       const mapper = new EventMapper(key)
-      yield { type: 'modelMessageStartEvent', role: 'assistant' }
-      signal.throwIfAborted()
-      let deliveredContent = false
+      const messageStartState = { started: false }
       try {
-        for await (const event of responseEvents(response, request.stream !== false, mapper)) {
-          signal.throwIfAborted()
-          if (event.type === 'modelContentBlockDeltaEvent') deliveredContent = true
-          yield event
-          signal.throwIfAborted()
-        }
+        yield* withMessageStart(responseEvents(response, request.stream !== false, mapper), signal, messageStartState)
       } catch (error) {
         if (signal.aborted) throw signal.reason
         if (error instanceof ResponseReadError) {
           const cause = safeResponseReadCause(error.cause)
-          if (deliveredContent) throw new ModelError('EXAONE response stream failed after content was delivered', { cause })
+          if (messageStartState.started) throw new ModelError('EXAONE response stream failed after output was exposed', { cause })
           throw new ModelNetworkError('EXAONE response stream failed', { cause })
         }
         throw error
       }
-      for (const event of mapper.finish(key)) {
-        signal.throwIfAborted()
-        yield event
-        signal.throwIfAborted()
-      }
+      yield* withMessageStart(mapper.finish(key), signal, messageStartState)
       const metadata = metadataEvent(mapper, response, key)
-      await notifyMetadata(config.onMetadata, structuredClone(metadata.metadata), signal)
+      if (config.onMetadata) await notifyMetadata(config.onMetadata, structuredClone(metadata.metadata), signal)
       signal.throwIfAborted()
       yield metadata.event
     } finally { timeout?.dispose(); controller.abort() }

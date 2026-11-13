@@ -1,8 +1,10 @@
+import { inspect } from 'node:util'
 import { describe, expect, it, vi } from 'vitest'
 import { Agent, Message, ModelError, ModelNetworkError, ModelThrottledError, tool } from '@strands-agents/sdk'
 import { z } from 'zod'
 import { ExaoneAPIError, ExaoneModel, ExaoneResponseError } from '../src/index.js'
 import { readSSE } from '../src/sse.js'
+import { redactMetadata } from '../src/metadata.js'
 
 const user = () => Message.fromMessageData({ role: 'user', content: [{ text: 'hello' }] })
 const usage = { prompt_tokens: 3, completion_tokens: 5, total_tokens: 8, reasoning_tokens: 2 }
@@ -25,6 +27,64 @@ async function collect(model: ExaoneModel, messages: Message[] = [user()]) {
 }
 
 describe('ExaoneModel', () => {
+  it('keeps the API key out of object inspection and redacts encoded metadata values', () => {
+    const apiKey = 'synthetic+private/key with spaces'
+    const model = new ExaoneModel({ apiKey })
+    const encoded = encodeURIComponent(apiKey)
+    const formEncoded = new URLSearchParams({ value: apiKey }).toString().slice('value='.length)
+
+    expect(JSON.stringify(model)).not.toContain(apiKey)
+    expect(inspect(model)).not.toContain(apiKey)
+    expect(JSON.stringify(model.getConfig())).not.toContain(apiKey)
+    expect(redactMetadata({ [encoded]: formEncoded }, apiKey)).toEqual({ '[REDACTED]': '[REDACTED]' })
+    expect(redactMetadata({ value: encoded.replace('%2B', '%2b') }, apiKey)).toEqual({ value: '[REDACTED]' })
+    const differentValue = encoded.replace('%2F', '%3F')
+    expect(redactMetadata({ [differentValue]: differentValue }, apiKey)).toEqual({ [differentValue]: differentValue })
+  })
+
+  it('redacts encoded API keys from raw HTTP errors, request IDs, and transport diagnostics', async () => {
+    const apiKey = 'synthetic+private/key with spaces'
+    const encoded = encodeURIComponent(apiKey).replace('%2B', '%2b')
+    const httpModel = new ExaoneModel({
+      apiKey,
+      fetch: transport(response(`provider rejected ${encoded}`, 400, { 'x-request-id': encoded })),
+    })
+    try {
+      await collect(httpModel)
+      throw new Error('Expected HTTP error')
+    } catch (error) {
+      expect(error).toBeInstanceOf(ExaoneAPIError)
+      expect((error as ExaoneAPIError).body).toBe('provider rejected [REDACTED]')
+      expect((error as ExaoneAPIError).requestId).toBe('[REDACTED]')
+    }
+
+    const transportModel = new ExaoneModel({
+      apiKey,
+      fetch: async () => { throw new TypeError(`request failed ${encoded}`) },
+    })
+    try {
+      await collect(transportModel)
+      throw new Error('Expected network error')
+    } catch (error) {
+      expect((error as Error).cause).toMatchObject({ message: 'request failed [REDACTED]' })
+    }
+  })
+
+  it('does not clone callback metadata when no callback is configured', async () => {
+    const messages = [user()]
+    const model = new ExaoneModel({
+      apiKey: 'test-key',
+      fetch: async () => response(sse([event({ content: 'answer' }, 'stop')]), 200, { 'content-type': 'text/event-stream' }),
+    })
+    const clone = vi.spyOn(globalThis, 'structuredClone')
+    try {
+      await collect(model, messages)
+      expect(clone).not.toHaveBeenCalled()
+    } finally {
+      clone.mockRestore()
+    }
+  })
+
   it('validates named EXAONE options at construction and preserves configuration after a rejected update', () => {
     expect(() => new ExaoneModel({ topK: 0 })).toThrow('topK must be -1 or a positive integer')
     expect(() => new ExaoneModel({ topP: 1.01 })).toThrow('topP must be a finite number between 0 and 1')

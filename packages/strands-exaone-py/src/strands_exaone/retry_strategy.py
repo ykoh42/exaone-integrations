@@ -54,6 +54,9 @@ class ExaoneRetryStrategy(ModelRetryStrategy):
             return
 
         error = event.exception
+        if error is not None and getattr(error, "_exaone_events_exposed", False):
+            self._retry_counts.pop(id(event.invocation_state), None)
+            return
         api_error = error if isinstance(error, (ExaoneError, ExaoneThrottledError)) else None
         headers = api_error.headers if api_error is not None else {}
         status_code = api_error.status_code if api_error is not None else None

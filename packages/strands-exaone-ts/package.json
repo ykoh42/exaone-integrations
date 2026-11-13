@@ -1,6 +1,6 @@
 {
   "name": "strands-exaone",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "EXAONE model provider for Strands Agents",
   "type": "module",
   "files": [
@@ -21,6 +21,8 @@
     "examples/strands-cli/README.md",
     "examples/strands-cli/agent.ts",
     "examples/strands-cli/package.json",
+    "README.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "exports": {
@@ -38,6 +40,19 @@
     "url": "git+https://github.com/ykoh42/exaone-integrations.git",
     "directory": "packages/strands-exaone-ts"
   },
+  "homepage": "https://github.com/ykoh42/exaone-integrations/tree/main/packages/strands-exaone-ts#readme",
+  "bugs": {
+    "url": "https://github.com/ykoh42/exaone-integrations/issues"
+  },
+  "keywords": [
+    "exaone",
+    "strands",
+    "strands agents",
+    "ai agents",
+    "model provider",
+    "reasoning",
+    "tool calling"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",

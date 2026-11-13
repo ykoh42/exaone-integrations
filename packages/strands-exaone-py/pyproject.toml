@@ -4,12 +4,13 @@ build-backend = "hatchling.build"
 
 [project]
 name = "strands-exaone"
-version = "0.1.1"
+version = "0.1.2"
 description = "EXAONE model provider for Strands Agents"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 license-files = ["LICENSE"]
+keywords = ["exaone", "strands-agents", "model-provider", "chat-completions", "reasoning", "tool-calling"]
 dependencies = [
     "strands-agents>=1.64.0,<1.65.0",
     "httpx>=0.27,<1",
@@ -33,6 +34,10 @@ dev = [
 
 [project.urls]
 Repository = "https://github.com/ykoh42/exaone-integrations"
+Homepage = "https://github.com/ykoh42/exaone-integrations/tree/main/packages/strands-exaone-py#readme"
+Documentation = "https://github.com/ykoh42/exaone-integrations/tree/main/packages/strands-exaone-py#readme"
+Issues = "https://github.com/ykoh42/exaone-integrations/issues"
+Changelog = "https://github.com/ykoh42/exaone-integrations/blob/main/packages/strands-exaone-py/CHANGELOG.md"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/strands_exaone"]
@@ -44,7 +49,7 @@ exclude = ["/.complexipy_cache"]
 line-length = 120
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "B"]
+select = ["E", "F", "I", "B", "UP"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

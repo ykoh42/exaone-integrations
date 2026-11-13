@@ -196,6 +196,8 @@ Strands owns Agent-level retry selection, so a model provider cannot silently re
 
 Strands' default retry strategy does not inspect EXAONE headers. Keeping it alongside the provider's own retry loop can multiply attempts, so leave `max_retries` at its default of zero when using `ExaoneRetryStrategy`. The strategy retries EXAONE transient HTTP errors, safe connection failures, and Strands throttling failures before the provider exposes output. It does not retry tool arguments that remain invalid after syntax-only completion or other model response errors.
 
+The Strands retry hook runs after the model call. Once the provider has yielded a stream event, it marks transport failures as non-retryable for `ExaoneRetryStrategy`, even when their HTTPX type is normally retryable. This preserves the HTTPX error type without replaying an exposed response.
+
 `ExaoneModel`'s optional `max_retries` setting remains available for direct model calls that do not use an Agent retry strategy. It retries connection failures before a response and retryable HTTP responses. The provider never replays a partially delivered stream. `timeout` bounds request work, provider retry waits, response reads, asynchronous metadata callbacks, and time the consumer pauses between yielded stream events. Agent-level `ExaoneRetryStrategy` waits are outside the model timeout. It cannot interrupt a synchronous callback while that function is running; an uncooperative custom transport can also delay response cleanup beyond the deadline. A caller-owned `http_client` retains its own transport timeouts.
 
 When stopping iteration early, explicitly close the async generator so its response can be released promptly. This applies to both `model.stream(...)` and `agent.stream_async(...)`:
