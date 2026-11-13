@@ -32,6 +32,12 @@ print(message.text)
 
 The package does not load `.env` files. Use your application's secret-management setup to place the API key in the process environment, or pass `api_key` directly.
 
+## Why use this integration?
+
+An OpenAI chat model configured with EXAONE's endpoint can be sufficient for basic chat. `ChatEXAONE` maintains the EXAONE-specific mapping: `reasoning_content` is retained on assistant messages and sent back on later turns, `preserve_thinking=True` is the default, and known model facts are exposed through LangChain's standard profile. Usage and response metadata are exposed on LangChain messages; API failures include diagnostic fields on the raised error.
+
+Bounded retries honor server delay hints and never replay an already-started stream. Structured-output binding and tool execution follow LangChain's contracts. Generic adapters may support equivalent behavior through configuration or extensions; this package maintains and tests that integration work. See the [project comparison](https://github.com/ykoh42/exaone-integrations#why-use-a-dedicated-provider) for scope and trade-offs.
+
 ## Serialization
 
 `ChatEXAONE` does not opt into LangChain object serialization. LangChain's deserializer only allows registered integration classes by default, and this standalone package is not registered in `langchain-core`. The provider does not modify LangChain's global serialization registry. Create the model from application configuration when starting your process; its API key is held in a `SecretStr` and omitted from the model representation.

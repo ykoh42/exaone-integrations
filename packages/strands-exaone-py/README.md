@@ -31,6 +31,12 @@ The callback handler determines whether intermediate reasoning and response text
 
 For SDK tool use, streaming, structured output, Harness, and CLI walkthroughs, see the [examples](examples/).
 
+## Why use this provider?
+
+An OpenAI provider configured with EXAONE's endpoint can be sufficient for basic chat. `ExaoneModel` supplies EXAONE reasoning-history round trips, `preserve_thinking=True` by default, known model information, and mappings for Strands streaming, tools, usage, and API errors. It also completes narrowly defined tool-argument syntax without guessing values; other malformed arguments are rejected.
+
+For Agent and Harness retry handling, explicitly configure `ExaoneRetryStrategy` as shown above to honor server delay hints. The model's own HTTP retries remain disabled by default. Generic adapters may support equivalent behavior through configuration or extensions; this package maintains and tests the EXAONE-specific mapping. See the [project comparison](https://github.com/ykoh42/exaone-integrations#why-use-a-dedicated-provider) for scope and trade-offs.
+
 ## Configuration
 
 | Option | Description | Default |
@@ -216,7 +222,7 @@ agent = create_harness(
 
 This option is intended for direct model calls or when choosing provider-level retries explicitly. For Harness use, `ExaoneRetryStrategy` is the recommended way to honor each EXAONE response's retry headers.
 
-The provider preserves invalid model output as an error rather than repairing or silently dropping it. Malformed tool arguments are rejected before Strands can execute the tool. Structured-output validation errors should be handled through the Strands structured-output contract; automatic prompt rewriting or repeating a model-generated mistake is not enabled.
+The provider preserves invalid model output as an error rather than rewriting argument values or silently dropping it. Tool arguments that remain malformed after syntax-only completion are rejected before Strands can execute the tool. Structured-output validation errors should be handled through the Strands structured-output contract; automatic prompt rewriting or repeating a model-generated mistake is not enabled.
 
 ## Metadata and errors
 

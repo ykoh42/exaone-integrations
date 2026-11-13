@@ -23,6 +23,12 @@ console.log(response.content)
 
 The package uses `k-exaone_v2.5` and `https://api.exaone.ai/v1` by default. See the [examples](examples/) for LangChain agents, streaming chat, structured output, LangGraph tool loops, and Deep Agents.
 
+## Why use this integration?
+
+An OpenAI chat model configured with EXAONE's endpoint can be sufficient for basic chat. `ChatExaone` maintains the EXAONE-specific mapping: `reasoning_content` is retained on assistant messages and sent back on later turns, `preserveThinking: true` is the default, and known model facts are exposed through LangChain's standard profile. Usage and response metadata are exposed on LangChain messages; API failures include diagnostic fields on the raised error.
+
+Bounded retries honor server delay hints and never replay an already-started stream. Structured-output binding and tool execution follow LangChain's contracts. Generic adapters may support equivalent behavior through configuration or extensions; this package maintains and tests that integration work. See the [project comparison](https://github.com/ykoh42/exaone-integrations#why-use-a-dedicated-provider) for scope and trade-offs.
+
 ## Configuration
 
 | Option | Description | Default |

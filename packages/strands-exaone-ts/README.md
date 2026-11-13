@@ -35,6 +35,12 @@ The example disables the SDK's default printer and prints only text blocks. In S
 
 For SDK tool use, streaming, structured output, Harness, and CLI walkthroughs, see the [examples](examples/).
 
+## Why use this provider?
+
+An OpenAI provider configured with EXAONE's endpoint can be sufficient for basic chat. `ExaoneModel` supplies EXAONE reasoning-history round trips, `preserveThinking: true` by default, known model information, and mappings for Strands streaming, tools, usage, and API errors. It also completes narrowly defined tool-argument syntax without guessing values; other malformed arguments are rejected.
+
+For Agent and Harness retry handling, explicitly configure `ExaoneRetryStrategy` as shown above to honor server delay hints. The model's own HTTP retries remain disabled by default. Generic adapters may support equivalent behavior through configuration or extensions; this package maintains and tests the EXAONE-specific mapping. See the [project comparison](https://github.com/ykoh42/exaone-integrations#why-use-a-dedicated-provider) for scope and trade-offs.
+
 ## Configuration
 
 | Option | Description | Default |

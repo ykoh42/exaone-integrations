@@ -13,6 +13,24 @@ Users are responsible for reviewing and complying with the terms that apply to t
 
 Each package documents its supported framework features, installation, examples, configuration, and API limitations.
 
+## Why use a dedicated provider?
+
+EXAONE provides an [OpenAI-compatible API](https://docs.exaone.ai/ko/docs/k-exaone-2.5). For basic chat, an OpenAI provider configured with EXAONE's base URL, model ID, and API key can be sufficient. Generic adapters can also support EXAONE-specific fields through configuration or extension points; the behavior depends on the adapter and its version.
+
+These packages maintain the EXAONE-to-framework mapping so applications can use the following behavior without implementing it separately:
+
+| Area | What the integration provides |
+| --- | --- |
+| Reasoning history | Maps `reasoning_content` into framework messages and sends it back on later turns. Requests `preserve_thinking=true` by default. Keep returned assistant messages in history; reasoning removed by application memory cannot be restored. |
+| Model information | Exposes known context limits and capabilities through Strands `ModelInfo` or LangChain `profile`, with caller overrides. Unknown facts remain unspecified. The framework owns context management and strategy selection. |
+| Retry handling | Honors valid `Retry-After` and `Retry-After-Ms` hints within the configured retry policy. Strands uses the explicitly configured `ExaoneRetryStrategy`; LangChain includes bounded retries by default. A hint beyond the delay cap surfaces the error instead of retrying early. Already-started streams are never replayed by the provider. |
+| Streaming and tools | Maps reasoning, text, streamed tool calls, and tool results to framework types. Frameworks execute tools and validate their schemas. Unsupported inputs and malformed responses follow the package's documented error handling. |
+| Diagnostics | Adapts usage, including reasoning-token counts where available, response metadata, and API errors to the framework's interfaces. Exact fields and access methods are documented per package. |
+
+The Strands packages also apply narrowly scoped syntax completion to tool-argument JSON objects: missing closing braces or brackets and trailing commas can be corrected without guessing argument values. Other malformed arguments are rejected before tool execution. This behavior is specific to the Strands packages; see their [Python](packages/strands-exaone-py/#reasoning-and-tools) and [TypeScript](packages/strands-exaone-ts/#reasoning-and-tools) documentation for the boundaries.
+
+The integrations follow each framework's public contracts and keep API compatibility limits explicit. They do not guarantee correct model decisions or eliminate service errors. If your existing OpenAI adapter already preserves the required EXAONE fields and handles your application's limits and retry policy, continuing to use it is a reasonable choice. The dedicated packages provide a maintained, tested implementation of that integration work.
+
 ## Get started
 
 The Python packages are available on PyPI and the TypeScript packages are available on npm. The commands below install from this checkout for development. For TypeScript, use the Node.js version in `.node-version` and npm 11.20.0.
