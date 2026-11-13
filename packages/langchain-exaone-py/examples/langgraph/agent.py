@@ -18,6 +18,7 @@ def multiply(a: int, b: int) -> int:
 
 
 def main() -> None:
+    """Run the explicit model-tool graph across two turns."""
     model = ChatEXAONE(base_url=os.getenv("EXAONE_BASE_URL", "https://api.exaone.ai/v1")).bind_tools([multiply])
 
     def call_model(state: MessagesState) -> dict:

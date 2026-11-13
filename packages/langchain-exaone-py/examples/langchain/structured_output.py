@@ -15,6 +15,7 @@ class Contact(BaseModel):
 
 
 def main() -> None:
+    """Extract and print a typed contact."""
     model = ChatEXAONE(base_url=os.getenv("EXAONE_BASE_URL", "https://api.exaone.ai/v1"))
     contact = model.with_structured_output(Contact).invoke("Extract the contact: Alex, alex@example.com.")
     print(contact.model_dump_json())

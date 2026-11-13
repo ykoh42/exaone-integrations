@@ -7,6 +7,7 @@ import json
 import math
 import os
 import random
+import re
 import time
 from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
 from contextlib import asynccontextmanager, contextmanager
@@ -35,7 +36,7 @@ from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResu
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from pydantic import ConfigDict, Field, SecretStr, field_validator
 
-from ._profiles import get_model_profile
+from langchain_exaone._profiles import get_model_profile
 
 _RETRYABLE_STATUSES = {408, 429, 500, 502, 503, 504}
 _SAFE_HEADERS = {"content-type", "retry-after", "retry-after-ms", "x-request-id"}
@@ -55,6 +56,16 @@ class ExaoneAPIError(Exception):
         param: Any = None,
         headers: Mapping[str, str] | None = None,
     ) -> None:
+        """Initialize an API error without retaining authenticated request data.
+
+        Args:
+            message: Sanitized error message returned to the caller.
+            status_code: HTTP status code from the EXAONE endpoint.
+            error_type: Optional API error type.
+            code: Optional API error code.
+            param: Optional request parameter associated with the error.
+            headers: Allowlisted diagnostic and rate-limit response headers.
+        """
         super().__init__(message)
         self.status_code = status_code
         self.error_type = error_type
@@ -65,7 +76,7 @@ class ExaoneAPIError(Exception):
 
 def _safe_headers(headers: Mapping[str, str], api_key: str) -> dict[str, str]:
     return {
-        name.lower(): value.replace(api_key, "[REDACTED]")
+        name.lower(): _redact_secret(value, api_key)
         for name, value in headers.items()
         if name.lower() in _SAFE_HEADERS
         or name.lower().startswith(("x-second-rate-limit", "x-minute-rate-limit", "x-day-rate-limit"))
@@ -74,10 +85,17 @@ def _safe_headers(headers: Mapping[str, str], api_key: str) -> dict[str, str]:
 
 def _redact_secret(value: Any, secret: str) -> Any:
     if isinstance(value, str):
-        variants = {secret, quote(secret, safe=""), quote_plus(secret, safe="")}
-        for variant in variants:
+        try:
+            variants = {secret, quote(secret, safe=""), quote_plus(secret, safe="")}
+        except UnicodeError:
+            variants = {secret}
+        for variant in sorted(variants, key=len, reverse=True):
             if variant:
                 value = value.replace(variant, "[REDACTED]")
+                encoded_pattern = re.sub(
+                    r"%[0-9A-F]{2}", lambda match: f"(?i:{match.group()})", re.escape(variant), flags=re.IGNORECASE
+                )
+                value = re.sub(encoded_pattern, "[REDACTED]", value)
         return value
     if isinstance(value, Mapping):
         return {_redact_secret(key, secret): _redact_secret(item, secret) for key, item in value.items()}
@@ -205,19 +223,43 @@ def _api_error(status: int, headers: Mapping[str, str], body: bytes, api_key: st
         payload = json.loads(body)
     except (ValueError, UnicodeDecodeError):
         payload = {}
-    error = payload.get("error", payload) if isinstance(payload, dict) else {}
-    if not isinstance(error, dict):
-        error = {}
-    message = str(error.get("message") or error.get("description") or f"EXAONE API request failed with HTTP {status}")
-    message = message.replace(api_key, "[REDACTED]")
+    envelope = payload if isinstance(payload, dict) else {}
+    nested_error = envelope.get("error")
+    error = nested_error if isinstance(nested_error, dict) else envelope
+    message = str(
+        error.get("message")
+        or error.get("description")
+        or envelope.get("message")
+        or envelope.get("description")
+        or f"EXAONE API request failed with HTTP {status}"
+    )
+    message = _redact_secret(message, api_key)
+    code = error.get("code")
+    if code is None:
+        code = error.get("result_code")
+    if code is None:
+        code = envelope.get("result_code")
     return ExaoneAPIError(
         message,
         status_code=status,
         error_type=_redact_secret(error["type"], api_key) if isinstance(error.get("type"), str) else None,
-        code=_redact_secret(error.get("code") if error.get("code") is not None else error.get("result_code"), api_key),
+        code=_redact_secret(code, api_key),
         param=_redact_secret(error.get("param"), api_key),
         headers=_safe_headers(headers, api_key),
     )
+
+
+def _load_response_json(payload: bytes | str, description: str) -> Any:
+    """Decode JSON without retaining an invalid response body in the exception."""
+    valid = True
+    try:
+        result = json.loads(payload)
+    except (ValueError, UnicodeDecodeError):
+        valid = False
+        result = None
+    if not valid:
+        raise ValueError(f"EXAONE returned malformed JSON in the {description}.")
+    return result
 
 
 def _content_parts(message: BaseMessage) -> tuple[str, str | None]:
@@ -302,13 +344,21 @@ def _usage_metadata(usage: Mapping[str, Any] | None) -> dict[str, Any] | None:
 def _tool_calls(raw_calls: Any) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     valid: list[dict[str, Any]] = []
     invalid: list[dict[str, Any]] = []
-    for raw in raw_calls if isinstance(raw_calls, list) else []:
-        if not isinstance(raw, Mapping) or not isinstance(raw.get("function"), Mapping):
-            continue
+    if raw_calls is None:
+        return valid, invalid
+    if not isinstance(raw_calls, list):
+        raise ValueError("EXAONE response tool_calls must be an array")
+    for raw in raw_calls:
+        if not isinstance(raw, Mapping):
+            raise ValueError("EXAONE response tool call entries must be objects")
+        if not isinstance(raw.get("function"), Mapping):
+            raise ValueError("EXAONE response tool call function must be an object")
         function = raw["function"]
         name, arguments, call_id = function.get("name"), function.get("arguments", ""), raw.get("id")
         if not isinstance(name, str) or not isinstance(arguments, str):
-            continue
+            raise ValueError("EXAONE response tool call name and arguments must be strings")
+        if call_id is not None and not isinstance(call_id, str):
+            raise ValueError("EXAONE response tool call id must be a string")
         try:
             parsed = json.loads(arguments)
         except ValueError:
@@ -384,7 +434,7 @@ def _decode_sse(lines: Iterator[str]) -> Iterator[dict[str, Any]]:
                 payload = "\n".join(pending)
                 pending.clear()
                 if payload != "[DONE]":
-                    data = json.loads(payload)
+                    data = _load_response_json(payload, "event stream")
                     if not isinstance(data, dict):
                         raise ValueError("EXAONE stream event must be a JSON object")
                     yield data
@@ -393,7 +443,7 @@ def _decode_sse(lines: Iterator[str]) -> Iterator[dict[str, Any]]:
     if pending:
         payload = "\n".join(pending)
         if payload != "[DONE]":
-            data = json.loads(payload)
+            data = _load_response_json(payload, "event stream")
             if not isinstance(data, dict):
                 raise ValueError("EXAONE stream event must be a JSON object")
             yield data
@@ -407,7 +457,7 @@ async def _decode_sse_async(lines: Any) -> AsyncIterator[dict[str, Any]]:
                 payload = "\n".join(pending)
                 pending.clear()
                 if payload != "[DONE]":
-                    data = json.loads(payload)
+                    data = _load_response_json(payload, "event stream")
                     if not isinstance(data, dict):
                         raise ValueError("EXAONE stream event must be a JSON object")
                     yield data
@@ -416,34 +466,79 @@ async def _decode_sse_async(lines: Any) -> AsyncIterator[dict[str, Any]]:
     if pending:
         payload = "\n".join(pending)
         if payload != "[DONE]":
-            data = json.loads(payload)
+            data = _load_response_json(payload, "event stream")
             if not isinstance(data, dict):
                 raise ValueError("EXAONE stream event must be a JSON object")
             yield data
 
 
 class ChatEXAONE(BaseChatModel):
-    """LangChain chat model for the K-EXAONE 2.5 API."""
+    """LangChain chat model for the K-EXAONE 2.5 Chat Completions API.
+
+    The API key defaults to the ``EXAONE_API_KEY`` environment variable. The
+    model preserves EXAONE reasoning on assistant messages so it can be sent
+    back when the caller includes those messages in later turns.
+
+    Example:
+        .. code-block:: python
+
+            from langchain_exaone import ChatEXAONE
+
+            model = ChatEXAONE()
+            response = model.invoke("Hello")
+    """
 
     model_config = ConfigDict(arbitrary_types_allowed=True, protected_namespaces=())
 
-    model: str = "k-exaone_v2.5"
-    api_key: SecretStr = Field(default_factory=lambda: SecretStr(os.environ.get("EXAONE_API_KEY", "")), repr=False)
-    base_url: str = "https://api.exaone.ai/v1"
-    temperature: float | None = 1.0
-    top_p: float | None = 0.95
-    presence_penalty: float | None = 0.0
-    max_tokens: int | None = None
-    top_k: int = -1
-    reasoning_effort: Literal["low", "medium", "high", "max"] | None = None
-    preserve_thinking: bool = True
-    chat_template_kwargs: dict[str, Any] = Field(default_factory=dict)
-    timeout: float | None = None
-    max_retries: int = 2
-    max_retry_delay: float = 60.0
-    model_kwargs: dict[str, Any] = Field(default_factory=dict)
-    http_client: httpx.Client | None = Field(default=None, exclude=True, repr=False)
-    http_async_client: httpx.AsyncClient | None = Field(default=None, exclude=True, repr=False)
+    model: str = Field(default="k-exaone_v2.5", description="EXAONE model ID.")
+    api_key: SecretStr = Field(
+        default_factory=lambda: SecretStr(os.environ.get("EXAONE_API_KEY", "")),
+        repr=False,
+        description="EXAONE API key. Defaults to the EXAONE_API_KEY environment variable.",
+    )
+    base_url: str = Field(
+        default="https://api.exaone.ai/v1",
+        description="Chat Completions API base URL. Remote endpoints must use HTTPS.",
+    )
+    temperature: float | None = Field(default=1.0, description="Sampling temperature.")
+    top_p: float | None = Field(default=0.95, description="Nucleus sampling value.")
+    presence_penalty: float | None = Field(default=0.0, description="Presence penalty.")
+    max_tokens: int | None = Field(default=None, description="Maximum generated tokens, including reasoning tokens.")
+    top_k: int = Field(default=-1, description="Top-k sampling value; -1 disables top-k filtering.")
+    reasoning_effort: Literal["low", "medium", "high", "max"] | None = Field(
+        default=None,
+        description="EXAONE reasoning effort. Omit to use the service default.",
+    )
+    preserve_thinking: bool = Field(
+        default=True,
+        description="Preserve EXAONE reasoning across turns.",
+    )
+    chat_template_kwargs: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Additional EXAONE chat-template options.",
+    )
+    timeout: float | None = Field(
+        default=None,
+        description="HTTP timeout in seconds. Omit for no provider-imposed timeout.",
+    )
+    max_retries: int = Field(default=2, description="Maximum retries before output is returned.")
+    max_retry_delay: float = Field(default=60.0, description="Maximum retry delay in seconds.")
+    model_kwargs: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Additional endpoint-specific request fields. Reserved fields are provider-controlled.",
+    )
+    http_client: httpx.Client | None = Field(
+        default=None,
+        exclude=True,
+        repr=False,
+        description="Optional synchronous HTTPX client for connection reuse or custom transport.",
+    )
+    http_async_client: httpx.AsyncClient | None = Field(
+        default=None,
+        exclude=True,
+        repr=False,
+        description="Optional asynchronous HTTPX client for connection reuse or custom transport.",
+    )
 
     def _resolve_model_profile(self) -> ModelProfile | None:
         """Supply the default profile through LangChain's model-resolution hook."""
@@ -651,8 +746,10 @@ class ChatEXAONE(BaseChatModel):
                             time.sleep(delay)
                             continue
                     raise error
-                payload = response.json()
-                response.close()
+                try:
+                    payload = _load_response_json(response.content, "response body")
+                finally:
+                    response.close()
                 return self._parse_result(payload, key)
         raise RuntimeError("EXAONE retry loop exited without a response")
 
@@ -682,8 +779,10 @@ class ChatEXAONE(BaseChatModel):
                             await asyncio.sleep(delay)
                             continue
                     raise error
-                payload = response.json()
-                await response.aclose()
+                try:
+                    payload = _load_response_json(response.content, "response body")
+                finally:
+                    await response.aclose()
                 return self._parse_result(payload, key)
         raise RuntimeError("EXAONE retry loop exited without a response")
 
@@ -801,14 +900,35 @@ class ChatEXAONE(BaseChatModel):
             if not text.strip() and isinstance(refusal, str) and refusal.strip():
                 text = refusal
             tool_chunks = []
-            for tool in delta.get("tool_calls") or []:
-                function = tool.get("function") or {}
+            raw_tool_calls = delta.get("tool_calls")
+            if raw_tool_calls is not None and not isinstance(raw_tool_calls, list):
+                raise ValueError("EXAONE stream delta tool_calls must be an array")
+            for tool in raw_tool_calls or []:
+                if not isinstance(tool, Mapping):
+                    raise ValueError("EXAONE stream tool call entries must be objects")
+                function = tool.get("function")
+                if function is None:
+                    function = {}
+                elif not isinstance(function, Mapping):
+                    raise ValueError("EXAONE stream tool call function must be an object")
+                name = function.get("name")
+                arguments = function.get("arguments", "")
+                call_id = tool.get("id")
+                tool_index = tool.get("index")
+                if name is not None and not isinstance(name, str):
+                    raise ValueError("EXAONE stream tool call name must be text")
+                if arguments is not None and not isinstance(arguments, str):
+                    raise ValueError("EXAONE stream tool call arguments must be text")
+                if call_id is not None and not isinstance(call_id, str):
+                    raise ValueError("EXAONE stream tool call id must be a string")
+                if tool_index is not None and type(tool_index) is not int:
+                    raise ValueError("EXAONE stream tool call index must be an integer")
                 tool_chunks.append(
                     {
-                        "name": function.get("name"),
-                        "args": function.get("arguments", ""),
-                        "id": tool.get("id"),
-                        "index": tool.get("index"),
+                        "name": name,
+                        "args": arguments,
+                        "id": call_id,
+                        "index": tool_index,
                     }
                 )
             additional = {"reasoning_content": reasoning} if reasoning else {}

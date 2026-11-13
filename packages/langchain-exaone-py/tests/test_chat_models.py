@@ -2,6 +2,7 @@
 
 import json
 from typing import Any
+from urllib.parse import quote, quote_plus
 
 import httpx
 import pytest
@@ -236,6 +237,58 @@ def test_tool_calls_are_returned_as_langchain_tool_calls() -> None:
         client.close()
     assert response.tool_calls == [{"name": "weather", "args": {"city": "Seoul"}, "id": "call-1", "type": "tool_call"}]
     assert response.additional_kwargs["reasoning_content"] == "Need a weather tool."
+
+
+@pytest.mark.parametrize(
+    ("tool_calls", "error_message"),
+    [
+        ({"call-1": {}}, "tool_calls must be an array"),
+        ([None], "tool call entries must be objects"),
+        ([{"function": "weather"}], "tool call function must be an object"),
+    ],
+)
+def test_invoke_rejects_malformed_tool_call_shapes(tool_calls: Any, error_message: str) -> None:
+    payload = _completion()
+    payload["choices"][0]["message"] = {"role": "assistant", "content": None, "tool_calls": tool_calls}
+    client = httpx.Client(transport=httpx.MockTransport(lambda _: httpx.Response(200, json=payload)))
+    try:
+        with pytest.raises(ValueError, match=error_message):
+            ChatEXAONE(api_key="synthetic-key", http_client=client).invoke("hello")
+    finally:
+        client.close()
+
+
+@pytest.mark.parametrize("operation", ["stream", "astream"])
+@pytest.mark.parametrize(
+    ("tool_calls", "error_message"),
+    [
+        ({"call-1": {}}, "stream delta tool_calls must be an array"),
+        ([None], "stream tool call entries must be objects"),
+        ([{"function": "weather"}], "stream tool call function must be an object"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_stream_rejects_malformed_tool_call_shapes(
+    operation: str,
+    tool_calls: Any,
+    error_message: str,
+) -> None:
+    event = {"choices": [{"index": 0, "delta": {"tool_calls": tool_calls}}]}
+    body = f"data: {json.dumps(event)}\n\ndata: [DONE]\n\n"
+    sync_client = httpx.Client(transport=httpx.MockTransport(lambda _: httpx.Response(200, content=body.encode())))
+    async_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, content=body.encode()))
+    )
+    model = ChatEXAONE(api_key="synthetic-key", http_client=sync_client, http_async_client=async_client)
+    try:
+        with pytest.raises(ValueError, match=error_message):
+            if operation == "stream":
+                list(model.stream("hello"))
+            else:
+                _ = [chunk async for chunk in model.astream("hello")]
+    finally:
+        sync_client.close()
+        await async_client.aclose()
 
 
 @pytest.mark.parametrize("content", [" \n\t", None])
@@ -560,6 +613,71 @@ def test_api_error_redacts_key_from_retained_error_fields() -> None:
     assert error.value.param == {"field": "param-[REDACTED]"}
 
 
+def test_api_errors_redact_percent_encoded_keys_from_messages_and_headers() -> None:
+    api_key = "synthetic+reserved/key with spaces"
+    client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda _: httpx.Response(
+                422,
+                headers={"x-request-id": quote_plus(api_key, safe="")},
+                json={
+                    "error": {
+                        "message": f"Rejected {quote(api_key, safe='').replace('%2F', '%2f')}",
+                        "param": quote(api_key, safe="").replace("%2F", "%3F"),
+                    }
+                },
+            )
+        )
+    )
+    try:
+        with pytest.raises(ExaoneAPIError) as error:
+            ChatEXAONE(api_key=api_key, http_client=client).invoke("hello")
+    finally:
+        client.close()
+
+    assert str(error.value) == "Rejected [REDACTED]"
+    assert error.value.headers["x-request-id"] == "[REDACTED]"
+    assert error.value.param == quote(api_key, safe="").replace("%2F", "%3F")
+
+
+@pytest.mark.parametrize("operation", ["invoke", "ainvoke", "stream", "astream"])
+@pytest.mark.asyncio
+async def test_malformed_success_payloads_do_not_retain_response_text(operation: str) -> None:
+    api_key = "synthetic+response/key"
+    encoded_key = quote_plus(api_key, safe="")
+    malformed_json = f'{{"message":"{encoded_key}"'
+    body = f"data: {malformed_json}\n\n" if operation in {"stream", "astream"} else malformed_json
+    sync_client = httpx.Client(transport=httpx.MockTransport(lambda _: httpx.Response(200, content=body.encode())))
+    async_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, content=body.encode()))
+    )
+    model = ChatEXAONE(api_key=api_key, http_client=sync_client, http_async_client=async_client)
+    try:
+        with pytest.raises(ValueError) as caught:
+            if operation == "invoke":
+                model.invoke("hello")
+            elif operation == "ainvoke":
+                await model.ainvoke("hello")
+            elif operation == "stream":
+                list(model.stream("hello"))
+            else:
+                _ = [chunk async for chunk in model.astream("hello")]
+    finally:
+        sync_client.close()
+        await async_client.aclose()
+
+    error = caught.value
+    assert str(error) == (
+        "EXAONE returned malformed JSON in the event stream."
+        if operation in {"stream", "astream"}
+        else "EXAONE returned malformed JSON in the response body."
+    )
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    assert api_key not in repr(error)
+    assert encoded_key not in repr(error)
+
+
 @pytest.mark.parametrize("operation", ["invoke", "ainvoke", "stream", "astream"])
 @pytest.mark.asyncio
 async def test_transport_errors_do_not_retain_authenticated_request_or_key(operation: str) -> None:
@@ -668,6 +786,32 @@ def test_stream_api_error_reads_body_and_preserves_exaone_error_fields() -> None
     assert str(error.value) == "Query cannot be empty."
 
 
+@pytest.mark.parametrize("operation", ["invoke", "ainvoke"])
+@pytest.mark.asyncio
+async def test_api_error_preserves_numeric_top_level_result_code(operation: str) -> None:
+    def respond(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            422,
+            json={"error": {"message": "The request could not be processed."}, "result_code": 10042},
+        )
+
+    sync_client = httpx.Client(transport=httpx.MockTransport(respond))
+    async_client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+    model = ChatEXAONE(api_key="synthetic-key", http_client=sync_client, http_async_client=async_client)
+    try:
+        with pytest.raises(ExaoneAPIError) as error:
+            if operation == "invoke":
+                model.invoke("hello")
+            else:
+                await model.ainvoke("hello")
+    finally:
+        sync_client.close()
+        await async_client.aclose()
+
+    assert error.value.code == 10042
+    assert type(error.value.code) is int
+
+
 def test_retry_honors_longest_retry_after_hint(monkeypatch: pytest.MonkeyPatch) -> None:
     requests = 0
     delays: list[float] = []
@@ -692,6 +836,149 @@ def test_retry_honors_longest_retry_after_hint(monkeypatch: pytest.MonkeyPatch) 
     assert result.content == "4"
     assert requests == 2
     assert delays == [0.1]
+
+
+@pytest.mark.asyncio
+async def test_async_retry_honors_retry_after_ms(monkeypatch: pytest.MonkeyPatch) -> None:
+    requests = 0
+    delays: list[float] = []
+
+    def respond(_: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        if requests == 1:
+            return httpx.Response(429, headers={"retry-after-ms": "125"}, json={"error": {"message": "Try again."}})
+        return httpx.Response(200, json=_completion())
+
+    async def record_delay(delay: float) -> None:
+        delays.append(delay)
+
+    monkeypatch.setattr("langchain_exaone.chat_models.asyncio.sleep", record_delay)
+    client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+    try:
+        result = await ChatEXAONE(api_key="synthetic-key", http_async_client=client, max_retries=1).ainvoke("hello")
+    finally:
+        await client.aclose()
+
+    assert result.content == "4"
+    assert requests == 2
+    assert delays == [0.125]
+
+
+@pytest.mark.parametrize("operation", ["stream", "astream"])
+@pytest.mark.asyncio
+async def test_stream_retries_status_before_exposing_output(operation: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    requests = 0
+    delays: list[float] = []
+    event = {"id": "retry-stream", "model": "k-exaone_v2.5", "choices": [{"index": 0, "delta": {"content": "ready"}}]}
+    body = f"data: {json.dumps(event)}\n\ndata: [DONE]\n\n".encode()
+
+    def respond(_: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        if requests == 1:
+            return httpx.Response(429, headers={"retry-after-ms": "0"}, json={"error": {"message": "Try again."}})
+        return httpx.Response(200, content=body)
+
+    def record_sync_delay(delay: float) -> None:
+        delays.append(delay)
+
+    async def record_async_delay(delay: float) -> None:
+        delays.append(delay)
+
+    monkeypatch.setattr("langchain_exaone.chat_models.time.sleep", record_sync_delay)
+    monkeypatch.setattr("langchain_exaone.chat_models.asyncio.sleep", record_async_delay)
+    sync_client = httpx.Client(transport=httpx.MockTransport(respond))
+    async_client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+    model = ChatEXAONE(api_key="synthetic-key", http_client=sync_client, http_async_client=async_client, max_retries=1)
+    try:
+        if operation == "stream":
+            chunks = list(model.stream("hello"))
+        else:
+            chunks = [chunk async for chunk in model.astream("hello")]
+    finally:
+        sync_client.close()
+        await async_client.aclose()
+
+    assert "".join(chunk.content for chunk in chunks) == "ready"
+    assert requests == 2
+    assert delays == [0.0]
+
+
+@pytest.mark.parametrize("operation", ["stream", "astream"])
+@pytest.mark.asyncio
+async def test_stream_does_not_replay_a_tool_call_after_partial_output(operation: str) -> None:
+    calls = 0
+    event = {
+        "id": "partial-tool-call",
+        "model": "k-exaone_v2.5",
+        "choices": [
+            {
+                "index": 0,
+                "delta": {
+                    "tool_calls": [
+                        {
+                            "index": 0,
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {"name": "weather", "arguments": '{"city":'},
+                        }
+                    ]
+                },
+            }
+        ],
+    }
+    frame = f"data: {json.dumps(event)}\n\n".encode()
+
+    class FailingSyncStream(httpx.SyncByteStream):
+        def __init__(self, request: httpx.Request) -> None:
+            self.request = request
+
+        def __iter__(self) -> Any:
+            yield frame
+            raise httpx.ReadError("synthetic mid-stream failure", request=self.request)
+
+        def close(self) -> None:
+            pass
+
+    class FailingAsyncStream(httpx.AsyncByteStream):
+        def __init__(self, request: httpx.Request) -> None:
+            self.request = request
+
+        async def __aiter__(self) -> Any:
+            yield frame
+            raise httpx.ReadError("synthetic mid-stream failure", request=self.request)
+
+        async def aclose(self) -> None:
+            pass
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if operation == "stream":
+            return httpx.Response(200, stream=FailingSyncStream(request))
+        return httpx.Response(200, stream=FailingAsyncStream(request))
+
+    sync_client = httpx.Client(transport=httpx.MockTransport(respond))
+    async_client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+    model = ChatEXAONE(api_key="synthetic-key", http_client=sync_client, http_async_client=async_client)
+    try:
+        if operation == "stream":
+            chunks = model.stream("weather?")
+            first = next(chunks)
+            with pytest.raises(httpx.ReadError, match="mid-stream failure"):
+                next(chunks)
+        else:
+            chunks = model.astream("weather?")
+            first = await anext(chunks)
+            with pytest.raises(httpx.ReadError, match="mid-stream failure"):
+                await anext(chunks)
+    finally:
+        sync_client.close()
+        await async_client.aclose()
+
+    assert first.tool_call_chunks[0]["args"] == '{"city":'
+    assert calls == 1
 
 
 def test_request_timeout_retries_before_response(monkeypatch: pytest.MonkeyPatch) -> None:

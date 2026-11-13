@@ -14,8 +14,9 @@ def test_known_profile_and_unsupported_modalities() -> None:
     assert profile["text_inputs"] and profile["text_outputs"]
     assert profile["reasoning_output"] and profile["tool_calling"]
     assert profile["tool_choice"] and profile["tool_call_streaming"]
-    assert profile["reasoning_effort_levels"] == ["low", "high", "max"]
+    assert profile["reasoning_effort_levels"] == ["low", "medium", "high", "max"]
     assert profile["reasoning_effort_default"] == "max"
+    assert profile["temperature"] is True
     assert all(
         profile[key] is False
         for key in (
@@ -52,7 +53,7 @@ def test_default_profiles_are_not_shared_between_instances() -> None:
     first.profile["max_input_tokens"] = 4096
     first.profile["reasoning_effort_levels"].append("custom")
     assert second.profile["max_input_tokens"] == 524_288
-    assert second.profile["reasoning_effort_levels"] == ["low", "high", "max"]
+    assert second.profile["reasoning_effort_levels"] == ["low", "medium", "high", "max"]
 
 
 def test_profile_is_not_sent_as_an_api_parameter() -> None:

@@ -16,6 +16,7 @@ def get_release_notes() -> str:
 
 
 def main() -> None:
+    """Create and run the release-brief agent."""
     model = ChatEXAONE(base_url=os.getenv("EXAONE_BASE_URL", "https://api.exaone.ai/v1"))
     agent = create_deep_agent(
         model=model,

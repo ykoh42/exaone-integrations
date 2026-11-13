@@ -22,9 +22,10 @@ def get_model_profile(model: str) -> ModelProfile | None:
         "audio_outputs": False,
         "video_outputs": False,
         "reasoning_output": True,
-        "reasoning_effort_levels": ["low", "high", "max"],
+        "reasoning_effort_levels": ["low", "medium", "high", "max"],
         "reasoning_effort_default": "max",
         "tool_calling": True,
         "tool_choice": True,
         "tool_call_streaming": True,
+        "temperature": True,
     }

@@ -4,12 +4,13 @@ build-backend = "hatchling.build"
 
 [project]
 name = "langchain-exaone"
-version = "0.1.1"
+version = "0.1.2"
 description = "LangChain chat model integration for the EXAONE API"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 license-files = ["LICENSE"]
+keywords = ["exaone", "langchain", "chat model", "llm", "reasoning", "tool calling"]
 dependencies = [
     "httpx>=0.27,<1",
     "langchain-core>=1.7.5,<2",
@@ -18,6 +19,10 @@ dependencies = [
 
 [project.urls]
 Repository = "https://github.com/ykoh42/exaone-integrations"
+Homepage = "https://github.com/ykoh42/exaone-integrations/tree/main/packages/langchain-exaone-py#readme"
+Documentation = "https://github.com/ykoh42/exaone-integrations/tree/main/packages/langchain-exaone-py#readme"
+Issues = "https://github.com/ykoh42/exaone-integrations/issues"
+Changelog = "https://github.com/ykoh42/exaone-integrations/blob/main/packages/langchain-exaone-py/CHANGELOG.md"
 
 [dependency-groups]
 test = [
@@ -39,4 +44,13 @@ testpaths = ["tests"]
 line-length = 120
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "B"]
+select = ["E", "F", "I", "B", "D", "TID252"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["D"]

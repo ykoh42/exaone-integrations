@@ -16,6 +16,7 @@ def multiply(a: int, b: int) -> int:
 
 
 def main() -> None:
+    """Run the calculator agent across two turns."""
     agent = create_agent(
         model=ChatEXAONE(base_url=os.getenv("EXAONE_BASE_URL", "https://api.exaone.ai/v1")),
         tools=[multiply],

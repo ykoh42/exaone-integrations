@@ -8,6 +8,7 @@ from langchain_exaone import ChatEXAONE
 
 
 def main() -> None:
+    """Stream a response and use it in a follow-up turn."""
     model = ChatEXAONE(base_url=os.getenv("EXAONE_BASE_URL", "https://api.exaone.ai/v1"))
     question = HumanMessage("Explain context windows in two sentences.")
     response = AIMessageChunk(content="")
