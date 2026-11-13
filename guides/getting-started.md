@@ -14,6 +14,12 @@ Get an EXAONE API key, configure your environment, and make your first request w
 
 These screenshots show the public key-request entry point and an empty sign-in form. Interface labels and account requirements can change; follow the platform's current instructions. See EXAONE's [authentication guide](https://docs.exaone.ai/en/docs/authentication) for credential handling and [rate limits](https://docs.exaone.ai/en/docs/rate-limits) for the current usage policy.
 
+## Increase your daily limit
+
+The [official EXAONE FAQ](https://docs.exaone.ai/en/terms/faq) ([한국어](https://docs.exaone.ai/ko/terms/faq)) explains how to get more daily API calls. In **My Profile → Consent & Notification Settings**, review the optional consent for usage-data analysis for AI model training and service improvement. Opting in increases the daily API limit.
+
+Consent is optional, and you can continue using the API without it. Check EXAONE's [rate limits](https://docs.exaone.ai/en/docs/rate-limits) for the current policy and the separate per-second, per-minute, and daily request windows. The provider does not manage your account's quota or consent settings.
+
 ## Set your API key
 
 Set the key in the terminal where you will run your program. Replace `your-api-key` with your issued key.
@@ -194,7 +200,7 @@ See the [package reference](../packages/langchain-exaone-ts/README.md) and [Lang
 | The provider cannot find an API key | Set `EXAONE_API_KEY` in the same terminal as your program. A `.env` file alone is not loaded by the provider. |
 | HTTP 401 | Check that you are using your issued EXAONE key and that the environment value contains only the key, without a `Bearer ` prefix. |
 | HTTP 400 | Check the model ID, request options, and combined input/output token budget against the [model specification](https://docs.exaone.ai/en/docs/k-exaone-2.5). |
-| HTTP 429 | Check the account's current [rate limits](https://docs.exaone.ai/en/docs/rate-limits). Configured retries honor valid server delay hints; they do not remove service limits. |
+| HTTP 429 | Check the account's current [rate limits](https://docs.exaone.ai/en/docs/rate-limits). For a higher daily quota, see [Increase your daily limit](#increase-your-daily-limit). Configured retries honor valid server delay hints; they do not remove service limits. |
 | Python cannot import the package | Install with `python -m pip` using the same interpreter that runs your script. |
 
 For other API failures, see EXAONE's [error reference](https://docs.exaone.ai/en/docs/error-codes). For Harness, Strands CLI, LangGraph, and Deep Agents, see the [framework examples](../README.md#examples). To develop these integrations from a checkout, see [CONTRIBUTING.md](../CONTRIBUTING.md).

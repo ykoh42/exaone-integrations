@@ -44,6 +44,8 @@ Choose one package; a repository checkout is not required:
 
 Set `EXAONE_API_KEY` in the terminal where you run your program. The packages do not load `.env` files automatically. See the [guide](guides/getting-started.md#set-your-api-key) for macOS/Linux/WSL and Windows PowerShell commands, and the package READMEs for configuration. For development from this checkout, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
+For a higher daily API quota, see EXAONE's [official FAQ](https://docs.exaone.ai/en/terms/faq) and the guide's [limit-increase instructions](guides/getting-started.md#increase-your-daily-limit).
+
 ## Examples
 
 Each example has its own dependencies and execution instructions.
