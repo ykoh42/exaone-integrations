@@ -16,7 +16,7 @@ import type { ModelProfile } from "@langchain/core/language_models/profile";
 import type { Runnable } from "@langchain/core/runnables";
 import { convertToOpenAITool } from "@langchain/core/utils/function_calling";
 import { getEnvironmentVariable } from "@langchain/core/utils/env";
-import { ExaoneAPIError } from "./errors.js";
+import { ExaoneAPIError, safeTransportError } from "./errors.js";
 import { convertMessagesToExaone } from "./messages.js";
 import { RETRYABLE_STATUSES, retryDelayMs, sleepWithSignal } from "./retry.js";
 import type { ChatExaoneCallOptions, ChatExaoneParams } from "./types.js";
@@ -59,7 +59,16 @@ type ChatCompletionChunk = {
   [key: string]: unknown;
 };
 
-/** LangChain chat model for the text-only EXAONE Chat Completions API. */
+/** LangChain chat model for the text-only EXAONE Chat Completions API.
+ *
+ * @example
+ * ```ts
+ * import { ChatExaone } from "langchain-exaone";
+ *
+ * const model = new ChatExaone();
+ * const response = await model.invoke("Hello");
+ * ```
+ */
 export class ChatExaone extends BaseChatModel<
   ChatExaoneCallOptions,
   AIMessageChunk<ExaoneMessageStructure>
@@ -179,7 +188,7 @@ export class ChatExaone extends BaseChatModel<
   ): Promise<ChatResult> {
     const body = this.requestBody(messages, options, false);
     const response = await this.request(body, options.signal, options.maxRetries ?? this.retryCount);
-    const payload = await readJsonResponse<ChatCompletionResponse>(response);
+    const payload = await readJsonResponse<ChatCompletionResponse>(response, this.#apiKey);
     if (payload.error !== undefined && payload.error !== null) {
       throw new ExaoneAPIError(response.status, safeHeaders(response.headers), payload, this.#apiKey);
     }
@@ -224,7 +233,7 @@ export class ChatExaone extends BaseChatModel<
     const response = await this.request(body, options.signal, options.maxRetries ?? this.retryCount);
     if (!response.body) throw new Error("EXAONE returned an empty streaming response.");
 
-    for await (const payload of parseSse<ChatCompletionChunk>(response.body, options.signal)) {
+    for await (const payload of parseSse<ChatCompletionChunk>(response.body, options.signal, this.#apiKey)) {
       for (const generationChunk of streamResponseChunks(payload, response, this.#apiKey)) {
         yield generationChunk;
         if (generationChunk.text) {
@@ -336,10 +345,11 @@ export class ChatExaone extends BaseChatModel<
         ...(signal === undefined ? {} : { signal }),
       });
     } catch (error) {
-      if (isAbortError(error) || signal?.aborted) throw signal?.reason ?? error;
-      if (attempt >= maxRetries) throw error;
+      if (signal?.aborted) throw signal.reason;
+      if (isAbortError(error)) throw safeTransportError(error, this.#apiKey);
+      if (attempt >= maxRetries) throw safeTransportError(error, this.#apiKey);
       const delay = retryDelayMs(new Headers(), attempt, this.baseRetryDelayMs, this.maxRetryDelayMs);
-      if (delay === null) throw error;
+      if (delay === null) throw safeTransportError(error, this.#apiKey);
       await sleepWithSignal(delay, signal);
       return undefined;
     }
@@ -351,7 +361,7 @@ export class ChatExaone extends BaseChatModel<
     attempt: number,
     maxRetries: number
   ): Promise<void> {
-    const payload = await readErrorBody(response);
+    const payload = await readErrorBody(response, this.#apiKey);
     const error = new ExaoneAPIError(response.status, safeHeaders(response.headers), payload, this.#apiKey);
     if (!RETRYABLE_STATUSES.has(response.status) || attempt >= maxRetries) throw error;
     const delay = retryDelayMs(
@@ -519,9 +529,8 @@ function streamAdditionalKwargs(delta: Record<string, unknown>): Record<string, 
 }
 
 function streamToolCallChunks(delta: Record<string, unknown>): Array<Record<string, unknown>> {
-  const rawToolCalls = Array.isArray(delta.tool_calls) ? delta.tool_calls : [];
+  const rawToolCalls = toolCallEntries(delta.tool_calls, "stream delta");
   return rawToolCalls.map((raw) => {
-    if (!isRecord(raw)) throw new Error("EXAONE streamed an invalid tool-call delta.");
     const fn = isRecord(raw.function) ? raw.function : {};
     return {
       ...(typeof raw.index === "number" ? { index: raw.index } : {}),
@@ -530,6 +539,24 @@ function streamToolCallChunks(delta: Record<string, unknown>): Array<Record<stri
       ...(typeof fn.arguments === "string" ? { args: fn.arguments } : {}),
     };
   });
+}
+
+function toolCallEntries(value: unknown, context: "response" | "stream delta"): Record<string, unknown>[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) throw new Error(`EXAONE ${context} tool_calls must be an array.`);
+  if (!value.every(isRecord)) {
+    const location = context === "response" ? "response" : "stream";
+    throw new Error(`EXAONE ${location} tool call entries must be objects.`);
+  }
+  for (const toolCall of value) {
+    if (context === "response" && !isRecord(toolCall.function)) {
+      throw new Error("EXAONE response tool call function must be an object.");
+    }
+    if (context === "stream delta" && toolCall.function != null && !isRecord(toolCall.function)) {
+      throw new Error("EXAONE stream tool call function must be an object.");
+    }
+  }
+  return value;
 }
 
 function streamGenerationInfo(
@@ -635,8 +662,8 @@ function createAssistantMessage(
   if (refusal !== undefined) additional_kwargs.refusal = refusal;
   if (source.function_call !== undefined) additional_kwargs.function_call = source.function_call;
 
-  const rawToolCalls = Array.isArray(source.tool_calls) ? source.tool_calls : [];
-  const [tool_calls, invalid_tool_calls] = defaultToolCallParser(rawToolCalls as Record<string, unknown>[]);
+  const rawToolCalls = toolCallEntries(source.tool_calls, "response");
+  const [tool_calls, invalid_tool_calls] = defaultToolCallParser(rawToolCalls);
   const metadata = responseMetadata(response, choice, headers);
   return new AIMessageChunk<ExaoneMessageStructure>({
     content: visibleContent,
@@ -713,9 +740,21 @@ function mapUsage(usage: Record<string, unknown> | undefined): UsageMetadata | u
   return result;
 }
 
-async function readJsonResponse<T>(response: Response): Promise<T> {
-  const text = await response.text();
+async function readResponseText(response: Response, apiKey: string): Promise<string> {
+  try {
+    return await response.text();
+  } catch (error) {
+    throw safeTransportError(error, apiKey);
+  }
+}
+
+async function readJsonResponse<T>(response: Response, apiKey: string): Promise<T> {
+  const text = await readResponseText(response, apiKey);
   if (!text) throw new Error("EXAONE returned an empty JSON response.");
+  return parseResponseJson<T>(text);
+}
+
+function parseResponseJson<T>(text: string): T {
   try {
     return JSON.parse(text) as T;
   } catch {
@@ -723,8 +762,8 @@ async function readJsonResponse<T>(response: Response): Promise<T> {
   }
 }
 
-async function readErrorBody(response: Response): Promise<unknown> {
-  const text = await response.text();
+async function readErrorBody(response: Response, apiKey: string): Promise<unknown> {
+  const text = await readResponseText(response, apiKey);
   if (!text) return undefined;
   try {
     return JSON.parse(text) as unknown;
@@ -733,7 +772,7 @@ async function readErrorBody(response: Response): Promise<unknown> {
   }
 }
 
-async function* parseSse<T>(body: ReadableStream<Uint8Array>, signal?: AbortSignal): AsyncGenerator<T> {
+async function* parseSse<T>(body: ReadableStream<Uint8Array>, signal: AbortSignal | undefined, apiKey: string): AsyncGenerator<T> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
@@ -756,10 +795,13 @@ async function* parseSse<T>(body: ReadableStream<Uint8Array>, signal?: AbortSign
       if (parsed.done) return;
       if (streamEnded) {
         const finalPayload = ssePayload(buffer);
-        if (finalPayload && finalPayload !== "[DONE]") yield JSON.parse(finalPayload) as T;
+        if (finalPayload && finalPayload !== "[DONE]") yield parseResponseJson<T>(finalPayload);
         return;
       }
     }
+  } catch (error) {
+    if (signal?.aborted) throw signal.reason;
+    throw safeTransportError(error, apiKey);
   } finally {
     signal?.removeEventListener("abort", cancelReader);
     if (!streamEnded) await reader.cancel().catch(() => undefined);
@@ -772,7 +814,7 @@ function parseSseFrames<T>(frames: string[]): { events: T[]; done: boolean } {
   for (const frame of frames) {
     const payload = ssePayload(frame);
     if (payload === "[DONE]") return { events, done: true };
-    if (payload) events.push(JSON.parse(payload) as T);
+    if (payload) events.push(parseResponseJson<T>(payload));
   }
   return { events, done: false };
 }

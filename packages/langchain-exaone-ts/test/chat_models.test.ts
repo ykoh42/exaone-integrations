@@ -82,6 +82,81 @@ describe("ChatExaone", () => {
     });
   });
 
+  it("redacts URL-encoded API keys from API errors and fetch failures", async () => {
+    const apiKey = "synthetic+private/key with spaces";
+    const encodedKey = encodeURIComponent(apiKey);
+    const formEncodedKey = new URLSearchParams({ value: apiKey }).toString().slice("value=".length);
+    const differentValue = encodedKey.replace("%2F", "%3F");
+    const errorFetcher = vi.fn(async () => new Response(
+      JSON.stringify({ error: { message: `Rejected ${encodedKey.replace("%2F", "%2f")}`, param: differentValue } }),
+      { status: 422, headers: { "x-request-id": formEncodedKey } }
+    )) as unknown as typeof fetch;
+    const apiError: unknown = await new ChatExaone({ apiKey, fetch: errorFetcher, maxRetries: 0 })
+      .invoke("hello").catch((error: unknown) => error);
+
+    expect(apiError).toBeInstanceOf(ExaoneAPIError);
+    if (!(apiError instanceof ExaoneAPIError)) throw new Error("Expected an EXAONE API error.");
+    expect(apiError.message).toBe("Rejected [REDACTED]");
+    expect(apiError.headers["x-request-id"]).toBe("[REDACTED]");
+    expect(apiError.param).toBe(differentValue);
+
+    const failure = new TypeError(`Transport rejected ${formEncodedKey}`, { cause: new Error(apiKey) });
+    const failingFetcher = vi.fn(async () => { throw failure; }) as unknown as typeof fetch;
+    const transportError: unknown = await new ChatExaone({ apiKey, fetch: failingFetcher, maxRetries: 0 })
+      .invoke("hello").catch((error: unknown) => error);
+
+    expect(transportError).toBeInstanceOf(TypeError);
+    if (!(transportError instanceof Error)) throw new Error("Expected a transport error.");
+    expect(transportError.name).toBe("TypeError");
+    expect(transportError.message).toBe("Transport rejected [REDACTED]");
+    expect(transportError.cause).toBeUndefined();
+    expect(String(transportError)).not.toContain(apiKey);
+    expect(String(transportError)).not.toContain(encodedKey);
+    expect(String(transportError)).not.toContain(formEncodedKey);
+    expect(transportError.stack ?? "").not.toContain(apiKey);
+    expect(transportError.stack ?? "").not.toContain(encodedKey);
+    expect(transportError.stack ?? "").not.toContain(formEncodedKey);
+  });
+
+  it.each(["response", "stream frame", "stream tail"])("does not retain malformed JSON from a %s", async (kind) => {
+    const apiKey = "synthetic+private/key";
+    const malformed = `{"private":"${encodeURIComponent(apiKey)}"`;
+    const body = kind === "response" ? malformed : `data: ${malformed}${kind === "stream frame" ? "\n\n" : ""}`;
+    const model = new ChatExaone({ apiKey, fetch: mockFetch([new Response(body)]), maxRetries: 0 });
+    let failure: unknown;
+    try {
+      if (kind === "response") await model.invoke("hello");
+      else for await (const _chunk of await model.stream("hello")) { /* consume the response */ }
+    } catch (error) { failure = error; }
+    expect(failure).toBeInstanceOf(Error);
+    if (!(failure instanceof Error)) throw new Error("Expected a parser error.");
+    expect(failure.message).toBe("EXAONE returned malformed JSON.");
+    expect(failure.cause).toBeUndefined();
+    expect(failure.stack).not.toContain(encodeURIComponent(apiKey));
+  });
+
+  it.each(["response", "error response", "stream"])("sanitizes transport failures while reading a %s", async (kind) => {
+    const apiKey = "synthetic+private/key";
+    const response = new Response(new ReadableStream({
+      start(controller) {
+        controller.error(new TypeError(`Read failed ${encodeURIComponent(apiKey)}`, { cause: new Error(apiKey) }));
+      },
+    }), { status: kind === "error response" ? 422 : 200 });
+    const model = new ChatExaone({ apiKey, fetch: mockFetch([response]), maxRetries: 0 });
+    let failure: unknown;
+    try {
+      if (kind !== "stream") await model.invoke("hello");
+      else for await (const _chunk of await model.stream("hello")) { /* consume the response */ }
+    } catch (error) { failure = error; }
+    expect(failure).toBeInstanceOf(Error);
+    if (!(failure instanceof Error)) throw new Error("Expected a transport error.");
+    expect(failure.name).toBe("TypeError");
+    expect(failure).toBeInstanceOf(TypeError);
+    expect(failure.message).toBe("Read failed [REDACTED]");
+    expect(failure.cause).toBeUndefined();
+    expect(failure.stack).not.toContain(encodeURIComponent(apiKey));
+  });
+
   it("sends EXAONE generation settings and preserves reasoning for a follow-up turn", async () => {
     const fetcher = mockFetch([
       completion({ role: "assistant", content: "Answer", reasoning_content: "Plan" }),
@@ -175,6 +250,35 @@ describe("ChatExaone", () => {
       },
       { role: "tool", content: "value", tool_call_id: "call-1" },
     ]);
+  });
+
+  it.each([
+    ["non-array tool_calls", { tool_calls: { id: "call-1" } }, "EXAONE response tool_calls must be an array."],
+    ["non-object tool-call entry", { tool_calls: [null] }, "EXAONE response tool call entries must be objects."],
+    ["non-object tool-call function", { tool_calls: [{ function: "lookup" }] }, "EXAONE response tool call function must be an object."],
+  ])("rejects malformed response %s", async (_case, message, expectedError) => {
+    const fetcher = mockFetch([completion({ role: "assistant", content: "", ...message })]);
+    const model = new ChatExaone({ apiKey: "fixture-key", fetch: fetcher });
+
+    await expect(model.invoke("Use the tool.")).rejects.toThrow(expectedError);
+  });
+
+  it.each([
+    ["non-array tool_calls", { tool_calls: { index: 0 } }, "EXAONE stream delta tool_calls must be an array."],
+    ["non-object tool-call entry", { tool_calls: [null] }, "EXAONE stream tool call entries must be objects."],
+    ["non-object tool-call function", { tool_calls: [{ index: 0, function: "lookup" }] }, "EXAONE stream tool call function must be an object."],
+  ])("rejects malformed streamed %s", async (_case, delta, expectedError) => {
+    const fetcher = mockFetch([
+      sseResponse([{ choices: [{ index: 0, delta }] }]),
+    ]);
+    const model = new ChatExaone({ apiKey: "fixture-key", fetch: fetcher });
+
+    await expect(async () => {
+      const stream = await model.stream("Use the tool.");
+      for await (const _chunk of stream) {
+        // Consume the stream so the malformed delta is parsed.
+      }
+    }).rejects.toThrow(expectedError);
   });
 
   it("retains the legacy function_call field when a conversation continues", async () => {
@@ -439,6 +543,40 @@ describe("ChatExaone", () => {
       errorType: "invalid_request_error",
       param: "top_k",
       retryAfterMs: 250,
+    } satisfies Partial<ExaoneAPIError>);
+  });
+
+  it("preserves numeric EXAONE result codes", async () => {
+    const fetcher = mockFetch([
+      new Response(JSON.stringify({ result_code: 500, description: "The service is temporarily unavailable." }), {
+        status: 500,
+        headers: { "content-type": "application/json" },
+      }),
+    ]);
+    const model = new ChatExaone({ apiKey: "fixture-key", fetch: fetcher, maxRetries: 0 });
+
+    await expect(model.invoke("Request")).rejects.toMatchObject({
+      name: "ExaoneAPIError",
+      status: 500,
+      code: 500,
+      message: "The service is temporarily unavailable.",
+    } satisfies Partial<ExaoneAPIError>);
+  });
+
+  it("falls back to a top-level result code when a nested error omits its code", async () => {
+    const fetcher = mockFetch([
+      new Response(JSON.stringify({ error: { message: "The service is temporarily unavailable." }, result_code: 10042 }), {
+        status: 500,
+        headers: { "content-type": "application/json" },
+      }),
+    ]);
+    const model = new ChatExaone({ apiKey: "fixture-key", fetch: fetcher, maxRetries: 0 });
+
+    await expect(model.invoke("Request")).rejects.toMatchObject({
+      name: "ExaoneAPIError",
+      status: 500,
+      code: 10042,
+      message: "The service is temporarily unavailable.",
     } satisfies Partial<ExaoneAPIError>);
   });
 

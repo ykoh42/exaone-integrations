@@ -1,6 +1,6 @@
 {
   "name": "langchain-exaone",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "LangChain chat model integration for the EXAONE API",
   "type": "module",
   "main": "./dist/index.cjs",
@@ -37,11 +37,16 @@
     "examples/langgraph/package.json",
     "examples/langgraph/tsconfig.json",
     "LICENSE",
+    "CHANGELOG.md",
     "README.md"
   ],
   "sideEffects": false,
   "engines": {
     "node": ">=22"
+  },
+  "homepage": "https://github.com/ykoh42/exaone-integrations/tree/main/packages/langchain-exaone-ts#readme",
+  "bugs": {
+    "url": "https://github.com/ykoh42/exaone-integrations/issues"
   },
   "repository": {
     "type": "git",
@@ -49,6 +54,15 @@
     "directory": "packages/langchain-exaone-ts"
   },
   "license": "MIT",
+  "keywords": [
+    "exaone",
+    "langchain",
+    "langchain.js",
+    "chat model",
+    "llm",
+    "reasoning",
+    "tool calling"
+  ],
   "peerDependencies": {
     "@langchain/core": "^1.3.0"
   },

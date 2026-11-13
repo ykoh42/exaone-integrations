@@ -2,6 +2,8 @@
 
 Use the EXAONE Chat Completions API with LangChain.js. This community-maintained package is independent of LG AI Research and LangChain, and is not affiliated with or endorsed by either organization.
 
+See the [changelog](CHANGELOG.md) for release notes.
+
 ## API key
 
 Open the [EXAONE API Platform](https://docs.exaone.ai/en/docs/overview), select **Get an API Key**, and sign in or create an EXAONE ID to follow the platform's key-issuance instructions. Each user supplies their own key. The [illustrated setup guide](https://github.com/ykoh42/exaone-integrations/blob/main/guides/getting-started.md#get-an-exaone-api-key) shows the entry screens and includes Windows PowerShell instructions.
