@@ -26,10 +26,12 @@ From this directory, start an interactive session:
 npx strands --agent ./agent.py
 ```
 
-Ask the agent to use `get_example_number` and add three to its result, then ask a follow-up in the same conversation. This tool returns a fixed value and does not access external systems. The agent config disables built-in tools, memory, skills, and session persistence. The default context manager and background-task support register additional management tools, and the CLI can add its own tools. Conversation history remains available until you exit; model requests still use the EXAONE API. The interactive CLI can display model reasoning.
+Ask the agent to use `get_example_number` and add three to its result, then ask a follow-up in the same conversation. This tool returns a fixed value and does not access external systems.
+
+The agent disables built-in tools, memory, skills, and session persistence. The default context manager and background-task support register additional management tools, and the CLI can add its own tools. Conversation history lasts until you exit. Requests go to the EXAONE API, and the interactive CLI can display model reasoning.
 
 The CLI's skill-discovery and forwarding behavior depends on its version and configuration. Verify discovery settings before sending private skill content; use the direct Harness example when you need explicit tool configuration.
 
 `preserve_thinking=True` requests preservation of earlier reasoning. The provider forwards available reasoning with the corresponding assistant and tool history. Set `EXAONE_BASE_URL` only when you need to use another compatible endpoint. See the [Python package README](../../README.md) for configuration and API behavior.
 
-The harness uses automatic context management by default. It can summarize older conversation history, so `preserve_thinking` can only retain reasoning that remains in that history. If you require the original history to stay intact, pass `context_manager=False` to `create_harness`; then manage the conversation length yourself so input tokens plus `max_tokens` fit within the model's context limit.
+The harness automatically manages context and may summarize older messages, so `preserve_thinking` can only retain reasoning that remains in that history. If you require the original history to stay intact, pass `context_manager=False` to `create_harness`; then manage the conversation length yourself so input tokens plus `max_tokens` fit within the model's context limit.

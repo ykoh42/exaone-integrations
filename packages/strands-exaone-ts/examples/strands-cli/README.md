@@ -4,7 +4,7 @@ Run a TypeScript Strands harness with the EXAONE model provider and a local exam
 
 ## Setup
 
-The provider runs on Node.js 22 or newer. For this checkout, use the Node.js version in `.node-version` and npm 11.20.0. The published `strands-exaone` package is available on npm; this example installs the local checkout to exercise source changes. From the repository root, install the workspace dependencies and build the provider:
+The provider runs on Node.js 22 or newer. For this checkout, use the Node.js version in `.node-version` and npm 11.20.0. This example installs `strands-exaone` from the local checkout so you can try source changes; the published package is also available on npm. From the repository root, install the workspace dependencies and build the provider:
 
 ```bash
 npm ci
@@ -24,8 +24,10 @@ From this directory, start an interactive session:
 npx strands --agent ./agent.ts
 ```
 
-Ask the agent to use `get_example_number` and add three to its result, then ask a follow-up in the same conversation. This tool returns a fixed value and does not access external systems. The agent config disables built-in tools, memory, skills, and session persistence. The default context manager and background-task support register additional management tools, and the CLI can add its own tools. Conversation history remains available until you exit; model requests still use the EXAONE API. The interactive CLI can display model reasoning.
+Ask the agent to use `get_example_number` and add three to its result, then ask a follow-up in the same conversation. This tool returns a fixed value and does not access external systems.
+
+The agent disables built-in tools, memory, skills, and session persistence. The default context manager and background-task support register additional management tools, and the CLI can add its own tools. Conversation history lasts until you exit. Requests go to the EXAONE API, and the interactive CLI can display model reasoning.
 
 `preserveThinking: true` requests preservation of earlier reasoning. The provider forwards available reasoning with the corresponding assistant and tool history. Set `EXAONE_BASE_URL` only when you need to use another compatible endpoint. See the [TypeScript package README](../../README.md) for configuration and API behavior.
 
-The harness uses automatic context management by default. It can summarize older conversation history, so `preserveThinking` can only retain reasoning that remains in that history. If you require the original history to stay intact, pass `contextManager: false` to `createHarness`; then manage the conversation length yourself so input tokens plus `maxTokens` fit within the model's context limit.
+The harness automatically manages context and may summarize older messages, so `preserveThinking` can only retain reasoning that remains in that history. If you require the original history to stay intact, pass `contextManager: false` to `createHarness`; then manage the conversation length yourself so input tokens plus `maxTokens` fit within the model's context limit.

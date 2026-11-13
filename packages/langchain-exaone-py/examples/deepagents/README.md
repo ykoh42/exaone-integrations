@@ -16,18 +16,18 @@ export EXAONE_API_KEY='your-api-key'
 
 ## Run
 
-Run each command separately; each makes EXAONE API requests and consumes your account quota.
+This command makes real EXAONE API requests and consumes your account quota.
 
 ```bash
 .venv/bin/python agent.py
 ```
 
-The requirements install this checkout. To use the published provider instead, replace `../..` with `langchain-exaone` in `requirements.txt`.
+The requirements install the provider from this checkout. To use the published package, replace `../..` with `langchain-exaone` in `requirements.txt`.
 
-The examples print answer text only. Complete assistant messages, including supported reasoning, remain in the conversation sent to EXAONE. They do not trim or rebuild model responses. Framework context management can summarize or remove older messages; the provider forwards the history it receives.
+The examples print only the answer text. They keep complete assistant messages, including supported reasoning, in the history sent to EXAONE without trimming or rebuilding responses. The framework may summarize or remove older messages during context management; the provider forwards the resulting history.
 
-The default StateBackend stores files in graph state, without reading or writing host files. The parent and named subagent use the same EXAONE model. Deep Agents owns tool orchestration and context management; the model chooses when to delegate or use filesystem tools. The in-memory checkpoint lasts for this process only. No shell-capable backend is configured.
+The default StateBackend keeps files in graph state and does not read or write host files. The parent and named subagent use the same EXAONE model. Deep Agents manages tools and context; the model decides when to delegate or use filesystem tools. The in-memory checkpoint lasts for this process only, and the example configures no shell-capable backend.
 
-The examples read `EXAONE_API_KEY` from the environment and do not load `.env` files. `EXAONE_BASE_URL` optionally selects a trusted compatible endpoint, including `/v1`.
+The examples read `EXAONE_API_KEY` from the environment without loading `.env` files. To use another trusted compatible endpoint, set `EXAONE_BASE_URL` to its base URL, including `/v1`.
 
-See the [package README](../../README.md) for provider configuration and limitations. These examples follow the public APIs in the official [Deep Agents guide](https://docs.langchain.com/oss/python/deepagents/customization) and [reference guide](https://docs.langchain.com/oss/python/deepagents/backends); the provider is supplied explicitly instead of the guide's default model.
+See the [package README](../../README.md) for provider configuration and limitations. These examples follow the public APIs in the official [Deep Agents guide](https://docs.langchain.com/oss/python/deepagents/customization) and [reference guide](https://docs.langchain.com/oss/python/deepagents/backends), with the EXAONE provider passed explicitly in place of the default model.

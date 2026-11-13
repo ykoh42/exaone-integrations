@@ -2,7 +2,7 @@
 
 Use the EXAONE Chat Completions API as a model provider for [Strands Agents](https://strandsagents.com/). This community-maintained package is not affiliated with LG AI Research or the Strands Agents project.
 
-Users are responsible for reviewing and complying with the terms that apply to their EXAONE API use.
+Review and follow the terms that apply to your use of the EXAONE API.
 
 ## API key
 
@@ -42,9 +42,9 @@ For SDK tool use, streaming, structured output, Harness, and CLI walkthroughs, s
 
 ## Why use this provider?
 
-An OpenAI provider configured with EXAONE's endpoint can be sufficient for basic chat. `ExaoneModel` supplies EXAONE reasoning-history round trips, `preserve_thinking=True` by default, known model information, and mappings for Strands streaming, tools, usage, and API errors. It also completes narrowly defined tool-argument syntax without guessing values; other malformed arguments are rejected.
+A standard OpenAI provider configured for EXAONE's endpoint can handle basic chat. `ExaoneModel` also carries EXAONE reasoning through conversation history and defaults to `preserve_thinking=True`. It maps model information, streaming, tools, usage, and API errors to Strands' interfaces. For tool arguments, it repairs a small set of syntax errors without changing values and rejects other malformed input.
 
-For Agent and Harness retry handling, explicitly configure `ExaoneRetryStrategy` as shown above to honor server delay hints. The model's own HTTP retries remain disabled by default. Generic adapters may support equivalent behavior through configuration or extensions; this package maintains and tests the EXAONE-specific mapping. See the [project comparison](https://github.com/ykoh42/exaone-integrations#why-use-a-dedicated-provider) for scope and trade-offs.
+For Agent and Harness calls, configure `ExaoneRetryStrategy` to honor server delay hints. The model's own HTTP retries are disabled by default. Other adapters may provide similar behavior through configuration or extensions; this package keeps the EXAONE mapping in one tested integration. See the [project comparison](https://github.com/ykoh42/exaone-integrations#why-use-a-dedicated-provider) for scope and trade-offs.
 
 ## Configuration
 
@@ -85,7 +85,7 @@ The context budget covers input plus output, including reasoning. See the [EXAON
 
 ## Reasoning and tools
 
-Reasoning is stored separately from the final answer and sent back as reasoning_content when the Strands conversation includes it. The provider requests EXAONE's agent-use settings by default: temperature=1.0, top_p=0.95, and preserve_thinking=True. enable_thinking is a separate request option; check the returned fields and content when your application needs specific reasoning-handling behavior.
+The provider stores reasoning separately from the final answer and sends it back as reasoning_content when it appears in the Strands conversation. By default, requests use EXAONE's recommended agent settings: temperature=1.0, top_p=0.95, and preserve_thinking=True. enable_thinking is a separate request option. Check the returned fields and content to see how a response handled reasoning.
 
 Strands can summarize older conversation history during automatic context management. The provider forwards the reasoning that remains in the history it receives; it cannot restore content that was summarized or removed. Token counts used for proactive context management are estimates, not exact EXAONE token counts.
 
@@ -93,7 +93,7 @@ Long-running agents should monitor memory and trace growth; behavior depends on 
 
 The provider requests streaming usage by default (include_usage=True) so Strands can use token counts for context management. EXAONE may omit usage, and downstream context management is controlled by the framework.
 
-The returned response fields are authoritative. Do not assume the request setting alone guarantees that reasoning is absent from visible content.
+Check both the returned reasoning fields and visible content. The request setting alone does not guarantee that reasoning is absent from the content.
 
 When EXAONE returns a refusal without non-whitespace ordinary response content, the provider exposes that refusal as a Strands text block and preserves any whitespace content. Strands has no separate refusal event; the refusal remains available in response metadata as well. System prompt blocks follow the Strands OpenAI adapter contract: text blocks are sent as separate messages and blocks without text, such as cache points, are omitted.
 
@@ -145,21 +145,21 @@ agent = create_harness(
 )
 ```
 
-This setting avoids sending unsupported media blocks; it does not give the model image or document understanding. The `read` tool can access files permitted by the agent's sandbox, and its results are sent to the model endpoint. Use an isolated sandbox or an approval mechanism to restrict access to files you intend to share.
+This setting keeps unsupported media blocks out of requests. It does not give the model image or document understanding. The `read` tool can access files allowed by the agent's sandbox, and it sends the results to the model endpoint. Use an isolated sandbox or an approval mechanism to limit access to files you intend to share.
 
 Tools that use their own network transport may have TLS trust settings separate from the EXAONE provider's client.
 
-After an interrupted tool call, inspect external state before repeating a task that could have side effects.
+Before repeating an interrupted task that may have side effects, inspect the external state.
 
-Use separate session IDs for concurrently active agents or serialize access to shared file sessions.
+Give concurrent agents separate session IDs, or serialize access to shared file sessions.
 
-Cancellation may not stop work already in progress. Use suitable tool timeouts and check external effects before retrying.
+Cancellation may leave work running. Set suitable tool timeouts and check for external effects before retrying.
 
-For side-effecting tools, ensure that cancelling an invocation also invalidates any pending approval.
+For side-effecting tools, make sure cancellation also invalidates any pending approval.
 
-Configure callbacks for child agents as well as the parent when generated reasoning or tool output must not be printed.
+Configure callbacks for child agents and the parent when generated reasoning or tool output must not be printed.
 
-Text is forwarded without trimming, including leading and trailing whitespace. Strands may remove a text block containing only whitespace during a tool turn, so an exact round trip is not guaranteed for such blocks.
+The provider forwards text without trimming leading or trailing whitespace. During a tool turn, Strands may remove a block that contains only whitespace, so those blocks may not round-trip exactly.
 
 ## Structured output
 
@@ -185,6 +185,8 @@ In Strands SDK 1.64, `structured_output_model` uses the SDK's structured-output 
 When using recursive schemas, verify that the selected framework path preserves schema references and that EXAONE supports the schema.
 
 Structured-output calls reject aborted responses rather than treating them as valid schema results.
+
+Handle validation failures through Strands' structured-output contract; the provider does not automatically rewrite prompts or retry model-generated output.
 
 ## Retries
 
@@ -213,8 +215,6 @@ async def first_event():
 
 Alternatively, signal cancellation and wait for the stream to finish closing.
 
-Use `ExaoneRetryStrategy` to replace the SDK's generic throttling backoff with EXAONE-aware handling. This keeps the Harness retry boundary intact while preventing retries from ignoring the server's delay hint.
-
 Model routers can behave differently from provider retries when they switch after streaming begins. Test the framework's fallback behavior when partial output matters to your application.
 
 For direct model calls, this configuration disables the Agent retry strategy and permits one provider retry with a maximum delay of 10 seconds:
@@ -230,8 +230,6 @@ agent = create_harness(
 ```
 
 This option is intended for direct model calls or when choosing provider-level retries explicitly. For Harness use, `ExaoneRetryStrategy` is the recommended way to honor each EXAONE response's retry headers.
-
-The provider preserves invalid model output as an error rather than rewriting argument values or silently dropping it. Tool arguments that remain malformed after syntax-only completion are rejected before Strands can execute the tool. Structured-output validation errors should be handled through the Strands structured-output contract; automatic prompt rewriting or repeating a model-generated mistake is not enabled.
 
 ## Metadata and errors
 

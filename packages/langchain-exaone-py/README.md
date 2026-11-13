@@ -1,10 +1,8 @@
 # `langchain-exaone`
 
-Community-maintained LangChain chat model integration for the EXAONE API.
+This community-maintained package connects LangChain chat models to the K-EXAONE 2.5 Chat Completions API. It is maintained independently of LG AI Research and LangChain, and is not affiliated with or endorsed by either organization.
 
-This package connects LangChain applications to the K-EXAONE 2.5 Chat Completions API. It implements LangChain's `BaseChatModel` interface and supports synchronous and asynchronous calls, streaming, tool calls, structured-output binding, usage metadata, and EXAONE reasoning history.
-
-This project is not affiliated with or endorsed by LG AI Research or LangChain.
+It implements LangChain's `BaseChatModel` interface and supports synchronous and asynchronous calls, streaming, tool calls, structured-output binding, usage metadata, and EXAONE reasoning history.
 
 ## API key
 
@@ -40,17 +38,19 @@ message = model.invoke("안녕하세요. K-EXAONE을 소개해 주세요.")
 print(message.text)
 ```
 
+LangChain provider catalogs use vendor names, while chat-model listings identify classes. `ChatEXAONE` follows the common class-name pattern for a `BaseChatModel`; `Chat` is not part of the package or model ID.
+
 The package does not load `.env` files. Use your application's secret-management setup to place the API key in the process environment, or pass `api_key` directly.
 
 ## Why use this integration?
 
-An OpenAI chat model configured with EXAONE's endpoint can be sufficient for basic chat. `ChatEXAONE` maintains the EXAONE-specific mapping: `reasoning_content` is retained on assistant messages and sent back on later turns, `preserve_thinking=True` is the default, and known model facts are exposed through LangChain's standard profile. Usage and response metadata are exposed on LangChain messages; API failures include diagnostic fields on the raised error.
+A standard OpenAI chat model configured for EXAONE's endpoint can handle basic chat. `ChatEXAONE` also carries `reasoning_content` on assistant messages and sends it on later turns. It defaults to `preserve_thinking=True` and exposes known model facts through LangChain's standard profile. Usage and response metadata appear on LangChain messages, and raised API errors include diagnostic fields.
 
-Bounded retries honor server delay hints and never replay an already-started stream. Structured-output binding and tool execution follow LangChain's contracts. Generic adapters may support equivalent behavior through configuration or extensions; this package maintains and tests that integration work. See the [project comparison](https://github.com/ykoh42/exaone-integrations#why-use-a-dedicated-provider) for scope and trade-offs.
+Retries are bounded, follow server delay hints, and stop before replaying a stream that has started. Structured-output binding and tool execution follow LangChain's contracts. Other adapters may provide similar behavior through configuration or extensions; this package keeps the EXAONE mapping in one tested integration. See the [project comparison](https://github.com/ykoh42/exaone-integrations#why-use-a-dedicated-provider) for scope and trade-offs.
 
 ## Serialization
 
-`ChatEXAONE` does not opt into LangChain object serialization. LangChain's deserializer only allows registered integration classes by default, and this standalone package is not registered in `langchain-core`. The provider does not modify LangChain's global serialization registry. Create the model from application configuration when starting your process; its API key is held in a `SecretStr` and omitted from the model representation.
+LangChain's deserializer allows only registered integration classes by default. Since this package is not registered in `langchain-core`, `ChatEXAONE` does not opt into object serialization or modify LangChain's global registry. Create the model from application configuration when the process starts. Its API key uses `SecretStr` and is omitted from the model representation.
 
 ## Model profile
 
@@ -60,7 +60,7 @@ The profile also reports the documented reasoning levels (`low`, `high`, `max`),
 
 LangChain and Deep Agents can use this profile for context management and structured-output strategy selection. An unknown model ID has no inferred profile. Pass `profile={...}` to replace the defaults using LangChain's public constructor option; `profile={}` leaves capabilities unspecified. Profiles are application metadata and are not sent as API parameters.
 
-`structured_output` is left unspecified in the default profile. Native JSON Schema output and tool calling in the same request are not established as compatible with LangChain's provider strategy. Agents use LangChain's tool-based strategy by default; callers can explicitly select `ProviderStrategy` for native output without tools. This does not change the provider's request parameters or structured-output methods.
+The default profile leaves `structured_output` unspecified because native JSON Schema output combined with tool calls in one request has not been established as compatible with LangChain's provider strategy. Agents use LangChain's tool-based strategy by default. To request native output without tools, select `ProviderStrategy` explicitly. This choice does not change the provider's request parameters or structured-output methods.
 
 See [LangChain model profiles](https://docs.langchain.com/oss/python/langchain/models#model-profiles) and the [EXAONE API specification](https://docs.exaone.ai/ko/docs/k-exaone-2.5).
 
@@ -121,7 +121,7 @@ response = model.invoke("서울 날씨를 알려줘.")
 | `max_retries` | `2` | Retries for transient API errors before output is returned; set to `0` to disable |
 | `timeout` | `None` | No provider-imposed HTTP timeout; pass a positive number to set one |
 
-The API always enables reasoning. The provider preserves the returned `reasoning_content` on assistant messages and sends it with later turns; `preserve_thinking=True` also enables EXAONE's recommended `chat_template_kwargs.preserve_thinking` behavior. Keep returned assistant messages intact when continuing a conversation.
+The API always enables reasoning. The provider stores returned `reasoning_content` on assistant messages and sends it with later turns. By default, `preserve_thinking=True` also sets EXAONE's recommended `chat_template_kwargs.preserve_thinking` option. Keep assistant messages intact when continuing a conversation.
 
 `max_tokens` is capped at the documented 524,288-token context limit. The provider cannot count an arbitrary prompt locally, so the API still validates the combined input and output token budget.
 

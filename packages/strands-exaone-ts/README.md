@@ -46,9 +46,9 @@ For SDK tool use, streaming, structured output, Harness, and CLI walkthroughs, s
 
 ## Why use this provider?
 
-An OpenAI provider configured with EXAONE's endpoint can be sufficient for basic chat. `ExaoneModel` supplies EXAONE reasoning-history round trips, `preserveThinking: true` by default, known model information, and mappings for Strands streaming, tools, usage, and API errors. It also completes narrowly defined tool-argument syntax without guessing values; other malformed arguments are rejected.
+A standard OpenAI provider configured for EXAONE's endpoint can handle basic chat. `ExaoneModel` also carries EXAONE reasoning through conversation history and defaults to `preserveThinking: true`. It maps model information, streaming, tools, usage, and API errors to Strands' interfaces. For tool arguments, it repairs a small set of syntax errors without changing values and rejects other malformed input.
 
-For Agent and Harness retry handling, explicitly configure `ExaoneRetryStrategy` as shown above to honor server delay hints. The model's own HTTP retries remain disabled by default. Generic adapters may support equivalent behavior through configuration or extensions; this package maintains and tests the EXAONE-specific mapping. See the [project comparison](https://github.com/ykoh42/exaone-integrations#why-use-a-dedicated-provider) for scope and trade-offs.
+For Agent and Harness calls, configure `ExaoneRetryStrategy` to honor server delay hints. The model's own HTTP retries are disabled by default. Other adapters may provide similar behavior through configuration or extensions; this package keeps the EXAONE mapping in one tested integration. See the [project comparison](https://github.com/ykoh42/exaone-integrations#why-use-a-dedicated-provider) for scope and trade-offs.
 
 ## Configuration
 
@@ -71,15 +71,15 @@ For Agent and Harness retry handling, explicitly configure `ExaoneRetryStrategy`
 | `fetch` | Custom fetch implementation. | Global `fetch` |
 | `params` | Additional Chat Completions parameters. | None |
 
-The provider sends EXAONE's recommended agent settings by default: `temperature=1.0`, `top_p=0.95`, and `preserve_thinking=true`. These defaults are applied when building each request; `getConfig()` returns the configured settings. Explicit named options take precedence over matching `params` values; `params` values take precedence over these defaults. The provider manages `model`, `messages`, `stream`, `tools`, and `tool_choice`; do not set them in `params`. For streaming requests, `params.stream_options` can set `include_usage` and other service-supported options; the named `includeUsage` option takes precedence. `stream_options` is omitted from non-streaming requests. Strands represents one completion, so `n` must be 1. Supported generation settings can vary by service version; see the [EXAONE API documentation](https://docs.exaone.ai/en/docs/k-exaone-2.5).
+By default, each request uses EXAONE's recommended agent settings: `temperature=1.0`, `top_p=0.95`, and `preserve_thinking=true`. `getConfig()` returns the configured settings. Explicit named options override matching `params` values, which override the defaults. The provider manages `model`, `messages`, `stream`, `tools`, and `tool_choice`; leave these fields out of `params`. For streaming requests, `params.stream_options` can set `include_usage` and other service-supported options. The named `includeUsage` option takes precedence, and `stream_options` is omitted from non-streaming requests. Strands represents one completion, so `n` must be 1. Supported generation settings can vary by service version; see the [EXAONE API documentation](https://docs.exaone.ai/en/docs/k-exaone-2.5).
 
 The provider validates first-class generation options before storing them or sending a request. Values supplied through `params` remain an extension point and are passed through unless the provider owns the field; EXAONE may reject unsupported values.
 
-Configuration arrays, plain objects, and `Date` values are copied on construction, update, and retrieval. Custom class instances are retained by reference so their serialization behavior is preserved. Each stream uses the configuration present when it starts and serializes its request once, so retries use the same body; `updateConfig()` affects later streams.
+The provider copies configuration arrays, plain objects, and `Date` values when it constructs, updates, or returns configuration. It keeps custom class instances by reference to preserve their serialization behavior. A stream uses the configuration it had at startup and serializes its request once, so retries send the same body. `updateConfig()` applies to later streams.
 
 In Strands SDK 1.24, `modelInfo.limits.contextWindow`, when set, takes precedence over `contextWindowLimit`.
 
-When EXAONE returns a refusal without non-whitespace ordinary response content, the provider exposes that refusal as a Strands text block and preserves any whitespace content. Strands has no separate refusal event; the refusal remains available in response metadata as well. System prompt blocks follow the Strands OpenAI adapter contract: text blocks are joined into one message, while cache points and guard content are omitted with warnings.
+If EXAONE returns a refusal without ordinary non-whitespace response text, the provider exposes the refusal as a Strands text block and preserves any whitespace content. Strands has no separate refusal event, so the refusal is also available in response metadata. System prompt blocks follow the Strands OpenAI adapter contract: text blocks are joined into one message, while cache points and guard content are omitted with warnings.
 
 Strands tool execution uses the Chat Completions `tool_calls` field. Legacy `function_call` response fields are retained in metadata but do not trigger a Strands tool.
 
@@ -93,11 +93,11 @@ The context budget covers input plus output, including reasoning. See the [EXAON
 
 ## Reasoning and tools
 
-Reasoning is stored separately from the final answer and sent back as reasoning_content when the Strands conversation includes it. preserveThinking defaults to true to request preservation of earlier reasoning; set it to false to disable that request. enableThinking is a separate request option; check the returned fields and content when your application needs specific reasoning-handling behavior.
+The provider stores reasoning separately from the final answer and sends it back as reasoning_content when it appears in the Strands conversation. preserveThinking defaults to true; set it to false to stop requesting preservation of earlier reasoning. enableThinking is a separate request option. Check the returned fields and content to see how a response handled reasoning.
 
 Strands can summarize older conversation history during automatic context management. The provider forwards the reasoning that remains in the history it receives; it cannot restore content that was summarized or removed. Token counts used for proactive context management are estimates, not exact EXAONE token counts.
 
-The returned response fields are authoritative. Do not assume the request setting alone guarantees that reasoning is absent from visible content.
+Check both the returned reasoning fields and visible content. The request setting alone does not guarantee that reasoning is absent from the content.
 
 ```typescript
 import { Agent, tool } from '@strands-agents/sdk'
@@ -119,7 +119,7 @@ const agent = new Agent({
 await agent.invoke('Use the tool to get the number, then add 3.')
 ```
 
-The provider assembles streamed tool-call arguments before exposing calls to Strands. Blank tool-call arguments are treated as an empty object so zero-argument tools can run. If a completed tool call contains a JSON object with only closing braces or brackets missing, or a trailing comma, the provider completes that syntax without changing argument values. Unterminated strings, missing values, and other malformed arguments remain errors; the Harness validates arguments against each tool's schema. It accepts text, reasoning, tool calls, and text/JSON tool results. Unsupported content types and reasoning signatures present in the history received by the provider are rejected.
+The provider assembles streamed tool-call arguments before exposing calls to Strands. It treats blank arguments as an empty object, which lets zero-argument tools run. If a completed tool call has a JSON object with only closing braces or brackets missing, or has a trailing comma, the provider repairs that syntax without changing argument values. Unterminated strings, missing values, and other malformed arguments remain errors. The Harness validates arguments against each tool's schema. The provider accepts text, reasoning, tool calls, and text or JSON tool results; it rejects unsupported content types and reasoning signatures in the received history.
 
 Because Chat Completions tool messages have no separate status field, tool results marked as errors are sent with an `[ERROR] ` prefix. Successful results are sent without a prefix.
 
@@ -149,17 +149,17 @@ const agent = await createHarness({
 })
 ```
 
-These descriptions identify the file but do not provide image or document understanding. The `read` tool can access files permitted by the agent's sandbox, and its results are sent to the model endpoint. Use an isolated sandbox or an approval mechanism to restrict access to files you intend to share.
+These descriptions identify the file but do not give the model image or document understanding. The `read` tool can access files allowed by the agent's sandbox, and it sends the results to the model endpoint. Use an isolated sandbox or an approval mechanism to limit access to files you intend to share.
 
-After an interrupted tool call, inspect external state before repeating a task that could have side effects.
+Before repeating an interrupted task that may have side effects, inspect the external state.
 
-Use separate session IDs for concurrently active agents or serialize access to shared file sessions.
+Give concurrent agents separate session IDs, or serialize access to shared file sessions.
 
-Cancellation may not stop work already in progress. Use suitable tool timeouts and check external effects before retrying.
+Cancellation may leave work running. Set suitable tool timeouts and check for external effects before retrying.
 
-In SDK 1.24.0, a pending `HumanInTheLoop` approval callback can still approve and execute a tool after the invocation's cancellation signal is set. Coordinate approval and cancellation in your application; cancellation alone does not invalidate a pending approval.
+In SDK 1.24.0, a pending `HumanInTheLoop` callback can approve and execute a tool after the invocation's cancellation signal is set. Coordinate approval with cancellation in your application. Cancellation alone does not invalidate an approval request.
 
-Handle tool-hook errors explicitly, and make side-effecting tools idempotent when repeated actions would be harmful.
+Handle tool-hook errors and make side-effecting tools idempotent when repeating an action could cause harm.
 
 Built-in tools that summarize or delegate work may return child-agent results to the parent. Configure them carefully when generated reasoning is sensitive.
 
@@ -181,6 +181,8 @@ console.log(result.structuredOutput)
 ```
 
 The provider maps structured-output requests to JSON Schema or a forced tool call when Strands requests one. An explicit params.response_format takes precedence over the SDK's JSON Schema and can also be sent with a structured-output tool; EXAONE support for that combination has not been verified. The SDK validates structuredOutput for an agent invocation; callers using model.stream() directly must validate returned text. The provider treats abort as an error rather than a valid result; schema support may vary with the service and schema.
+
+Handle validation failures through Strands' structured-output contract; the provider does not automatically rewrite prompts or retry model-generated output.
 
 ## Retries
 
@@ -205,8 +207,6 @@ const agent = await createHarness({
 ```
 
 This disables the SDK's model retry strategy for that Agent. Cancellation interrupts provider retry waits; `timeoutMs` bounds provider attempts, provider retry waits, response reads, and stream consumption. Agent-level `ExaoneRetryStrategy` waits are outside the model timeout and follow Strands retry-strategy semantics. A custom `fetch` implementation must honor the supplied abort signal.
-
-The provider preserves invalid model output as an error rather than rewriting argument values or silently dropping it. It completes only unambiguous tool-argument delimiters before Strands sees the call; remaining malformed arguments are rejected before a tool can execute. Structured-output validation errors should be handled through the Strands structured-output contract; automatic prompt rewriting or repeating a model-generated mistake is not enabled.
 
 When stopping an agent stream early, use SDK cancellation APIs and let the model stream close; custom fetch implementations should honor the supplied abort signal.
 

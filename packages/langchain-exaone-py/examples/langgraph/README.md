@@ -1,6 +1,6 @@
 # EXAONE with LangGraph
 
-Build an explicit model → tool → model graph. A second turn uses the first result through the same in-memory checkpoint thread.
+Build a graph that calls the model, runs a tool, and returns the result to the model. A second turn continues the same in-memory checkpoint thread using the first result.
 
 This example uses the community-maintained `langchain-exaone` provider.
 
@@ -16,16 +16,16 @@ export EXAONE_API_KEY='your-api-key'
 
 ## Run
 
-Run each command separately; each makes EXAONE API requests and consumes your account quota.
+This command makes real EXAONE API requests and consumes your account quota.
 
 ```bash
 .venv/bin/python agent.py
 ```
 
-The requirements install this checkout. To use the published provider instead, replace `../..` with `langchain-exaone` in `requirements.txt`.
+The requirements install the provider from this checkout. To use the published package, replace `../..` with `langchain-exaone` in `requirements.txt`.
 
-The examples print answer text only. Complete assistant messages, including supported reasoning, remain in the conversation sent to EXAONE. They do not trim or rebuild model responses. Framework context management can summarize or remove older messages; the provider forwards the history it receives. Checkpoints live only in this process; use a persistent checkpointer in your application to keep threads across restarts.
+The examples print only the answer text. They keep complete assistant messages, including supported reasoning, in the history sent to EXAONE without trimming or rebuilding responses. The framework may summarize or remove older messages during context management; the provider forwards the resulting history. Checkpoints last for this process only. Use a persistent checkpointer to keep threads across restarts.
 
-The examples read `EXAONE_API_KEY` from the environment and do not load `.env` files. `EXAONE_BASE_URL` optionally selects a trusted compatible endpoint, including `/v1`.
+The examples read `EXAONE_API_KEY` from the environment without loading `.env` files. To use another trusted compatible endpoint, set `EXAONE_BASE_URL` to its base URL, including `/v1`.
 
-See the [package README](../../README.md) for provider configuration and limitations. These examples follow the public APIs in the official [LangGraph guide](https://docs.langchain.com/oss/python/langgraph/quickstart) and [reference guide](https://docs.langchain.com/oss/python/langgraph/persistence); the provider is supplied explicitly instead of the guide's default model.
+See the [package README](../../README.md) for provider configuration and limitations. These examples follow the public APIs in the official [LangGraph guide](https://docs.langchain.com/oss/python/langgraph/quickstart) and [reference guide](https://docs.langchain.com/oss/python/langgraph/persistence), with the EXAONE provider passed explicitly in place of the default model.

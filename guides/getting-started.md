@@ -1,6 +1,6 @@
 # Get started with EXAONE
 
-Get an EXAONE API key, configure your environment, and make your first request with Strands or LangChain. Each user supplies their own EXAONE-issued key; installing an integration does not include API access.
+Get an EXAONE API key and make your first request with Strands or LangChain. Each user needs their own EXAONE-issued key; the integration packages do not include API access.
 
 ## Get an EXAONE API key
 
@@ -8,17 +8,17 @@ Get an EXAONE API key, configure your environment, and make your first request w
 
    ![EXAONE API Platform overview with the Get an API Key button beside the page title](../assets/getting-started/get-api-key.jpg)
 
-2. Sign in with your EXAONE ID, or select **Sign up** below the form to create an account. Complete the platform's key-issuance flow after signing in, then keep the issued key for the next step.
+2. Sign in with your EXAONE ID, or select **Sign up** below the form to create an account. Follow the platform's instructions to issue a key, then keep it for the next step.
 
    ![Empty EXAONE ID sign-in form, with the Sign up link below the Sign in button](../assets/getting-started/sign-in.jpg)
 
-These screenshots show the public key-request entry point and an empty sign-in form. Interface labels and account requirements can change; follow the platform's current instructions. See EXAONE's [authentication guide](https://docs.exaone.ai/en/docs/authentication) for credential handling and [rate limits](https://docs.exaone.ai/en/docs/rate-limits) for the current usage policy.
+Interface labels and account requirements can change, so follow the platform's current instructions. EXAONE's [authentication guide](https://docs.exaone.ai/en/docs/authentication) covers credential handling, and its [rate limits](https://docs.exaone.ai/en/docs/rate-limits) describe the current usage policy.
 
 ## Increase your daily limit
 
-The [official EXAONE FAQ](https://docs.exaone.ai/en/terms/faq) ([한국어](https://docs.exaone.ai/ko/terms/faq)) explains how to get more daily API calls. In **My Profile → Consent & Notification Settings**, review the optional consent for usage-data analysis for AI model training and service improvement. Opting in increases the daily API limit.
+To increase your daily API limit, open **My Profile → Consent & Notification Settings** and review the optional consent for usage-data analysis for AI model training and service improvement. Opting in increases the limit. The [official EXAONE FAQ](https://docs.exaone.ai/en/terms/faq) ([한국어](https://docs.exaone.ai/ko/terms/faq)) explains the process.
 
-Consent is optional, and you can continue using the API without it. Check EXAONE's [rate limits](https://docs.exaone.ai/en/docs/rate-limits) for the current policy and the separate per-second, per-minute, and daily request windows. The provider does not manage your account's quota or consent settings.
+You can use the API without giving this consent. Check EXAONE's [rate limits](https://docs.exaone.ai/en/docs/rate-limits) for the current policy, including separate per-second, per-minute, and daily request limits. Manage quota and consent in your EXAONE account; the provider does not control them.
 
 ## Set your API key
 
@@ -42,7 +42,7 @@ Keep the key out of source control and browser code. For deployed applications, 
 
 ## Choose a package and run it
 
-Choose one of the four paths below. A repository checkout is not required. The providers use model `k-exaone_v2.5` at `https://api.exaone.ai/v1` by default, so you do not need to configure the endpoint for normal use.
+Choose the example for your framework and language. You do not need a repository checkout. The providers default to model `k-exaone_v2.5` at `https://api.exaone.ai/v1`, so normal use requires no endpoint configuration.
 
 Use Python 3.10 or newer for Python examples. For TypeScript, use Node.js 22 or newer and run the example through `tsx` as shown. Each invocation sends a request to EXAONE and uses your account's quota; the generated answer can vary.
 
@@ -62,7 +62,7 @@ py -m venv .venv
 .\.venv\Scripts\Activate.ps1
 ```
 
-### Strands — Python
+### Strands: Python
 
 Install the package in the active environment:
 
@@ -95,7 +95,7 @@ python agent.py
 
 See the [package reference](../packages/strands-exaone-py/README.md) and [SDK examples](../packages/strands-exaone-py/examples/sdk/) for tools, streaming, and structured output.
 
-### Strands — TypeScript
+### Strands: TypeScript
 
 In a new project directory, initialize the project and install the package and TypeScript runner:
 
@@ -134,11 +134,11 @@ Run it in the terminal where you set the key:
 npx tsx agent.ts
 ```
 
-Both Strands examples explicitly configure `ExaoneRetryStrategy` for Agent-level retry handling. The provider's own HTTP retry loop remains disabled by default. The examples print answer text and retain complete assistant messages, including supported reasoning, in agent history.
+Both Strands examples use `ExaoneRetryStrategy` for Agent-level retries. The provider's own HTTP retries are disabled by default. The examples print the answer text and keep complete assistant messages, including supported reasoning, in agent history.
 
 See the [package reference](../packages/strands-exaone-ts/README.md) and [SDK examples](../packages/strands-exaone-ts/examples/sdk/) for tools, streaming, and structured output.
 
-### LangChain — Python
+### LangChain: Python
 
 In your Python virtual environment, install the package:
 
@@ -164,7 +164,7 @@ python chat.py
 
 See the [package reference](../packages/langchain-exaone-py/README.md) and [LangChain examples](../packages/langchain-exaone-py/examples/langchain/) for agents, streaming, and structured output.
 
-### LangChain — TypeScript
+### LangChain: TypeScript
 
 In a new project directory, initialize the project and install the package and TypeScript runner:
 

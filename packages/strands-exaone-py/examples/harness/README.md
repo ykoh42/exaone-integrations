@@ -1,6 +1,6 @@
 # EXAONE with Strands Harness
 
-Use the Python model provider with Strands Harness. File reading is disabled by default and requires an explicit flag. This community-maintained integration is not affiliated with LG AI Research, Strands Agents, or Exa.
+Run the Python model provider with Strands Harness. File reading is off unless you pass an explicit flag. This community-maintained integration is not affiliated with LG AI Research, Strands Agents, or Exa.
 
 ## Setup
 
@@ -24,9 +24,9 @@ To let the agent read a file you choose to share with the model, enable file rea
 .venv/bin/python agent.py --allow-file-read 'Read /absolute/path/to/a/text-file.txt and summarize it.'
 ```
 
-The example configures `read` with `media=False`: image and document files are described as text instead of being sent as unsupported media blocks. This does not give the model image or document understanding. The tool is disabled unless you pass `--allow-file-read`.
+The example sets `media=False` for `read`, so image and document files are described in text instead of being sent as unsupported media blocks. The model does not interpret their contents.
 
-When enabled, the model can request any file the Harness sandbox permits it to read, and tool results are sent to the configured model endpoint. Run the example in an isolated sandbox containing only files you intend to share.
+When file reading is enabled, the model can request any file allowed by the Harness sandbox. Tool results are sent to the configured model endpoint. Run the example in an isolated sandbox with only the files you intend to share.
 
 To allow web search, pass `--web-search`:
 
@@ -48,6 +48,6 @@ Run the support-queue example to let the Harness execute `get_ticket` and answer
 .venv/bin/python tools.py
 ```
 
-This example uses synthetic ticket data, enables no built-in file or search tools, and keeps session persistence, memory, and skills disabled. The Harness still owns automatic context management. Both turns retain complete assistant messages and supported reasoning.
+This example uses synthetic ticket data. It disables built-in file and search tools, session persistence, memory, and skills. Harness automatic context management remains enabled. Both turns keep the complete assistant messages and supported reasoning in history.
 
 See the official [Harness quickstart](https://strandsagents.com/docs/user-guide/harness/quickstart/) for the framework APIs.

@@ -1,6 +1,6 @@
 # langchain-exaone
 
-Use the EXAONE Chat Completions API with LangChain.js. This community-maintained integration is not affiliated with LG AI Research or the LangChain project.
+Use the EXAONE Chat Completions API with LangChain.js. This community-maintained package is independent of LG AI Research and LangChain, and is not affiliated with or endorsed by either organization.
 
 ## API key
 
@@ -33,11 +33,13 @@ console.log(response.content)
 
 The package uses `k-exaone_v2.5` and `https://api.exaone.ai/v1` by default. See the [examples](examples/) for LangChain agents, streaming chat, structured output, LangGraph tool loops, and Deep Agents.
 
+LangChain provider catalogs use vendor names, while chat-model listings identify classes. `ChatExaone` follows the usual class-name pattern for a `BaseChatModel`. The `Chat` prefix is part of the class name, not the package name or model ID.
+
 ## Why use this integration?
 
-An OpenAI chat model configured with EXAONE's endpoint can be sufficient for basic chat. `ChatExaone` maintains the EXAONE-specific mapping: `reasoning_content` is retained on assistant messages and sent back on later turns, `preserveThinking: true` is the default, and known model facts are exposed through LangChain's standard profile. Usage and response metadata are exposed on LangChain messages; API failures include diagnostic fields on the raised error.
+A standard OpenAI chat model configured for EXAONE's endpoint can handle basic chat. `ChatExaone` also carries `reasoning_content` on assistant messages and sends it on later turns. It defaults to `preserveThinking: true` and exposes known model facts through LangChain's standard profile. Usage and response metadata appear on LangChain messages, and raised API errors include diagnostic fields.
 
-Bounded retries honor server delay hints and never replay an already-started stream. Structured-output binding and tool execution follow LangChain's contracts. Generic adapters may support equivalent behavior through configuration or extensions; this package maintains and tests that integration work. See the [project comparison](https://github.com/ykoh42/exaone-integrations#why-use-a-dedicated-provider) for scope and trade-offs.
+Retries are bounded, follow server delay hints, and stop before replaying a stream that has started. Structured-output binding and tool execution follow LangChain's contracts. Other adapters may provide similar behavior through configuration or extensions; this package keeps the EXAONE mapping in one tested integration. See the [project comparison](https://github.com/ykoh42/exaone-integrations#why-use-a-dedicated-provider) for scope and trade-offs.
 
 ## Configuration
 
@@ -74,13 +76,13 @@ EXAONE API defaults and limits can change; see the [EXAONE K-EXAONE 2.5 API refe
 
 LangChain and Deep Agents can use this profile for context management and structured-output strategy selection. An unknown model ID returns an empty profile. Pass `profile: {...}` to replace the defaults; `profile: {}` leaves capabilities unspecified. Profiles are copied on construction and access, and are not sent as API parameters.
 
-`structuredOutput` is left unspecified in the default profile. Native JSON Schema output and tool calling in the same request are not established as compatible with LangChain's provider strategy. Agents use LangChain's tool-based strategy by default; callers can explicitly select `providerStrategy` for native output without tools. This does not change the provider's request parameters or structured-output methods.
+The default profile leaves `structuredOutput` unspecified because native JSON Schema output combined with tool calls in one request has not been established as compatible with LangChain's provider strategy. Agents use LangChain's tool-based strategy by default. To request native output without tools, select `providerStrategy` explicitly. This choice does not change the provider's request parameters or structured-output methods.
 
 See [LangChain model profiles](https://docs.langchain.com/oss/javascript/langchain/models#model-profiles) and the [EXAONE API specification](https://docs.exaone.ai/ko/docs/k-exaone-2.5).
 
 ## Reasoning and conversation history
 
-When EXAONE returns `reasoning_content`, the integration stores it in `AIMessage.additional_kwargs.reasoning_content`. It sends that value back as `reasoning_content` if the message is included in a later request. Requests also set `chat_template_kwargs.preserve_thinking=true` by default; set `preserveThinking: false` to disable that option. Keep the returned AI message in conversation history to preserve it:
+When EXAONE returns `reasoning_content`, the integration stores it in `AIMessage.additional_kwargs.reasoning_content` and sends it back on later requests that include the message. Requests set `chat_template_kwargs.preserve_thinking=true` by default. Set `preserveThinking: false` to turn that option off. Keep the returned AI message in conversation history:
 
 ```typescript
 import { HumanMessage } from '@langchain/core/messages'
@@ -97,7 +99,7 @@ const followUp = await model.invoke([
 console.log(followUp.content)
 ```
 
-The provider forwards reasoning present in the message history it receives. It cannot recover reasoning removed or summarized by application memory or a chain. Reasoning stays in the provider-specific `additional_kwargs.reasoning_content` field and is not merged into the answer text.
+The provider forwards reasoning found in the history it receives. It cannot restore reasoning that application memory or a chain has removed or summarized. Reasoning remains in `additional_kwargs.reasoning_content`; it is not merged into the answer text.
 
 ## Tools
 
@@ -107,9 +109,9 @@ The integration also preserves legacy `function_call` fields in assistant histor
 
 ## API compatibility
 
-This package sends requests directly to the EXAONE Chat Completions endpoint. It supports text messages, assistant reasoning history, function tools, sampling settings, JSON response-format passthrough, streaming, usage, response metadata, and HTTP errors. Tool definitions and optional generation fields are forwarded to the service; the service remains authoritative about which combinations it accepts.
+This package sends requests directly to the EXAONE Chat Completions endpoint. It supports text messages, assistant reasoning history, function tools, sampling settings, JSON response-format passthrough, streaming, usage, response metadata, and HTTP errors. The service decides which forwarded tool definitions and optional generation fields it accepts.
 
-The integration rejects input content blocks other than text and reasoning. Image, audio, video, and other multimodal requests are not supported. LangChain chat models represent one completion per run, so `n` must be `1`. `logprobs` and other response-specific fields are retained in metadata where returned; the integration does not provide a token-level logprob abstraction.
+The integration accepts text and reasoning input blocks. It rejects image, audio, video, and other multimodal content. LangChain chat models represent one completion per run, so `n` must be `1`. When returned, `logprobs` and other response-specific fields are kept in metadata; the integration does not expose token-level log probabilities as a separate abstraction.
 
 ## Development
 

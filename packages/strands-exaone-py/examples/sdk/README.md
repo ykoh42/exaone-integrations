@@ -16,7 +16,7 @@ export EXAONE_API_KEY='your-api-key'
 
 ## Run
 
-Run each command separately; each makes EXAONE API requests and consumes your account quota.
+Run the commands one at a time. Each makes real EXAONE API requests and consumes your account quota.
 
 ```bash
 .venv/bin/python agent.py
@@ -24,10 +24,10 @@ Run each command separately; each makes EXAONE API requests and consumes your ac
 .venv/bin/python structured_output.py
 ```
 
-The requirements install this checkout. To use the published provider instead, replace `../..` with `strands-exaone` in `requirements.txt`.
+The requirements install the provider from this checkout. To use the published package, replace `../..` with `strands-exaone` in `requirements.txt`.
 
-The examples print answer text only. Complete assistant messages, including supported reasoning, remain in the conversation sent to EXAONE. They do not trim or rebuild model responses. Framework context management can summarize or remove older messages; the provider forwards the history it receives. `ExaoneRetryStrategy` handles rate-limit hints at the Agent level. Each script owns its own agent; the streaming script reuses one agent for both turns.
+The examples print only the answer text. They keep complete assistant messages, including supported reasoning, in the history sent to EXAONE without trimming or rebuilding responses. The framework may summarize or remove older messages during context management; the provider forwards the resulting history. `ExaoneRetryStrategy` handles rate-limit hints at the Agent level. Each script creates its own agent. The streaming script reuses its agent for both turns.
 
-The examples read `EXAONE_API_KEY` from the environment and do not load `.env` files. `EXAONE_BASE_URL` optionally selects a trusted compatible endpoint, including `/v1`.
+The examples read `EXAONE_API_KEY` from the environment without loading `.env` files. To use another trusted compatible endpoint, set `EXAONE_BASE_URL` to its base URL, including `/v1`.
 
-See the [package README](../../README.md) for provider configuration and limitations. These examples follow the public APIs in the official [Strands SDK guide](https://strandsagents.com/docs/user-guide/quickstart/) and [reference guide](https://strandsagents.com/docs/user-guide/sdk/streaming/); the provider is supplied explicitly instead of the guide's default model.
+See the [package README](../../README.md) for provider configuration and limitations. These examples follow the public APIs in the official [Strands SDK guide](https://strandsagents.com/docs/user-guide/quickstart/) and [reference guide](https://strandsagents.com/docs/user-guide/sdk/streaming/), with the EXAONE provider passed explicitly in place of the default model.

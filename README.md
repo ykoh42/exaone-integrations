@@ -2,7 +2,7 @@
 
 Community-maintained model providers for the EXAONE Chat Completions API. This project is not affiliated with LG AI Research, Strands Agents, or LangChain.
 
-Users are responsible for reviewing and complying with the terms that apply to their EXAONE API use.
+Review and follow the terms that apply to your use of the EXAONE API.
 
 | Framework | Language | Package | Status |
 | --- | --- | --- | --- |
@@ -11,13 +11,13 @@ Users are responsible for reviewing and complying with the terms that apply to t
 | LangChain | Python | [`langchain-exaone`](packages/langchain-exaone-py/) | Published on PyPI |
 | LangChain | TypeScript | [`langchain-exaone`](packages/langchain-exaone-ts/) | Published on npm |
 
-Each package documents its supported framework features, installation, examples, configuration, and API limitations.
+Each package README covers installation, examples, configuration, supported framework features, and API limitations.
 
 ## Why use a dedicated provider?
 
-EXAONE provides an [OpenAI-compatible API](https://docs.exaone.ai/ko/docs/k-exaone-2.5). For basic chat, an OpenAI provider configured with EXAONE's base URL, model ID, and API key can be sufficient. Generic adapters can also support EXAONE-specific fields through configuration or extension points; the behavior depends on the adapter and its version.
+EXAONE provides an [OpenAI-compatible API](https://docs.exaone.ai/ko/docs/k-exaone-2.5). An OpenAI provider configured with EXAONE's base URL, model ID, and API key can handle basic chat. Some adapters also support EXAONE-specific fields through configuration or extensions, depending on the adapter and version.
 
-These packages maintain the EXAONE-to-framework mapping so applications can use the following behavior without implementing it separately:
+These packages provide a maintained, tested mapping between EXAONE and each framework:
 
 | Area | What the integration provides |
 | --- | --- |
@@ -27,15 +27,15 @@ These packages maintain the EXAONE-to-framework mapping so applications can use 
 | Streaming and tools | Maps reasoning, text, streamed tool calls, and tool results to framework types. Frameworks execute tools and validate their schemas. Unsupported inputs and malformed responses follow the package's documented error handling. |
 | Diagnostics | Adapts usage, including reasoning-token counts where available, response metadata, and API errors to the framework's interfaces. Exact fields and access methods are documented per package. |
 
-The Strands packages also apply narrowly scoped syntax completion to tool-argument JSON objects: missing closing braces or brackets and trailing commas can be corrected without guessing argument values. Other malformed arguments are rejected before tool execution. This behavior is specific to the Strands packages; see their [Python](packages/strands-exaone-py/#reasoning-and-tools) and [TypeScript](packages/strands-exaone-ts/#reasoning-and-tools) documentation for the boundaries.
+The Strands packages can repair missing closing braces or brackets and trailing commas in tool-argument JSON objects without guessing argument values. They reject other malformed arguments before tool execution. See the Strands [Python](packages/strands-exaone-py/#reasoning-and-tools) and [TypeScript](packages/strands-exaone-ts/#reasoning-and-tools) documentation for the exact limits of this behavior.
 
-The integrations follow each framework's public contracts and keep API compatibility limits explicit. They do not guarantee correct model decisions or eliminate service errors. If your existing OpenAI adapter already preserves the required EXAONE fields and handles your application's limits and retry policy, continuing to use it is a reasonable choice. The dedicated packages provide a maintained, tested implementation of that integration work.
+The integrations follow each framework's public contracts and document API compatibility limits. Model decisions can still be wrong, and service errors can still occur. If your existing OpenAI adapter preserves the EXAONE fields you need and handles your application's limits and retry policy, you can continue using it.
 
 ## Get started
 
-Start with the [getting-started guide](guides/getting-started.md) for illustrated API-key instructions, environment setup, and runnable examples for all four packages. Each user obtains their own EXAONE API key from the [EXAONE API Platform](https://docs.exaone.ai/en/docs/overview).
+The [getting-started guide](guides/getting-started.md) walks through API-key setup with screenshots and includes runnable examples for all four packages. Each user gets their own key from the [EXAONE API Platform](https://docs.exaone.ai/en/docs/overview).
 
-Choose one package; a repository checkout is not required:
+Install the package for your framework and language. You do not need a repository checkout:
 
 | Framework | Python | TypeScript |
 | --- | --- | --- |

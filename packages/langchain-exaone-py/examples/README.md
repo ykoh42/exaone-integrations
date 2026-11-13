@@ -1,6 +1,6 @@
-# Langchain examples
+# LangChain examples
 
-Each directory is a separate runnable example with its own setup instructions. Install only the framework you want to try. Additional framework dependencies are installed only for the corresponding examples.
+Each directory has its own setup instructions and installs only the dependencies for that framework.
 
 | Example | Demonstrates |
 | --- | --- |
@@ -8,4 +8,4 @@ Each directory is a separate runnable example with its own setup instructions. I
 | [LangGraph](langgraph/) | Explicit tool loop and conversation checkpoints |
 | [Deep Agents](deepagents/) | Planning, EXAONE subagents, and a virtual-file report |
 
-Set `EXAONE_API_KEY` in your environment. Run examples one at a time within your account limits. They use synthetic tasks, but requests still consume API quota. See each directory for tool permissions and filesystem behavior.
+Set `EXAONE_API_KEY` in your environment and run examples one at a time within your account limits. The synthetic tasks make real API requests and consume quota. Each directory explains its tool permissions and filesystem behavior.
