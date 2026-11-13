@@ -4,13 +4,22 @@ Use the EXAONE Chat Completions API as a model provider for [Strands Agents](htt
 
 Users are responsible for reviewing and complying with the terms that apply to their EXAONE API use.
 
+## API key
+
+Open the [EXAONE API Platform](https://docs.exaone.ai/en/docs/overview), select **Get an API Key**, and sign in or create an EXAONE ID to follow the platform's key-issuance instructions. Each user supplies their own key. The [illustrated setup guide](https://github.com/ykoh42/exaone-integrations/blob/main/guides/getting-started.md#get-an-exaone-api-key) shows the entry screens and includes Windows PowerShell instructions.
+
+In the terminal where you will run your program, set the issued key:
+
+```bash
+export EXAONE_API_KEY='your-api-key'
+```
+
 ## Quick start
 
 The package is published on npm as `strands-exaone`. It requires Node.js 22 or newer and uses `@strands-agents/sdk` and Zod 4.6.6 or newer within major version 4 as peer dependencies. Install it in your project with:
 
 ```bash
 npm install strands-exaone
-export EXAONE_API_KEY='your-api-key'
 ```
 
 ```typescript

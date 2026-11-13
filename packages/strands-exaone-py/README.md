@@ -4,13 +4,22 @@ Use the EXAONE Chat Completions API as a model provider for [Strands Agents](htt
 
 Users are responsible for reviewing and complying with the terms that apply to their EXAONE API use.
 
+## API key
+
+Open the [EXAONE API Platform](https://docs.exaone.ai/en/docs/overview), select **Get an API Key**, and sign in or create an EXAONE ID to follow the platform's key-issuance instructions. Each user supplies their own key. The [illustrated setup guide](https://github.com/ykoh42/exaone-integrations/blob/main/guides/getting-started.md#get-an-exaone-api-key) shows the entry screens and includes Windows PowerShell instructions.
+
+In the terminal where you will run your program, set the issued key:
+
+```bash
+export EXAONE_API_KEY='your-api-key'
+```
+
 ## Quick start
 
 The Python distribution requires Python 3.10 or newer and `strands-agents` 1.64.x. Install it from PyPI:
 
 ```bash
 python -m pip install -U strands-exaone
-export EXAONE_API_KEY='your-api-key'
 ```
 
 ```python

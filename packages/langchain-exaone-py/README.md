@@ -6,6 +6,16 @@ This package connects LangChain applications to the K-EXAONE 2.5 Chat Completion
 
 This project is not affiliated with or endorsed by LG AI Research or LangChain.
 
+## API key
+
+Open the [EXAONE API Platform](https://docs.exaone.ai/en/docs/overview), select **Get an API Key**, and sign in or create an EXAONE ID to follow the platform's key-issuance instructions. Each user supplies their own key. The [illustrated setup guide](https://github.com/ykoh42/exaone-integrations/blob/main/guides/getting-started.md#get-an-exaone-api-key) shows the entry screens and includes Windows PowerShell instructions.
+
+In the terminal where you will run your program, set the issued key:
+
+```bash
+export EXAONE_API_KEY='your-api-key'
+```
+
 ## Install
 
 Install the package from PyPI:

@@ -33,24 +33,16 @@ The integrations follow each framework's public contracts and keep API compatibi
 
 ## Get started
 
-The Python packages are available on PyPI and the TypeScript packages are available on npm. The commands below install from this checkout for development. For TypeScript, use the Node.js version in `.node-version` and npm 11.20.0.
+Start with the [getting-started guide](guides/getting-started.md) for illustrated API-key instructions, environment setup, and runnable examples for all four packages. Each user obtains their own EXAONE API key from the [EXAONE API Platform](https://docs.exaone.ai/en/docs/overview).
 
-```bash
-# Python, in your virtual environment
-python -m pip install -e ./packages/strands-exaone-py
+Choose one package; a repository checkout is not required:
 
-# TypeScript / Node.js
-npm ci
-npm run build --workspace=strands-exaone
+| Framework | Python | TypeScript |
+| --- | --- | --- |
+| Strands | `python -m pip install strands-exaone` | `npm install strands-exaone` |
+| LangChain | `python -m pip install langchain-exaone` | `npm install langchain-exaone @langchain/core` |
 
-# LangChain Python
-python -m pip install ./packages/langchain-exaone-py
-
-# LangChain.js
-npm run build --workspace=langchain-exaone
-```
-
-Set `EXAONE_API_KEY` in your environment before running an agent. See the package READMEs for examples and [CONTRIBUTING.md](CONTRIBUTING.md) for development checks.
+Set `EXAONE_API_KEY` in the terminal where you run your program. The packages do not load `.env` files automatically. See the [guide](guides/getting-started.md#set-your-api-key) for macOS/Linux/WSL and Windows PowerShell commands, and the package READMEs for configuration. For development from this checkout, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Examples
 
