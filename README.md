@@ -7,15 +7,15 @@ Users are responsible for reviewing and complying with the terms that apply to t
 | Framework | Language | Package | Status |
 | --- | --- | --- | --- |
 | Strands | Python | [`strands-exaone`](packages/strands-exaone-py/) | Published on PyPI |
-| Strands | TypeScript | [`strands-exaone`](packages/strands-exaone-ts/) | Published on npm as `0.1.0` |
+| Strands | TypeScript | [`strands-exaone`](packages/strands-exaone-ts/) | Published on npm |
 | LangChain | Python | [`langchain-exaone`](packages/langchain-exaone-py/) | Published on PyPI |
-| LangChain | TypeScript | [`langchain-exaone`](packages/langchain-exaone-ts/) | Published on npm as `0.1.0` |
+| LangChain | TypeScript | [`langchain-exaone`](packages/langchain-exaone-ts/) | Published on npm |
 
 Each package documents its supported framework features, installation, examples, configuration, and API limitations.
 
 ## Get started
 
-The Python packages are available on PyPI and the TypeScript packages are available on npm as version `0.1.0`. The commands below install from this checkout for development. For TypeScript, use the Node.js version in `.node-version` and npm 11.20.0.
+The Python packages are available on PyPI and the TypeScript packages are available on npm. The commands below install from this checkout for development. For TypeScript, use the Node.js version in `.node-version` and npm 11.20.0.
 
 ```bash
 # Python, in your virtual environment

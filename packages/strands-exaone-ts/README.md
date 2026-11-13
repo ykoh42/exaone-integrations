@@ -6,7 +6,7 @@ Users are responsible for reviewing and complying with the terms that apply to t
 
 ## Quick start
 
-The package is published on npm as `strands-exaone@0.1.0`. It requires Node.js 22 or newer and uses `@strands-agents/sdk` and Zod 4.6.6 or newer within major version 4 as peer dependencies. Install it in your project with:
+The package is published on npm as `strands-exaone`. It requires Node.js 22 or newer and uses `@strands-agents/sdk` and Zod 4.6.6 or newer within major version 4 as peer dependencies. Install it in your project with:
 
 ```bash
 npm install strands-exaone
