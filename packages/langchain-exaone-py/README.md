@@ -8,16 +8,16 @@ This project is not affiliated with or endorsed by LG AI Research or LangChain.
 
 ## Install
 
-This package is not published to PyPI yet. From a checkout of this repository, install it with:
-
-```bash
-pip install ./packages/langchain-exaone-py
-```
-
-After the first release, install it from PyPI with:
+Install the package from PyPI:
 
 ```bash
 pip install -U langchain-exaone
+```
+
+To install from a checkout for development:
+
+```bash
+pip install ./packages/langchain-exaone-py
 ```
 
 Set `EXAONE_API_KEY` in the environment, then create the model:

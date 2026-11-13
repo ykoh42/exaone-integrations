@@ -4,15 +4,17 @@ Run a Python Strands harness with the EXAONE model provider and a local example 
 
 ## Setup
 
-Python 3.10 or newer and Node.js 22 or newer are required. The Python distribution is awaiting its PyPI release. From the root of this checkout, create an environment for the agent and install the provider from the local package:
+Python 3.10 or newer and Node.js 22 or newer are required. Create an environment for the agent and install the provider and Harness from PyPI:
 
 ```bash
 cd packages/strands-exaone-py/examples/strands-cli
 python3 -m venv .venv
-.venv/bin/python -m pip install 'strands-harness~=0.3.4' ../..
+.venv/bin/python -m pip install 'strands-exaone' 'strands-harness~=0.3.4'
 npm install --no-package-lock
 export EXAONE_API_KEY='your-api-key'
 ```
+
+To test the provider from this checkout, replace `strands-exaone` with `-e ../..` in the install command.
 
 The CLI runs `agent.py` with this directory's `.venv` interpreter. Provide the key through your environment or a trusted file selected with `--env-file`; the provider does not load `.env` files automatically.
 

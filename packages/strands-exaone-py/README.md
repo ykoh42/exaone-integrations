@@ -6,10 +6,10 @@ Users are responsible for reviewing and complying with the terms that apply to t
 
 ## Quick start
 
-The Python distribution requires Python 3.10 or newer and `strands-agents` 1.64.x. It is awaiting its PyPI release. From the root of a checkout, install it in your virtual environment:
+The Python distribution requires Python 3.10 or newer and `strands-agents` 1.64.x. Install it from PyPI:
 
 ```bash
-python -m pip install -e ./packages/strands-exaone-py
+python -m pip install -U strands-exaone
 export EXAONE_API_KEY='your-api-key'
 ```
 
