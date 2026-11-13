@@ -12,6 +12,7 @@ import { convertChunksToEvents } from "@langchain/core/language_models/compat";
 import type { ChatModelStreamEvent } from "@langchain/core/language_models/event";
 import { RunnableBinding } from "@langchain/core/runnables";
 import type { BaseLanguageModelInput } from "@langchain/core/language_models/base";
+import type { ModelProfile } from "@langchain/core/language_models/profile";
 import type { Runnable } from "@langchain/core/runnables";
 import { convertToOpenAITool } from "@langchain/core/utils/function_calling";
 import { getEnvironmentVariable } from "@langchain/core/utils/env";
@@ -19,6 +20,7 @@ import { ExaoneAPIError } from "./errors.js";
 import { convertMessagesToExaone } from "./messages.js";
 import { RETRYABLE_STATUSES, retryDelayMs, sleepWithSignal } from "./retry.js";
 import type { ChatExaoneCallOptions, ChatExaoneParams } from "./types.js";
+import { getModelProfile } from "./profiles.js";
 
 const DEFAULT_BASE_URL = "https://api.exaone.ai/v1";
 const DEFAULT_MODEL = "k-exaone_v2.5";
@@ -74,6 +76,7 @@ export class ChatExaone extends BaseChatModel<
   private readonly retryCount: number;
   private readonly baseRetryDelayMs: number;
   private readonly maxRetryDelayMs: number;
+  private readonly profileOverride: ModelProfile | undefined;
 
   constructor(fields: ChatExaoneParams = {}) {
     const {
@@ -97,6 +100,7 @@ export class ChatExaone extends BaseChatModel<
       streamUsage = true,
       modelKwargs = {},
       fetch: fetcher = globalThis.fetch,
+      profile,
       ...baseParams
     } = fields;
 
@@ -104,9 +108,13 @@ export class ChatExaone extends BaseChatModel<
 
     const resolvedApiKey = resolveApiKey(apiKey);
     validateOptions({ maxRetries, baseRetryDelayMs, maxRetryDelayMs, timeout, model, maxTokens });
+    if (profile !== undefined && !isRecord(profile)) {
+      throw new TypeError("profile must be an object");
+    }
 
     this.#apiKey = resolvedApiKey;
     this.model = model;
+    this.profileOverride = profile === undefined ? undefined : structuredClone(profile);
     this.baseUrl = normalizeBaseUrl(baseUrl);
     this.timeout = timeout;
     this.streamUsage = streamUsage;
@@ -133,6 +141,12 @@ export class ChatExaone extends BaseChatModel<
 
   override _llmType(): string {
     return "exaone";
+  }
+
+  override get profile(): ModelProfile {
+    return this.profileOverride === undefined
+      ? getModelProfile(this.model)
+      : structuredClone(this.profileOverride);
   }
 
   override _modelType(): string {

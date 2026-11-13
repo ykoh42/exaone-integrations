@@ -20,6 +20,7 @@ from urllib.parse import quote, quote_plus, urlsplit
 import httpx
 from langchain_core.callbacks import AsyncCallbackManagerForLLMRun, CallbackManagerForLLMRun
 from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.language_models.model_profile import ModelProfile
 from langchain_core.messages import (
     AIMessage,
     AIMessageChunk,
@@ -33,6 +34,8 @@ from langchain_core.messages import (
 from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from pydantic import ConfigDict, Field, SecretStr, field_validator
+
+from ._profiles import get_model_profile
 
 _RETRYABLE_STATUSES = {408, 429, 500, 502, 503, 504}
 _SAFE_HEADERS = {"content-type", "retry-after", "retry-after-ms", "x-request-id"}
@@ -441,6 +444,10 @@ class ChatEXAONE(BaseChatModel):
     model_kwargs: dict[str, Any] = Field(default_factory=dict)
     http_client: httpx.Client | None = Field(default=None, exclude=True, repr=False)
     http_async_client: httpx.AsyncClient | None = Field(default=None, exclude=True, repr=False)
+
+    def _resolve_model_profile(self) -> ModelProfile | None:
+        """Supply the default profile through LangChain's model-resolution hook."""
+        return get_model_profile(self.model)
 
     @field_validator("base_url")
     @classmethod

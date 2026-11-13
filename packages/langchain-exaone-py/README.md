@@ -36,6 +36,18 @@ The package does not load `.env` files. Use your application's secret-management
 
 `ChatEXAONE` does not opt into LangChain object serialization. LangChain's deserializer only allows registered integration classes by default, and this standalone package is not registered in `langchain-core`. The provider does not modify LangChain's global serialization registry. Create the model from application configuration when starting your process; its API key is held in a `SecretStr` and omitted from the model representation.
 
+## Model profile
+
+`ChatEXAONE().profile` provides LangChain's standard model profile for `k-exaone_v2.5`: a 524,288-token context budget, text input and output, reasoning, tool calling and choice. Image, audio, video, and PDF inputs and non-text outputs are unsupported. The combined input and output, including reasoning, must fit within the context budget; no independent `max_output_tokens` profile value is inferred.
+
+The profile also reports the documented reasoning levels (`low`, `high`, `max`), the API default (`max`), and streamed tool-call support.
+
+LangChain and Deep Agents can use this profile for context management and structured-output strategy selection. An unknown model ID has no inferred profile. Pass `profile={...}` to replace the defaults using LangChain's public constructor option; `profile={}` leaves capabilities unspecified. Profiles are application metadata and are not sent as API parameters.
+
+`structured_output` is left unspecified in the default profile. Native JSON Schema output and tool calling in the same request are not established as compatible with LangChain's provider strategy. Agents use LangChain's tool-based strategy by default; callers can explicitly select `ProviderStrategy` for native output without tools. This does not change the provider's request parameters or structured-output methods.
+
+See [LangChain model profiles](https://docs.langchain.com/oss/python/langchain/models#model-profiles) and the [EXAONE API specification](https://docs.exaone.ai/ko/docs/k-exaone-2.5).
+
 ## Reasoning history
 
 EXAONE returns reasoning separately from final content. The provider exposes it on `AIMessage.additional_kwargs["reasoning_content"]` and includes it when an assistant message is sent back in later turns. Keep the original `AIMessage` in conversation history so reasoning and tool calls remain attached to their assistant turn.

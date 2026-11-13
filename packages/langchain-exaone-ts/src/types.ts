@@ -4,10 +4,13 @@ import type {
   BindToolsInput,
 } from "@langchain/core/language_models/chat_models";
 import type { ToolDefinition } from "@langchain/core/language_models/base";
+import type { ModelProfile } from "@langchain/core/language_models/profile";
 
 export type ExaoneReasoningEffort = "low" | "medium" | "high" | "max";
 
 export interface ChatExaoneParams extends BaseChatModelParams {
+  /** Replace the default model profile. An empty profile leaves capabilities unknown. */
+  profile?: ModelProfile;
   apiKey?: string;
   baseUrl?: string;
   model?: string;

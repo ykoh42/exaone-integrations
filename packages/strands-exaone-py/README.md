@@ -60,6 +60,14 @@ First-class generation options are validated before storage or a request. Values
 
 `update_config(...)` applies to requests that have not started. Each in-flight request keeps the configuration it started with, including its retry policy.
 
+## Model information
+
+`ExaoneModel.model_info` exposes the known `k-exaone_v2.5` capabilities through Strands' standard `ModelInfo`: stateless Chat Completions, forced tool choice, and native JSON Schema output. The default context window is 524,288 tokens. An independent maximum output size and a prompt-caching mechanism are left unknown.
+
+The SDK owns how these facts are used. Explicit `model_info` fields override the provider's defaults; unspecified fields inherit. `model_info.limits.context_window` takes precedence over `context_window_limit`. Capability defaults apply only to the exact known model ID. For another model ID, configure its actual limits and capabilities; the configured `context_window_limit` remains in effect.
+
+The context budget covers input plus output, including reasoning. See the [EXAONE API specification](https://docs.exaone.ai/ko/docs/k-exaone-2.5) and [Strands model-info contract](https://github.com/strands-agents/harness-sdk/blob/main/shared/README.md).
+
 ## Reasoning and tools
 
 Reasoning is stored separately from the final answer and sent back as reasoning_content when the Strands conversation includes it. The provider requests EXAONE's agent-use settings by default: temperature=1.0, top_p=0.95, and preserve_thinking=True. enable_thinking is a separate request option; check the returned fields and content when your application needs specific reasoning-handling behavior.

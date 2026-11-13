@@ -52,6 +52,16 @@ The default retry policy retries only before it has received a response. It resp
 
 EXAONE API defaults and limits can change; see the [EXAONE K-EXAONE 2.5 API reference](https://docs.exaone.ai/ko/docs/k-exaone-2.5) and [rate limits](https://docs.exaone.ai/ko/docs/rate-limits).
 
+## Model profile
+
+`new ChatExaone().profile` provides LangChain's standard model profile for `k-exaone_v2.5`: a 524,288-token context budget, reasoning, tool calling and choice. Image, audio, video, and PDF inputs and non-text outputs are unsupported. The combined input and output, including reasoning, must fit within the context budget; no independent `maxOutputTokens` profile value is inferred.
+
+LangChain and Deep Agents can use this profile for context management and structured-output strategy selection. An unknown model ID returns an empty profile. Pass `profile: {...}` to replace the defaults; `profile: {}` leaves capabilities unspecified. Profiles are copied on construction and access, and are not sent as API parameters.
+
+`structuredOutput` is left unspecified in the default profile. Native JSON Schema output and tool calling in the same request are not established as compatible with LangChain's provider strategy. Agents use LangChain's tool-based strategy by default; callers can explicitly select `providerStrategy` for native output without tools. This does not change the provider's request parameters or structured-output methods.
+
+See [LangChain model profiles](https://docs.langchain.com/oss/javascript/langchain/models#model-profiles) and the [EXAONE API specification](https://docs.exaone.ai/ko/docs/k-exaone-2.5).
+
 ## Reasoning and conversation history
 
 When EXAONE returns `reasoning_content`, the integration stores it in `AIMessage.additional_kwargs.reasoning_content`. It sends that value back as `reasoning_content` if the message is included in a later request. Requests also set `chat_template_kwargs.preserve_thinking=true` by default; set `preserveThinking: false` to disable that option. Keep the returned AI message in conversation history to preserve it:

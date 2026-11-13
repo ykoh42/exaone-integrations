@@ -23,7 +23,7 @@ from urllib.parse import urlsplit
 import httpx
 import truststore
 from pydantic import BaseModel, ValidationError
-from strands.models import ModelInfo
+from strands.models import ModelCapabilities, ModelInfo, ModelLimits
 from strands.models.model import Model
 from strands.types.content import Messages, SystemContentBlock
 from strands.types.event_loop import Usage
@@ -474,6 +474,23 @@ class ExaoneModel(Model):
             A copy of the EXAONE model configuration.
         """
         return deepcopy(self._config)
+
+    @property
+    @override
+    def model_info(self) -> ModelInfo:
+        """Expose known EXAONE capabilities, with caller overrides taking precedence."""
+        info = super().model_info
+        if self._config["model_id"] != "k-exaone_v2.5":
+            return info
+        return ModelInfo.merge(
+            info,
+            ModelInfo(
+                limits=ModelLimits(context_window=524_288),
+                capabilities=ModelCapabilities(stateful=False, forced_tool_choice=True, native_structured_output=True),
+            ),
+            ModelInfo(limits=ModelLimits(context_window=self._config.get("context_window_limit"))),
+            self._config.get("model_info"),
+        )
 
     @override
     def update_config(self, **model_config: Any) -> None:

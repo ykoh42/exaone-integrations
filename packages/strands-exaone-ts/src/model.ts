@@ -4,7 +4,7 @@
  * @see https://docs.exaone.ai/en/docs/k-exaone-2.5
  */
 import { Model, ModelError, ModelNetworkError, ModelThrottledError, ContextWindowOverflowError } from '@strands-agents/sdk'
-import type { Message, ModelStreamEvent, StreamOptions, StopReason } from '@strands-agents/sdk'
+import type { Message, ModelInfo, ModelStreamEvent, StreamOptions, StopReason } from '@strands-agents/sdk'
 import { z } from 'zod'
 import { copyConfig, validateModelConfig } from './config.js'
 import { formatMessages } from './messages.js'
@@ -613,6 +613,25 @@ export class ExaoneModel extends Model<ExaoneModelConfig> {
   override getConfig(): ExaoneModelConfig {
     const { apiKey: _key, ...safe } = this._config
     return copyConfig(safe)
+  }
+  /** Known EXAONE capabilities, with caller overrides taking precedence. */
+  override get modelInfo(): ModelInfo {
+    const info = super.modelInfo
+    if (this._config.modelId !== 'k-exaone_v2.5') return info
+    const overrides = this._config.modelInfo?.capabilities
+    return Object.freeze({
+      ...info,
+      limits: Object.freeze({
+        ...info.limits,
+        contextWindow: this._config.modelInfo?.limits?.contextWindow ?? this._config.contextWindowLimit ?? 524_288,
+      }),
+      capabilities: Object.freeze({
+        ...info.capabilities,
+        stateful: overrides?.stateful ?? false,
+        forcedToolChoice: overrides?.forcedToolChoice ?? true,
+        nativeStructuredOutput: overrides?.nativeStructuredOutput ?? true,
+      }),
+    })
   }
   /**
    * Stream an EXAONE response as Strands model events.

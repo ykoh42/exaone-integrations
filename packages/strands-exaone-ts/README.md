@@ -68,6 +68,14 @@ When EXAONE returns a refusal without non-whitespace ordinary response content, 
 
 Strands tool execution uses the Chat Completions `tool_calls` field. Legacy `function_call` response fields are retained in metadata but do not trigger a Strands tool.
 
+## Model information
+
+`ExaoneModel.modelInfo` exposes the known `k-exaone_v2.5` capabilities through Strands' standard `ModelInfo`: stateless Chat Completions, forced tool choice, and native JSON Schema output. The default context window is 524,288 tokens. An independent maximum output size and a prompt-caching mechanism are left unknown.
+
+The SDK owns how these facts are used. Explicit `modelInfo` fields override the provider's defaults; unspecified fields inherit. `modelInfo.limits.contextWindow` takes precedence over `contextWindowLimit`. Capability defaults apply only to the exact known model ID. For another model ID, configure its actual limits and capabilities; the configured `contextWindowLimit` remains in effect.
+
+The context budget covers input plus output, including reasoning. See the [EXAONE API specification](https://docs.exaone.ai/ko/docs/k-exaone-2.5) and [Strands model-info contract](https://github.com/strands-agents/harness-sdk/blob/main/shared/README.md).
+
 ## Reasoning and tools
 
 Reasoning is stored separately from the final answer and sent back as reasoning_content when the Strands conversation includes it. preserveThinking defaults to true to request preservation of earlier reasoning; set it to false to disable that request. enableThinking is a separate request option; check the returned fields and content when your application needs specific reasoning-handling behavior.
