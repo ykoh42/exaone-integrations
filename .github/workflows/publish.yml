@@ -181,7 +181,7 @@ jobs:
     needs: [validate, check, build_pypi]
     runs-on: ubuntu-24.04
     environment:
-      name: pypi
+      name: ${{ needs.validate.outputs.package_name == 'strands-exaone' && 'pypi' || 'pypi-langchain' }}
       url: https://pypi.org/project/${{ needs.validate.outputs.package_name }}
     permissions:
       contents: read
