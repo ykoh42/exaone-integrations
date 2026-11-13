@@ -39,3 +39,15 @@ This enables the third-party Exa search tool. **Search queries are sent to Exa**
 The example uses `ExaoneRetryStrategy` so Strands waits for EXAONE's `Retry-After` hints instead of applying its generic throttling backoff. It disables the default printing callback, session persistence, memory, and skills. It uses the Harness default automatic context manager, which may summarize or remove older history. See the [Python package README](../../README.md) for reasoning preservation, configuration, and context-management details.
 
 The default context manager and background-task support also register management tools for retrieving context and managing background work.
+
+## Custom tools and conversation history
+
+Run the support-queue example to let the Harness execute `get_ticket` and answer a follow-up in the same conversation:
+
+```bash
+.venv/bin/python tools.py
+```
+
+This example uses synthetic ticket data, enables no built-in file or search tools, and keeps session persistence, memory, and skills disabled. The Harness still owns automatic context management. Both turns retain complete assistant messages and supported reasoning.
+
+See the official [Harness quickstart](https://strandsagents.com/docs/user-guide/harness/quickstart/) for the framework APIs.

@@ -21,7 +21,7 @@ const response = await model.invoke('Explain what an AI agent is in one sentence
 console.log(response.content)
 ```
 
-The package uses `k-exaone_v2.5` and `https://api.exaone.ai/v1` by default. A minimal example with preserved reasoning is available in [`examples/basic.ts`](examples/basic.ts).
+The package uses `k-exaone_v2.5` and `https://api.exaone.ai/v1` by default. See the [examples](examples/) for LangChain agents, streaming chat, structured output, LangGraph tool loops, and Deep Agents.
 
 ## Configuration
 
@@ -75,7 +75,7 @@ The provider forwards reasoning present in the message history it receives. It c
 
 ## Tools
 
-`bindTools()` accepts LangChain tools and OpenAI-shaped function tool definitions. The response exposes parsed `tool_calls` and the raw response metadata. The [tool example](examples/tool-call.ts) shows how to inspect a model-requested tool call; your application or agent executor is responsible for running tools and returning `ToolMessage` results.
+`bindTools()` accepts LangChain tools and OpenAI-shaped function tool definitions. The response exposes parsed `tool_calls` and the raw response metadata. The [LangChain agent example](examples/langchain/agent.ts) runs tools and returns their results through LangChain's agent loop.
 
 The integration also preserves legacy `function_call` fields in assistant history. It does not execute tools by itself.
 

@@ -1,0 +1,26 @@
+{
+  "name": "langchain-exaone-langchain-example",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "chat": "tsx ./chat.ts",
+    "agent": "tsx ./agent.ts",
+    "structured-output": "tsx ./structured-output.ts",
+    "check": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "langchain-exaone": "file:../..",
+    "@langchain/core": "^1.4.0",
+    "zod": "^4.6.6",
+    "langchain": "~1.6.5",
+    "@langchain/langgraph": "^1.7.4"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "tsx": "^4.23.15",
+    "typescript": "~6.0.3"
+  },
+  "allowScripts": {
+    "esbuild": true
+  }
+}

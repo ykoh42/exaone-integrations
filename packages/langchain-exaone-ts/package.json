@@ -19,7 +19,26 @@
     },
     "./package.json": "./package.json"
   },
-  "files": ["dist", "examples", "LICENSE", "README.md"],
+  "files": [
+    "dist",
+    "examples/README.md",
+    "examples/deepagents/README.md",
+    "examples/deepagents/agent.ts",
+    "examples/deepagents/package.json",
+    "examples/deepagents/tsconfig.json",
+    "examples/langchain/README.md",
+    "examples/langchain/agent.ts",
+    "examples/langchain/chat.ts",
+    "examples/langchain/package.json",
+    "examples/langchain/structured-output.ts",
+    "examples/langchain/tsconfig.json",
+    "examples/langgraph/README.md",
+    "examples/langgraph/agent.ts",
+    "examples/langgraph/package.json",
+    "examples/langgraph/tsconfig.json",
+    "LICENSE",
+    "README.md"
+  ],
   "sideEffects": false,
   "engines": {
     "node": ">=22"

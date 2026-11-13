@@ -3,7 +3,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "tsx ./agent.ts"
+    "start": "tsx ./agent.ts",
+    "tools": "tsx ./tools.ts",
+    "check": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
     "@strands-agents/harness": "~0.3.4",
@@ -11,5 +13,12 @@
     "strands-exaone": "file:../..",
     "tsx": "^4.23.13",
     "zod": "^4.6.6"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "typescript": "~6.0.3"
+  },
+  "allowScripts": {
+    "esbuild": true
   }
 }

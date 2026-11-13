@@ -33,7 +33,7 @@ The configured endpoint and any custom fetch implementation receive your API key
 
 The example disables the SDK's default printer and prints only text blocks. In SDK 1.24, the default printer and `String(response)` can include reasoning.
 
-For file reading and optional web search with Strands Harness, see the [Harness example](examples/harness/).
+For SDK tool use, streaming, structured output, Harness, and CLI walkthroughs, see the [examples](examples/).
 
 ## Configuration
 

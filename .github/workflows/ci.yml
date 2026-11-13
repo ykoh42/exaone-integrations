@@ -82,9 +82,9 @@ jobs:
       - working-directory: packages/langchain-exaone-py
         run: uv sync --locked --all-groups
       - working-directory: packages/langchain-exaone-py
-        run: uv run --locked ruff check src tests
+        run: uv run --locked ruff check src tests examples
       - working-directory: packages/langchain-exaone-py
-        run: uv run --locked ruff format --check src tests
+        run: uv run --locked ruff format --check src tests examples
       - working-directory: packages/langchain-exaone-py
         run: uv run --locked pytest
       - working-directory: packages/langchain-exaone-py
@@ -128,6 +128,40 @@ jobs:
           test "$(npm prefix)" = "$(pwd -P)"
           npm install --ignore-scripts "$RUNNER_TEMP"/strands-exaone-*.tgz
           node --input-type=module -e "import { ExaoneModel } from 'strands-exaone'; import { Model } from '@strands-agents/sdk'; if (!(new ExaoneModel() instanceof Model)) process.exit(1)"
+
+  typescript-examples:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - provider: strands-exaone
+            directory: packages/strands-exaone-ts/examples/sdk
+          - provider: strands-exaone
+            directory: packages/strands-exaone-ts/examples/harness
+          - provider: langchain-exaone
+            directory: packages/langchain-exaone-ts/examples/langchain
+          - provider: langchain-exaone
+            directory: packages/langchain-exaone-ts/examples/langgraph
+          - provider: langchain-exaone
+            directory: packages/langchain-exaone-ts/examples/deepagents
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.ref }}
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22.18.0'
+          cache: npm
+      - run: npm install --global npm@11.20.0
+      - run: npm ci
+      - run: npm run build --workspace=${{ matrix.provider }}
+      - working-directory: ${{ matrix.directory }}
+        run: npm install --install-links --no-package-lock --workspaces=false
+      - working-directory: ${{ matrix.directory }}
+        run: npm run check
 
   strands-typescript-package:
     runs-on: ubuntu-24.04

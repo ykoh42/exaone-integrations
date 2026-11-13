@@ -105,7 +105,7 @@ See the [K-EXAONE 2.5 API reference](https://docs.exaone.ai/ko/docs/k-exaone-2.5
 
 ## Examples
 
-See [`examples/basic.py`](examples/basic.py) for a runnable example. The package does not make API requests during import or construction.
+See the [examples](examples/) for LangChain agents, streaming chat, structured output, LangGraph tool loops, and Deep Agents. The package does not make API requests during import or construction.
 
 ## Development
 

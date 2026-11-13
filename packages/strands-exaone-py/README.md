@@ -29,7 +29,7 @@ The configured endpoint and any custom HTTP client receive your API key and conv
 
 The callback handler determines whether intermediate reasoning and response text are printed. This example disables the default callback and prints only the final response; reasoning remains in conversation history for later turns.
 
-For file reading and optional web search with Strands Harness, see the [Harness example](https://github.com/ykoh42/exaone-integrations/tree/main/packages/strands-exaone-py/examples/harness).
+For SDK tool use, streaming, structured output, Harness, and CLI walkthroughs, see the [examples](examples/).
 
 ## Configuration
 

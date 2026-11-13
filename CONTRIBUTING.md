@@ -25,8 +25,8 @@ python -m pytest packages/strands-exaone-py/tests
 (cd packages/strands-exaone-py && hatch build)
 
 # LangChain Python
-(cd packages/langchain-exaone-py && uv run --locked ruff check src tests)
-(cd packages/langchain-exaone-py && uv run --locked ruff format --check src tests)
+(cd packages/langchain-exaone-py && uv run --locked ruff check src tests examples)
+(cd packages/langchain-exaone-py && uv run --locked ruff format --check src tests examples)
 (cd packages/langchain-exaone-py && uv run --locked pytest)
 (cd packages/langchain-exaone-py && uv build)
 
@@ -41,6 +41,10 @@ npm pack --workspace=strands-exaone --dry-run
 ```
 
 All four packages have fixture-based tests. The Strands packages enforce a cognitive complexity threshold of 15 in Python and TypeScript; those scores are not directly comparable. CI tests Strands against Harness 0.1.x and 0.3.4, exercises both LangChain packages across supported runtime versions, builds Python wheels and npm tarballs, and smoke-tests the artifacts in independent environments.
+
+## Examples
+
+Each example directory has its own setup instructions and framework dependencies. CI lints the Python examples and independently installs and type-checks the five TypeScript example projects. To check a TypeScript example locally, follow its README and run `npm run check` from that directory. Running an example uses the configured EXAONE account; type-checking does not make API requests.
 
 For TypeScript watch mode, run `npm run test:watch`. The Harness example tests run a separate process that imports the built package, so source changes require a fresh build. Either restart watch mode after each change, or run the following in another terminal and wait for compilation to finish before pressing `a` in Vitest to rerun all tests:
 

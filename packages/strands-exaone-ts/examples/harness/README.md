@@ -4,7 +4,7 @@ Run a prompt with the EXAONE provider and Strands Harness. File reading is disab
 
 ## Setup
 
-The provider runs on Node.js 22 or newer. Building this checkout requires Node.js 22.13.0 or newer and npm 11.20.0. The published `strands-exaone@0.1.0` package is available on npm; this example installs the local checkout so you can test source changes:
+The provider runs on Node.js 22 or newer. For this checkout, use the Node.js version in `.node-version` and npm 11.20.0. The published `strands-exaone` package is available on npm; this example installs the local checkout so you can test source changes:
 
 ```bash
 npm ci
@@ -37,3 +37,15 @@ npm start -- 'Search for the official TypeScript documentation'
 ```
 
 `EXA_API_KEY` is for Exa search and is separate from `EXAONE_API_KEY`. The example does not load `.env` files automatically. `EXAONE_BASE_URL` can be set to another compatible API endpoint. See the [package README](../../README.md) for provider configuration and limitations.
+
+## Custom tools and conversation history
+
+Run the support-queue example to let the Harness execute `get_ticket` and answer a follow-up in the same conversation:
+
+```bash
+npm run tools
+```
+
+This example uses synthetic ticket data, enables no built-in file or search tools, and keeps session persistence, memory, and skills disabled. The Harness still owns automatic context management. Both turns retain complete assistant messages and supported reasoning.
+
+See the official [Harness quickstart](https://strandsagents.com/docs/user-guide/harness/quickstart/) for the framework APIs.

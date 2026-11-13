@@ -1,0 +1,25 @@
+{
+  "name": "langchain-exaone-deepagents-example",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsx ./agent.ts",
+    "check": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "langchain-exaone": "file:../..",
+    "@langchain/core": "^1.4.0",
+    "zod": "^4.6.6",
+    "deepagents": "~1.16.5",
+    "langchain": "~1.6.5",
+    "@langchain/langgraph": "^1.7.4"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "tsx": "^4.23.15",
+    "typescript": "~6.0.3"
+  },
+  "allowScripts": {
+    "esbuild": true
+  }
+}

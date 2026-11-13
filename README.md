@@ -34,7 +34,18 @@ npm run build --workspace=langchain-exaone
 
 Set `EXAONE_API_KEY` in your environment before running an agent. See the package READMEs for examples and [CONTRIBUTING.md](CONTRIBUTING.md) for development checks.
 
-For runnable Strands examples, see the Python [Harness](packages/strands-exaone-py/examples/harness/) and [CLI](packages/strands-exaone-py/examples/strands-cli/) examples, or the TypeScript [Harness](packages/strands-exaone-ts/examples/harness/) and [CLI](packages/strands-exaone-ts/examples/strands-cli/) examples. LangChain examples are in each provider's `examples/` directory.
+## Examples
+
+Each example has its own dependencies and execution instructions.
+
+| Framework | Python | TypeScript |
+| --- | --- | --- |
+| Strands SDK | [Example](packages/strands-exaone-py/examples/sdk/) | [Example](packages/strands-exaone-ts/examples/sdk/) |
+| Strands Harness | [Example](packages/strands-exaone-py/examples/harness/) | [Example](packages/strands-exaone-ts/examples/harness/) |
+| Strands CLI | [Example](packages/strands-exaone-py/examples/strands-cli/) | [Example](packages/strands-exaone-ts/examples/strands-cli/) |
+| LangChain | [Example](packages/langchain-exaone-py/examples/langchain/) | [Example](packages/langchain-exaone-ts/examples/langchain/) |
+| LangGraph | [Example](packages/langchain-exaone-py/examples/langgraph/) | [Example](packages/langchain-exaone-ts/examples/langgraph/) |
+| Deep Agents | [Example](packages/langchain-exaone-py/examples/deepagents/) | [Example](packages/langchain-exaone-ts/examples/deepagents/) |
 
 The Strands integrations adapt one completion choice to Strands' single-message model contract. EXAONE Tabular is a separate API and is outside this project's scope.
 
