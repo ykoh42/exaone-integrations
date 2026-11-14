@@ -1,9 +1,8 @@
 # Changelog
 
-## 0.1.2 (unreleased)
+## 0.1.2 (2026-11-14)
 
 - Support Node.js 20.3 and `@langchain/core` 1.2.0 and newer in the 1.x line.
-
 - Respect edited and removed LangChain tool calls in conversation history while retaining matching provider metadata.
 - Expose reasoning and tool calls through LangChain's standard content blocks and accept completed v1 history.
 - Preserve invalid tool calls and validate Zod structured output with LangChain's tool parser.
