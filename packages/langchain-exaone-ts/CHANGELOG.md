@@ -2,6 +2,7 @@
 
 ## 0.1.2 (unreleased)
 
+- Respect edited and removed LangChain tool calls in conversation history while retaining matching provider metadata.
 - Expose reasoning and tool calls through LangChain's standard content blocks and accept completed v1 history.
 - Preserve invalid tool calls and validate Zod structured output with LangChain's tool parser.
 - Support multiple non-streaming candidates through LangChain `generate()` and aggregate request usage.

@@ -310,36 +310,74 @@ def _content_parts(message: BaseMessage) -> tuple[str, str | None, list[dict[str
 def _message_to_api(message: BaseMessage) -> dict[str, Any]:
     content, reasoning, block_tool_calls = _content_parts(message)
     if isinstance(message, SystemMessage):
-        return {"role": "system", "content": content}
+        return _named_message(message, "system", content)
     if isinstance(message, HumanMessage):
-        return {"role": "user", "content": content}
+        return _named_message(message, "user", content)
     if isinstance(message, ToolMessage):
         return {"role": "tool", "tool_call_id": message.tool_call_id, "content": content}
     if isinstance(message, FunctionMessage):
         return {"role": "function", "name": message.name, "content": content}
     if isinstance(message, ChatMessage):
-        return {"role": message.role, "content": content}
+        return _named_message(message, message.role, content)
     if isinstance(message, AIMessage):
-        result: dict[str, Any] = {"role": "assistant", "content": content}
+        result = _named_message(message, "assistant", content)
         if reasoning is not None:
             result["reasoning_content"] = reasoning
         raw_calls = message.additional_kwargs.get("tool_calls")
-        if isinstance(raw_calls, list) and raw_calls:
-            result["tool_calls"] = raw_calls
-        elif calls := message.tool_calls or block_tool_calls:
-            result["tool_calls"] = [
-                {
-                    "id": call["id"],
-                    "type": "function",
-                    "function": {"name": call["name"], "arguments": json.dumps(call["args"], ensure_ascii=False)},
-                }
-                for call in calls
+        normalized = (
+            message.response_metadata.get("model_provider") == "exaone" and "tool_calls" in message.model_fields_set
+        )
+        calls = message.tool_calls if normalized else message.tool_calls or block_tool_calls
+        if calls or message.invalid_tool_calls:
+            originals = raw_calls if isinstance(raw_calls, list) else []
+            result["tool_calls"] = [_tool_call_to_api(call, originals, invalid=False) for call in calls] + [
+                _tool_call_to_api(call, originals, invalid=True) for call in message.invalid_tool_calls
             ]
+        elif not normalized and isinstance(raw_calls, list) and raw_calls:
+            result["tool_calls"] = raw_calls
         function_call = message.additional_kwargs.get("function_call")
         if isinstance(function_call, Mapping):
             result["function_call"] = function_call
         return result
     raise TypeError(f"EXAONE does not support LangChain message type {message.type!r}")
+
+
+def _named_message(message: BaseMessage, role: str, content: str) -> dict[str, Any]:
+    result: dict[str, Any] = {"role": role, "content": content}
+    if message.name is not None:
+        result["name"] = message.name
+    return result
+
+
+def _tool_call_to_api(call: Mapping[str, Any], originals: list[Any], *, invalid: bool) -> dict[str, Any]:
+    call_id, name, args = call.get("id"), call.get("name"), call.get("args")
+    original = next(
+        (item for item in originals if call_id is not None and isinstance(item, Mapping) and item.get("id") == call_id),
+        {},
+    )
+    function = original.get("function")
+    function = dict(function) if isinstance(function, Mapping) else {}
+    if not isinstance(name, str) or (not isinstance(args, str) if invalid else not isinstance(args, dict)):
+        raise TypeError("EXAONE tool calls require a name and valid arguments")
+    encoded = args if invalid else _tool_arguments(args, function.get("arguments"))
+    return {
+        **original,
+        "id": call_id,
+        "type": "function",
+        "function": {**function, "name": name, "arguments": encoded},
+    }
+
+
+def _tool_arguments(arguments: dict[str, Any], original: Any) -> str:
+    if isinstance(original, str):
+        try:
+            if json.dumps(json.loads(original), sort_keys=True, ensure_ascii=False) == json.dumps(
+                arguments, sort_keys=True, ensure_ascii=False
+            ):
+                return original
+        except ValueError:
+            pass
+    return json.dumps(arguments, ensure_ascii=False)
 
 
 def _usage_metadata(usage: Mapping[str, Any] | None) -> dict[str, Any] | None:

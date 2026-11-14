@@ -7,7 +7,7 @@ from urllib.parse import quote, quote_plus
 import httpx
 import pytest
 from langchain_core.load import dumpd, load
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, ChatMessage, HumanMessage, SystemMessage, ToolMessage
 from pydantic import BaseModel, ValidationError
 
 from langchain_exaone import ChatEXAONE, ExaoneAPIError
@@ -284,8 +284,133 @@ def test_assistant_reasoning_and_tool_history_are_sent_back() -> None:
 
     assistant_request = requests[0]["messages"][1]
     assert assistant_request["reasoning_content"] == "first turn"
-    assert assistant_request["tool_calls"] == [{"id": "call-1"}]
+    assert assistant_request["tool_calls"] == [
+        {"id": "call-1", "type": "function", "function": {"name": "lookup", "arguments": '{"city": "Seoul"}'}}
+    ]
     assert requests[0]["messages"][2] == {"role": "tool", "tool_call_id": "call-1", "content": "Sunny"}
+
+
+def test_named_chat_messages_are_preserved_in_requests() -> None:
+    requests: list[dict[str, Any]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json=_completion())
+
+    messages = [
+        SystemMessage("Instructions", name="policy"),
+        HumanMessage("Hello", name="user_one"),
+        AIMessage("Reply", name="assistant_one"),
+        ChatMessage(content="Other", role="user", name="user_two"),
+    ]
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        ChatEXAONE(api_key="synthetic-key", http_client=client).invoke(messages)
+
+    assert [message.get("name") for message in requests[0]["messages"]] == [
+        "policy",
+        "user_one",
+        "assistant_one",
+        "user_two",
+    ]
+
+
+def test_edited_tool_call_is_used_for_conversation_history() -> None:
+    payload = _completion()
+    payload["choices"][0]["message"]["tool_calls"] = [
+        {
+            "id": "call-1",
+            "type": "function",
+            "provider_extra": {"tag": "fixture"},
+            "function": {"name": "lookup", "arguments": '{"key":"old"}', "extra": "fixture"},
+        }
+    ]
+    requests: list[dict[str, Any]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json=payload)
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        model = ChatEXAONE(api_key="synthetic-key", http_client=client)
+        first = model.invoke("Use lookup.")
+        edited = first.model_copy(update={"tool_calls": [{"name": "lookup", "args": {"key": "new"}, "id": "call-1"}]})
+        model.invoke([edited])
+
+    tool_call = requests[1]["messages"][0]["tool_calls"][0]
+    assert tool_call["id"] == "call-1"
+    assert json.loads(tool_call["function"]["arguments"]) == {"key": "new"}
+    assert tool_call["provider_extra"] == {"tag": "fixture"}
+    assert tool_call["function"]["extra"] == "fixture"
+
+
+@pytest.mark.parametrize(("old_value", "new_value"), [(1, True), (0, False)])
+def test_tool_call_history_preserves_json_value_types(old_value: int, new_value: bool) -> None:
+    payload = _completion()
+    payload["choices"][0]["message"]["tool_calls"] = [
+        {
+            "id": "call-1",
+            "type": "function",
+            "function": {"name": "lookup", "arguments": json.dumps({"value": old_value})},
+        }
+    ]
+    requests: list[dict[str, Any]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json=payload)
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        model = ChatEXAONE(api_key="synthetic-key", http_client=client)
+        first = model.invoke("Use lookup.")
+        first.tool_calls[0]["args"] = {"value": new_value}
+        model.invoke([first])
+
+    args = json.loads(requests[1]["messages"][0]["tool_calls"][0]["function"]["arguments"])
+    assert args["value"] is new_value
+
+
+def test_tool_call_history_respects_removed_calls_and_keeps_invalid_calls() -> None:
+    payload = _completion()
+    payload["choices"][0]["message"]["tool_calls"] = [
+        {"id": "a", "type": "function", "function": {"name": "lookup", "arguments": '{"key":"a"}'}},
+        {"id": "b", "type": "function", "function": {"name": "lookup", "arguments": '{"key":"b"}'}},
+        {"id": "bad", "type": "function", "function": {"name": "lookup", "arguments": '{"key":'}},
+    ]
+    requests: list[dict[str, Any]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json=payload)
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        model = ChatEXAONE(api_key="synthetic-key", http_client=client)
+        first = model.invoke("Use lookup.")
+        edited = first.model_copy(update={"tool_calls": first.tool_calls[:1]})
+        model.invoke([edited])
+
+    calls = requests[1]["messages"][0]["tool_calls"]
+    assert [call["id"] for call in calls] == ["a", "bad"]
+    assert calls[1]["function"]["arguments"] == '{"key":'
+
+
+@pytest.mark.parametrize("output_version", ["v0", "v1"])
+def test_tool_call_history_does_not_restore_all_removed_calls(output_version: str) -> None:
+    payload = _completion()
+    payload["choices"][0]["message"]["tool_calls"] = [
+        {"id": "a", "type": "function", "function": {"name": "lookup", "arguments": "{}"}}
+    ]
+    requests: list[dict[str, Any]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json=payload)
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        model = ChatEXAONE(api_key="synthetic-key", http_client=client, output_version=output_version)
+        first = model.invoke("Use lookup.")
+        model.invoke([first.model_copy(update={"tool_calls": []})])
+
+    assert "tool_calls" not in requests[1]["messages"][0]
 
 
 def test_v1_output_can_be_reused_as_conversation_history() -> None:
@@ -365,7 +490,9 @@ def test_v1_stream_keeps_reasoning_and_tool_blocks_separate_when_combined() -> N
         result = chunks[0]
         for chunk in chunks[1:]:
             result += chunk
+        result.tool_calls[0]["args"] = {"edited": True}
         model.invoke([result, ToolMessage("Done", tool_call_id="call-1")])
+        model.invoke([result.model_copy(update={"tool_calls": []})])
 
     blocks = result.content
     assert isinstance(blocks, list)
@@ -375,6 +502,8 @@ def test_v1_stream_keeps_reasoning_and_tool_blocks_separate_when_combined() -> N
     assert result.tool_calls[0]["name"] == "lookup"
     assert requests[1]["messages"][0]["reasoning_content"] == "Think"
     assert requests[1]["messages"][0]["tool_calls"][0]["id"] == "call-1"
+    assert json.loads(requests[1]["messages"][0]["tool_calls"][0]["function"]["arguments"]) == {"edited": True}
+    assert "tool_calls" not in requests[2]["messages"][0]
 
 
 def test_stream_message_supports_langchain_serialization() -> None:

@@ -2,6 +2,8 @@
 
 ## 0.1.2 (unreleased)
 
+- Respect edited and removed LangChain tool calls in conversation history while retaining matching provider metadata.
+- Preserve LangChain message names when sending system, user, assistant, and generic chat messages.
 - Preserve reasoning and tool calls in LangChain v1 content-block conversation history, including streamed results.
 - Normalize boolean `bind_tools()` choices according to LangChain's OpenAI-compatible convention.
 - Aggregate request usage in LangChain `generate()` results and reject malformed candidates instead of dropping them.

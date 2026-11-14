@@ -72,6 +72,72 @@ describe("ChatExaone", () => {
     }]);
   });
 
+  it("uses content-only tool calls when EXAONE metadata has no original calls", async () => {
+    const fetcher = mockFetch([completion({ role: "assistant", content: "Done" })]);
+    const model = new ChatExaone({ apiKey: "fixture-key", fetch: fetcher });
+    const assistant = new AIMessage({
+      content: [{ type: "tool_call", id: "call-1", name: "lookup", args: { key: "value" } }],
+      response_metadata: { model_provider: "exaone" },
+    });
+
+    await model.invoke([assistant]);
+    expect(requestBody(fetcher).messages).toMatchObject([{
+      role: "assistant", tool_calls: [{ id: "call-1", function: { name: "lookup", arguments: '{"key":"value"}' } }],
+    }]);
+  });
+
+  it("uses edited LangChain tool calls when continuing a conversation", async () => {
+    const fetcher = mockFetch([
+      completion({ role: "assistant", content: "", tool_calls: [
+        { id: "call-1", type: "function", provider_extra: { tag: "fixture" }, function: { name: "lookup", arguments: '{"key":"old"}', extra: "fixture" } },
+      ] }),
+      completion({ role: "assistant", content: "Done" }),
+    ]);
+    const model = new ChatExaone({ apiKey: "fixture-key", fetch: fetcher });
+    const first = await model.invoke("Use lookup.");
+    first.tool_calls![0]!.args = { key: "new" };
+    await model.invoke([first]);
+
+    const messages = requestBody(fetcher).messages as Array<{ tool_calls: Array<{ function: { arguments: string } }> }>;
+    expect(JSON.parse(messages[0]!.tool_calls[0]!.function.arguments)).toEqual({ key: "new" });
+    expect(messages[0]!.tool_calls[0]).toMatchObject({ provider_extra: { tag: "fixture" }, function: { extra: "fixture" } });
+  });
+
+  it("respects removed tool calls and retains invalid calls in history", async () => {
+    const fetcher = mockFetch([
+      completion({ role: "assistant", content: "", tool_calls: [
+        { id: "a", type: "function", function: { name: "lookup", arguments: '{"key":"a"}' } },
+        { id: "b", type: "function", function: { name: "lookup", arguments: '{"key":"b"}' } },
+        { id: "bad", type: "function", function: { name: "lookup", arguments: '{"key":' } },
+      ] }),
+      completion({ role: "assistant", content: "Done" }),
+    ]);
+    const model = new ChatExaone({ apiKey: "fixture-key", fetch: fetcher });
+    const first = await model.invoke("Use lookup.");
+    first.tool_calls = first.tool_calls!.slice(0, 1);
+    await model.invoke([first]);
+
+    expect(requestBody(fetcher).messages).toMatchObject([{
+      role: "assistant",
+      tool_calls: [{ id: "a" }, { id: "bad", function: { arguments: '{"key":' } }],
+    }]);
+  });
+
+  it.each(["v0", "v1"] as const)("does not restore removed %s tool calls", async (outputVersion) => {
+    const fetcher = mockFetch([
+      completion({ role: "assistant", content: "", tool_calls: [
+        { id: "a", type: "function", function: { name: "lookup", arguments: "{}" } },
+      ] }),
+      completion({ role: "assistant", content: "Done" }),
+    ]);
+    const model = new ChatExaone({ apiKey: "fixture-key", fetch: fetcher, outputVersion });
+    const first = await model.invoke("Use lookup.");
+    first.tool_calls = [];
+    await model.invoke([first]);
+
+    expect(requestBody(fetcher).messages).toEqual([{ role: "assistant", content: "" }]);
+  });
+
   it.each(["v0", "v1"] as const)("preserves malformed tool arguments with %s output", async (outputVersion) => {
     const rawCalls = [
       { id: "valid", type: "function", function: { name: "lookup", arguments: '{"key":"x"}' } },
@@ -170,7 +236,7 @@ describe("ChatExaone", () => {
       { choices: [{ index: 0, delta: { content: "up" } }] },
       { choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: "call-1", function: { name: "lookup", arguments: '{"key":' } }] } }] },
       { choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: '"x"}' } }] }, finish_reason: "tool_calls" }] },
-    ]), completion({ role: "assistant", content: "Done" })]);
+    ]), completion({ role: "assistant", content: "Done" }), completion({ role: "assistant", content: "Done" })]);
     const model = new ChatExaone({ apiKey: "fixture-key", fetch: fetcher, outputVersion: "v1" });
 
     const chunks = [];
@@ -183,11 +249,16 @@ describe("ChatExaone", () => {
       expect.objectContaining({ type: "text", text: "Look up" }),
       expect.objectContaining({ type: "tool_call_chunk", id: "call-1", name: "lookup", args: '{"key":"x"}' }),
     ]));
+    result.tool_calls![0]!.args = { key: "new" };
     await model.invoke([result, new ToolMessage({ content: "Done", tool_call_id: "call-1" })]);
     expect(requestBody(fetcher).messages).toMatchObject([
-      { role: "assistant", reasoning_content: "Think more", tool_calls: [{ id: "call-1" }] },
+      { role: "assistant", reasoning_content: "Think more", tool_calls: [{ id: "call-1", function: { arguments: '{"key":"new"}' } }] },
       { role: "tool", tool_call_id: "call-1" },
     ]);
+    result.tool_calls = [];
+    await model.invoke([result]);
+    expect(requestBody(fetcher).messages).toMatchObject([{ role: "assistant", content: "Look up" }]);
+    expect((requestBody(fetcher).messages as Array<Record<string, unknown>>)[0]).not.toHaveProperty("tool_calls");
   });
 
   it("rejects an incomplete v1 tool-call chunk in conversation history", async () => {

@@ -69,29 +69,35 @@ function isCompleteToolCallChunk(message: BaseMessage, part: Record<string, unkn
   }
   if (!isRecord(args)) return false;
   const calls = (message as BaseMessage & { tool_calls?: Array<{ id?: string; name: string; args: unknown }> }).tool_calls;
-  return calls?.some((call) => call.id === part.id && call.name === part.name &&
-    JSON.stringify(call.args) === JSON.stringify(args)) ?? false;
+  if (calls?.some((call) => call.id === part.id)) return true;
+  const chunks = (message as BaseMessage & { tool_call_chunks?: Array<{ id?: string }> }).tool_call_chunks;
+  return message.response_metadata.model_provider === "exaone" && (chunks?.some((chunk) => chunk.id === part.id) ?? false);
 }
 
 function formatToolCalls(message: BaseMessage): ExaoneRequestMessage["tool_calls"] {
   const aiMessage = message as BaseMessage & {
     tool_calls?: Array<{ id?: string; name: string; args: Record<string, unknown> }>;
+    invalid_tool_calls?: Array<{ id?: string; name?: string; args?: string }>;
+    tool_call_chunks?: Array<{ id?: string }>;
     additional_kwargs?: Record<string, unknown>;
   };
   const raw = aiMessage.additional_kwargs?.tool_calls;
-  if (Array.isArray(raw) && raw.length) return raw as ExaoneRequestMessage["tool_calls"];
-  const original = message.response_metadata.tool_calls;
-  if (Array.isArray(original) && original.length) return original as ExaoneRequestMessage["tool_calls"];
+  const metadata = message.response_metadata.tool_calls;
+  const originals = Array.isArray(raw) && raw.length ? raw : Array.isArray(metadata) ? metadata : [];
 
   const parsed = aiMessage.tool_calls;
-  if (parsed?.length) {
-    return parsed.map((call) => ({
-      ...(call.id === undefined ? {} : { id: call.id }),
-      type: "function",
-      function: { name: call.name, arguments: JSON.stringify(call.args ?? {}) },
-    }));
+  const invalid = aiMessage.invalid_tool_calls;
+  if (parsed?.length || invalid?.length) {
+    return [
+      ...(parsed ?? []).map((call) => formatStandardToolCall(call, originals)),
+      ...(invalid ?? []).map((call) => formatStandardToolCall(call, originals)),
+    ];
   }
 
+  if (message.response_metadata.model_provider === "exaone" && (originals.length || aiMessage.tool_call_chunks?.length)) {
+    return undefined;
+  }
+  if (originals.length) return originals as ExaoneRequestMessage["tool_calls"];
   if (!Array.isArray(message.content)) return undefined;
   const blocks = message.content.filter((part) => typeof part === "object" && part.type === "tool_call");
   return blocks.map((part) => {
@@ -104,6 +110,36 @@ function formatToolCalls(message: BaseMessage): ExaoneRequestMessage["tool_calls
       function: { name: part.name, arguments: JSON.stringify(part.args) },
     };
   });
+}
+
+function formatStandardToolCall(
+  call: { id?: string; name?: string; args?: unknown },
+  originals: unknown[]
+): NonNullable<ExaoneRequestMessage["tool_calls"]>[number] {
+  if (typeof call.name !== "string" || (!isRecord(call.args) && typeof call.args !== "string")) {
+    throw new TypeError("EXAONE tool calls require a name and valid arguments.");
+  }
+  const original = originals.find((item) => isRecord(item) && call.id !== undefined && item.id === call.id);
+  const originalCall = isRecord(original) ? original : {};
+  const originalFunction = isRecord(originalCall.function) ? originalCall.function : {};
+  const args = typeof call.args === "string" ? call.args : formatToolArguments(call.args, originalFunction.arguments);
+  return {
+    ...originalCall,
+    ...(call.id === undefined ? {} : { id: call.id }),
+    type: "function",
+    function: { ...originalFunction, name: call.name, arguments: args },
+  };
+}
+
+function formatToolArguments(args: Record<string, unknown>, original: unknown): string {
+  if (typeof original === "string") {
+    try {
+      if (JSON.stringify(JSON.parse(original)) === JSON.stringify(args)) return original;
+    } catch {
+      // The normalized LangChain arguments replace malformed original JSON.
+    }
+  }
+  return JSON.stringify(args);
 }
 
 /** Convert LangChain messages to the text-only EXAONE Chat Completions wire format. */

@@ -107,6 +107,8 @@ response = model.invoke("서울 날씨를 알려줘.")
 
 `with_structured_output()` uses LangChain's standard tool-based strategy. You can pass additional Chat Completions fields with `model_kwargs` or per-call keyword arguments. Their acceptance depends on the EXAONE endpoint.
 
+When a returned EXAONE message is reused in history, edits to its LangChain `tool_calls` determine the next request. Provider-specific fields from matching original calls are retained.
+
 ## Configuration
 
 | Option | Default | Description |
