@@ -20,7 +20,7 @@ export EXAONE_API_KEY='your-api-key'
 npm install langchain-exaone @langchain/core
 ```
 
-Requires Node.js 22 or newer and `@langchain/core` 1.3.0 or newer within the 1.x line. Set `EXAONE_API_KEY` in the process environment, or pass `apiKey` when constructing the model. The package does not load `.env` files automatically.
+Requires Node.js 20.3.0 or newer and `@langchain/core` 1.2.0 or newer within the 1.x line. Set `EXAONE_API_KEY` in the process environment, or pass `apiKey` when constructing the model. The package does not load `.env` files automatically.
 
 ## Quick start
 

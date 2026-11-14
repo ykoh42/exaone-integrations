@@ -16,7 +16,7 @@ export EXAONE_API_KEY='your-api-key'
 
 ## Quick start
 
-The Python distribution requires Python 3.10 or newer and `strands-agents` 1.64.x. Install it from PyPI:
+The Python distribution requires Python 3.10 or newer and `strands-agents` 1.63.x through 1.65.x. Install it from PyPI:
 
 ```bash
 python -m pip install -U strands-exaone

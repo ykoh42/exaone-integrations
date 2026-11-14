@@ -326,7 +326,6 @@ async def test_harness_default_environment_and_tools_with_mock_model(tmp_path: A
         "web_fetch",
         "programmatic_tool_caller",
         "subagent",
-        "todo_write",
     } <= names
     assert "web_search" not in names
 

@@ -40,7 +40,7 @@ npm pack --workspace=strands-exaone --dry-run
 (cd packages/langchain-exaone-ts && npm pack --pack-destination "${TMPDIR:-/tmp}")
 ```
 
-All four packages have fixture-based tests. The Strands packages enforce a cognitive complexity threshold of 15 in Python and TypeScript; those scores are not directly comparable. CI tests Strands against Harness 0.1.x and 0.3.4, exercises both LangChain packages across supported runtime versions, builds Python wheels and npm tarballs, and smoke-tests the artifacts in independent environments.
+All four packages have fixture-based tests. The Strands packages enforce a cognitive complexity threshold of 15 in Python and TypeScript; those scores are not directly comparable. CI tests the minimum and newer Strands SDK and Harness combinations, exercises both LangChain packages across supported runtime versions and dependency boundaries, builds Python wheels and npm tarballs, and tests the artifacts in independent environments. LangChain TypeScript's published runtime supports Node.js 20.3 and newer; the repository's development tools require the newer Node.js version in `.node-version`.
 
 ## Examples
 

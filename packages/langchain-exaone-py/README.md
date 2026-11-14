@@ -16,7 +16,7 @@ export EXAONE_API_KEY='your-api-key'
 
 ## Install
 
-Install the package from PyPI:
+The package requires Python 3.10 or newer and `langchain-core` 1.3.3 or newer within the 1.x line. Install it from PyPI:
 
 ```bash
 pip install -U langchain-exaone
@@ -57,6 +57,8 @@ LangChain's deserializer allows only registered integration classes by default. 
 `ChatEXAONE().profile` provides LangChain's standard model profile for `k-exaone_v2.5`: a 524,288-token context budget, text input and output, reasoning, tool calling and choice. Image, audio, video, and PDF inputs and non-text outputs are unsupported. The combined input and output, including reasoning, must fit within the context budget; no independent `max_output_tokens` profile value is inferred.
 
 The profile reports reasoning levels (`low`, `medium`, `high`, `max`), the API default (`max`), streamed tool-call support, and temperature support. The endpoint reference currently lists `low`, `high`, and `max`; the [Agent guide](https://docs.exaone.ai/ko/docs/agent-start) also uses `medium`.
+
+Older `langchain-core` versions can warn that some newer profile fields are unrecognized. The profile still retains those fields; upgrading `langchain-core` removes the warning when the newer fields are supported.
 
 LangChain and Deep Agents can use this profile for context management and structured-output strategy selection. An unknown model ID has no inferred profile. Pass `profile={...}` to replace the defaults using LangChain's public constructor option; `profile={}` leaves capabilities unspecified. Profiles are application metadata and are not sent as API parameters.
 

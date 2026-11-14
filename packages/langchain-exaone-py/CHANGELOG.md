@@ -2,6 +2,8 @@
 
 ## 0.1.2 (unreleased)
 
+- Support `langchain-core` 1.3.3 and newer in the 1.x line.
+
 - Respect edited and removed LangChain tool calls in conversation history while retaining matching provider metadata.
 - Preserve LangChain message names when sending system, user, assistant, and generic chat messages.
 - Preserve reasoning and tool calls in LangChain v1 content-block conversation history, including streamed results.

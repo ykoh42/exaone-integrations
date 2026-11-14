@@ -18,7 +18,7 @@ export EXAONE_API_KEY='your-api-key'
 
 ## Quick start
 
-The package is published on npm as `strands-exaone`. It requires Node.js 22 or newer and uses `@strands-agents/sdk` and Zod 4.6.6 or newer within major version 4 as peer dependencies. Install it in your project with:
+The package is published on npm as `strands-exaone`. It requires Node.js 22 or newer and uses `@strands-agents/sdk` 1.24.0 or newer within the 1.x line and Zod 4.5.4 or newer within major version 4 as peer dependencies. Install it in your project with:
 
 ```bash
 npm install strands-exaone

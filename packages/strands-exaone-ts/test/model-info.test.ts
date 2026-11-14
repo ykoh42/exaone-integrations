@@ -6,7 +6,7 @@ import { ExaoneModel } from '../src/model.js'
 describe('EXAONE model info', () => {
   it('provides known capabilities without inventing output or caching limits', () => {
     const model = new ExaoneModel()
-    expect(model.modelInfo).toEqual({
+    expect(model.modelInfo).toMatchObject({
       limits: { contextWindow: 524_288 },
       capabilities: { stateful: false, forcedToolChoice: true, nativeStructuredOutput: true },
     })

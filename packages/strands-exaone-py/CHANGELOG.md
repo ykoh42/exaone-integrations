@@ -2,6 +2,8 @@
 
 ## 0.1.2 (unreleased)
 
+- Support Strands SDK 1.63 through 1.65 and test with Harness 0.4.
+
 - Honor Strands' `is_retryable()` extension point while preventing retries after stream output is exposed.
 - Document the SDK retry-delay event limitation of the custom retry strategy.
 - Redact literal and URL-encoded API credentials from error details, response headers, and metadata callbacks.

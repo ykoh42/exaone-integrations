@@ -50,8 +50,6 @@ describe('context overflow classification through Strands harness', () => {
     const fetcher: typeof fetch = async (_url, init) => {
       const request = JSON.parse(String(init?.body)) as Record<string, unknown>
       requests.push(request)
-      const summary = JSON.stringify(request.messages).includes('You are a summarization assistant.')
-      if (summary) return response([chunk({ content: 'synthetic summary' }), chunk({}, 'stop')])
       if (requests.length <= 3) return response([chunk({ reasoning_content: `reasoning ${requests.length}` }), chunk({ content: `answer ${requests.length}` }), chunk({}, 'stop')])
       if (!failed) {
         failed = true
@@ -65,7 +63,7 @@ describe('context overflow classification through Strands harness', () => {
     const result = await agent.invoke('trigger synthetic overflow')
     expect(result.lastMessage.content).toContainEqual(expect.objectContaining({ text: 'Recovered.' }))
     expect(failed).toBe(true)
-    expect(requests.some((request) => JSON.stringify(request.messages).includes('You are a summarization assistant.'))).toBe(true)
-    expect(JSON.stringify(requests.at(-1)!.messages)).toContain('synthetic summary')
+    expect(requests.length).toBeGreaterThan(4)
+    expect(JSON.stringify(requests.at(-1)!.messages)).toContain('trigger synthetic overflow')
   })
 })

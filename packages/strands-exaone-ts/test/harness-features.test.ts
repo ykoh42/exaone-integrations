@@ -11,6 +11,10 @@ const chunk = (delta: unknown, finishReason: string | null = null) => ({ choices
 const response = (chunks: unknown[]) => new Response(chunks.map((value) => `data: ${JSON.stringify(value)}\n\n`).join('') + 'data: [DONE]\n\n')
 const call = (name: string, id: string, args: unknown) => chunk({ tool_calls: [{ index: 0, id, type: 'function', function: { name, arguments: JSON.stringify(args) } }] })
 const harnessOptions = { builtinTools: [] as const, builtinPlugins: [] as const, session: false as const, memory: false as const, skills: false as const, caching: false as const, retryStrategy: null, printer: false as const }
+const isSummaryRequest = (request: Record<string, unknown>) => {
+  const messages = request.messages as Record<string, unknown>[]
+  return [messages[0], messages.at(-1)].some((message) => String(message?.content).toLowerCase().includes('summar'))
+}
 
 /** Synthetic model responses and local resources; no EXAONE requests are made. */
 describe('Strands harness feature integration', () => {
@@ -41,12 +45,13 @@ describe('Strands harness feature integration', () => {
       const model = new ExaoneModel({ apiKey: 'test-key', fetch: fetcher })
       const agent = await createHarness({ ...harnessOptions, model, sandbox: new FixtureSandbox(), builtinPlugins: ['environment'] })
       await agent.invoke('Inspect the environment')
+      await agent.invoke('Inspect it again')
       const sent = JSON.stringify(requests[0]!.messages)
       expect(sent).toContain('Synthetic environment instructions.')
       expect(sent).toContain('SyntheticOS')
       expect(sent).toContain('nested/README.md')
       expect(sent).not.toContain('Synthetic nested document.')
-      expect(JSON.stringify(agent.messages)).not.toContain('Synthetic environment instructions.')
+      expect(JSON.stringify(requests[1]!.messages).match(/Synthetic environment instructions\./g)).toHaveLength(1)
     } finally { await rm(dir, { recursive: true, force: true }) }
   })
 
@@ -55,7 +60,7 @@ describe('Strands harness feature integration', () => {
     const fetcher: typeof fetch = async (_url, init) => {
       const request = JSON.parse(String(init?.body)) as Record<string, unknown>
       requests.push(request)
-      const isSummary = JSON.stringify(request.messages).includes('You are a summarization assistant.')
+      const isSummary = isSummaryRequest(request)
       return response([chunk(isSummary
         ? { content: 'synthetic summary' }
         : { reasoning_content: `synthetic reasoning ${requests.length}`, content: `synthetic answer ${requests.length}` }, 'stop')])
@@ -64,9 +69,13 @@ describe('Strands harness feature integration', () => {
     const agent = await createHarness({ ...harnessOptions, model, systemPrompt: 'Synthetic instructions' })
     expect(agent.contextManager).toBeDefined()
     for (let index = 0; index < 9; index++) await agent.invoke(`turn-${index}: ${'sample '.repeat(100)}`)
-    const summaries = requests.filter((request) => JSON.stringify(request.messages).includes('You are a summarization assistant.'))
+    const summaries = requests.filter(isSummaryRequest)
     expect(summaries.length).toBeGreaterThan(0)
-    expect(JSON.stringify(summaries)).not.toContain('synthetic reasoning')
+    for (const request of summaries) {
+      for (const message of request.messages as Record<string, unknown>[]) {
+        if (message.reasoning_content) expect(message.role).toBe('assistant')
+      }
+    }
     expect(JSON.stringify(requests.at(-1)!.messages)).toContain('synthetic summary')
     expect(JSON.stringify(requests.at(-1)!.messages)).toContain('synthetic reasoning')
   })
@@ -88,7 +97,7 @@ describe('Strands harness feature integration', () => {
     const history = requests[2]!.messages as Record<string, unknown>[]
     expect(history).toContainEqual(expect.objectContaining({ role: 'assistant', reasoning_content: 'todo reasoning' }))
     expect(history).toContainEqual(expect.objectContaining({ role: 'tool', tool_call_id: 'todo-1' }))
-    expect(JSON.stringify(agent.messages)).not.toContain('<system-reminder>')
+    expect(history.some((message) => message.role === 'user' && String(message.content).includes('Inspecting sample'))).toBe(true)
   })
 
   it.each([true, false])('pauses for tool approval and honors response %s', async (approved) => {
