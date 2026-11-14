@@ -84,6 +84,10 @@ Use `model.astream(...)` for asynchronous streaming. Streaming chunks retain rea
 
 LangChain's streaming interface represents one completion per run. If the API returns multiple choices, such as when `n` is greater than `1` in `model_kwargs`, `stream()` and `astream()` raise `ValueError` rather than merging separate candidates. Use `generate()` when you need multiple candidates.
 
+Each candidate in a non-streaming response carries the same request-level usage. `generate()` and `agenerate()` expose totals once per prompt in `llm_output["token_usage"]`, including reasoning tokens when present.
+
+LangChain's `output_version="v1"` standard content blocks can also be retained in conversation history, including reasoning and tool calls.
+
 ## Tools and structured output
 
 ```python

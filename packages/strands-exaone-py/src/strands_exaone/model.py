@@ -331,6 +331,10 @@ def _safe_transport_errors(
                     yield event
         except (httpx.HTTPError, httpx.InvalidURL, httpx.CookieConflict, httpx.StreamError) as error:
             safe_error = _copy_transport_error(error, self._api_key)
+        except Exception as error:
+            if events_exposed:
+                BaseException.__setattr__(error, "_exaone_events_exposed", True)
+            raise
         if safe_error is not None:
             # Raise outside the handler so the original error is not retained as context.
             if events_exposed:
@@ -452,8 +456,7 @@ class ExaoneModel(Model):
             reasoning_effort: EXAONE reasoning effort.
             preserve_thinking: Whether EXAONE should preserve previous reasoning in its input.
                 Reasoning present in the conversation is forwarded independently of this setting.
-            enable_thinking: EXAONE reasoning setting. False does not guarantee that
-                response content contains no reasoning.
+            enable_thinking: Reasoning setting for compatible custom models. K-EXAONE 2.5 always reasons.
             include_usage: Whether to request usage in a streaming response. Defaults to true.
             response_format: Output format for ordinary model calls.
             timeout: Deadline for requests, retry waits, response reads, asynchronous metadata callbacks, and

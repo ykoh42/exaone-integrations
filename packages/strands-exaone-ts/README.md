@@ -64,7 +64,7 @@ For Agent and Harness calls, configure `ExaoneRetryStrategy` to honor server del
 | `topP` | Nucleus sampling threshold. | `0.95` |
 | `reasoningEffort` | EXAONE reasoning setting. | Service default |
 | `preserveThinking` | Preserve earlier assistant reasoning in the model input. | `true` |
-| `enableThinking` | EXAONE reasoning-generation option. | Service default |
+| `enableThinking` | Reasoning-generation option for compatible custom models. K-EXAONE 2.5 always reasons. | Service default |
 | `includeUsage` | Set `stream_options.include_usage` on streaming requests. | `true` |
 | `timeoutMs` | Deadline for attempts, retry waits, response reads, and stream consumption. A custom fetch implementation must honor the supplied abort signal. | No provider-imposed timeout |
 | `contextWindowLimit` | Context window reported to Strands. Set a positive token count. | `524288` |
@@ -95,7 +95,7 @@ The context budget covers input plus output, including reasoning. See the [EXAON
 
 ## Reasoning and tools
 
-The provider stores reasoning separately from the final answer and sends it back as reasoning_content when it appears in the Strands conversation. preserveThinking defaults to true; set it to false to stop requesting preservation of earlier reasoning. enableThinking is a separate request option. Check the returned fields and content to see how a response handled reasoning.
+The provider stores reasoning separately from the final answer and sends it back as reasoning_content when it appears in the Strands conversation. preserveThinking defaults to true; set it to false to stop requesting preservation of earlier reasoning. K-EXAONE 2.5 always reasons; `enableThinking` can be forwarded for compatible custom models.
 
 Strands can summarize older conversation history during automatic context management. The provider forwards the reasoning that remains in the history it receives; it cannot restore content that was summarized or removed. Token counts used for proactive context management are estimates, not exact EXAONE token counts.
 

@@ -32,6 +32,7 @@ from langchain_core.messages import (
     SystemMessage,
     ToolMessage,
 )
+from langchain_core.messages.ai import add_usage
 from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from pydantic import ConfigDict, Field, SecretStr, field_validator
@@ -262,10 +263,11 @@ def _load_response_json(payload: bytes | str, description: str) -> Any:
     return result
 
 
-def _content_parts(message: BaseMessage) -> tuple[str, str | None]:
+def _content_parts(message: BaseMessage) -> tuple[str, str | None, list[dict[str, Any]]]:
     content = message.content
     text: list[str] = []
     reasoning: list[str] = []
+    tool_calls: list[dict[str, Any]] = []
     if isinstance(content, str):
         text.append(content)
     elif isinstance(content, Sequence):
@@ -275,8 +277,23 @@ def _content_parts(message: BaseMessage) -> tuple[str, str | None]:
             elif isinstance(block, Mapping):
                 if block.get("type") == "text" and isinstance(block.get("text"), str):
                     text.append(block["text"])
-                elif block.get("type") == "reasoning" and isinstance(block.get("reasoning"), str):
+                elif (
+                    isinstance(message, AIMessage)
+                    and block.get("type") == "reasoning"
+                    and isinstance(block.get("reasoning"), str)
+                ):
                     reasoning.append(block["reasoning"])
+                elif isinstance(message, AIMessage) and block.get("type") == "tool_call":
+                    name, args, call_id = block.get("name"), block.get("args"), block.get("id")
+                    if (
+                        not isinstance(name, str)
+                        or not isinstance(args, dict)
+                        or (call_id is not None and not isinstance(call_id, str))
+                    ):
+                        raise TypeError(
+                            "EXAONE tool call blocks require a name, object arguments, and optional string id"
+                        )
+                    tool_calls.append({"id": call_id, "name": name, "args": args})
                 else:
                     raise TypeError(f"EXAONE does not support message block type {block.get('type')!r}")
             else:
@@ -285,13 +302,13 @@ def _content_parts(message: BaseMessage) -> tuple[str, str | None]:
         raise TypeError("EXAONE message content must be text or text/reasoning blocks")
     if isinstance(message, AIMessage):
         prior = message.additional_kwargs.get("reasoning_content")
-        if isinstance(prior, str) and prior:
-            reasoning.insert(0, prior)
-    return "".join(text), "".join(reasoning) or None
+        if not reasoning and isinstance(prior, str) and prior:
+            reasoning.append(prior)
+    return "".join(text), "".join(reasoning) or None, tool_calls
 
 
 def _message_to_api(message: BaseMessage) -> dict[str, Any]:
-    content, reasoning = _content_parts(message)
+    content, reasoning, block_tool_calls = _content_parts(message)
     if isinstance(message, SystemMessage):
         return {"role": "system", "content": content}
     if isinstance(message, HumanMessage):
@@ -307,16 +324,16 @@ def _message_to_api(message: BaseMessage) -> dict[str, Any]:
         if reasoning is not None:
             result["reasoning_content"] = reasoning
         raw_calls = message.additional_kwargs.get("tool_calls")
-        if isinstance(raw_calls, list):
+        if isinstance(raw_calls, list) and raw_calls:
             result["tool_calls"] = raw_calls
-        elif message.tool_calls:
+        elif calls := message.tool_calls or block_tool_calls:
             result["tool_calls"] = [
                 {
                     "id": call["id"],
                     "type": "function",
                     "function": {"name": call["name"], "arguments": json.dumps(call["args"], ensure_ascii=False)},
                 }
-                for call in message.tool_calls
+                for call in calls
             ]
         function_call = message.additional_kwargs.get("function_call")
         if isinstance(function_call, Mapping):
@@ -696,12 +713,43 @@ class ChatEXAONE(BaseChatModel):
             return None
         return random.uniform(1.0, ceiling)
 
+    def _combine_llm_outputs(self, llm_outputs: list[dict[str, Any] | None]) -> dict[str, Any]:
+        """Aggregate request-level usage once per prompt for LangChain's generate result."""
+        total: dict[str, Any] | None = None
+        models: set[str] = set()
+        for output in llm_outputs:
+            if output is None:
+                continue
+            model = output.get("model")
+            if isinstance(model, str):
+                models.add(model)
+            raw_usage = output.get("usage")
+            usage = _usage_metadata(raw_usage) if isinstance(raw_usage, Mapping) else None
+            if usage is not None:
+                total = add_usage(total, usage)
+        result: dict[str, Any] = {}
+        if len(models) == 1:
+            result["model_name"] = next(iter(models))
+        if total is not None:
+            token_usage = {
+                "prompt_tokens": total["input_tokens"],
+                "completion_tokens": total["output_tokens"],
+                "total_tokens": total["total_tokens"],
+            }
+            reasoning = total.get("output_token_details", {}).get("reasoning")
+            if reasoning is not None:
+                token_usage["reasoning_tokens"] = reasoning
+            result["token_usage"] = token_usage
+        return result
+
     def _parse_result(self, payload: Any, api_key: str) -> ChatResult:
         if not isinstance(payload, Mapping):
             raise ValueError("EXAONE response must be a JSON object")
         choices = payload.get("choices")
         if not isinstance(choices, list) or not choices:
             raise ValueError("EXAONE response did not contain choices")
+        if any(not isinstance(choice, Mapping) for choice in choices):
+            raise ValueError("EXAONE response choices must be objects")
         generations = [
             ChatGeneration(
                 message=_assistant_message(choice, payload, api_key),
@@ -712,10 +760,7 @@ class ChatEXAONE(BaseChatModel):
                 },
             )
             for choice in choices
-            if isinstance(choice, Mapping)
         ]
-        if not generations:
-            raise ValueError("EXAONE response choices were invalid")
         return ChatResult(
             generations=generations, llm_output={"model": payload.get("model"), "usage": payload.get("usage")}
         )
@@ -787,12 +832,14 @@ class ChatEXAONE(BaseChatModel):
         raise RuntimeError("EXAONE retry loop exited without a response")
 
     def bind_tools(
-        self, tools: Sequence[Any], *, tool_choice: str | Mapping[str, Any] | None = None, **kwargs: Any
+        self, tools: Sequence[Any], *, tool_choice: str | Mapping[str, Any] | bool | None = None, **kwargs: Any
     ) -> Any:
         """Bind LangChain tools using the EXAONE Chat Completions schema."""
         formatted = [convert_to_openai_tool(tool) for tool in tools]
-        if tool_choice == "any":
+        if tool_choice is True or tool_choice == "any":
             tool_choice = "required"
+        elif tool_choice is False:
+            tool_choice = None
         if isinstance(tool_choice, str) and tool_choice not in {"auto", "none", "required"}:
             tool_choice = {"type": "function", "function": {"name": tool_choice}}
         return self.bind(tools=formatted, tool_choice=tool_choice, **kwargs)
@@ -941,8 +988,22 @@ class ChatEXAONE(BaseChatModel):
                 "finish_reason": choice.get("finish_reason"),
                 "matched_stop": choice.get("matched_stop"),
             }
+            chunk_content: str | list[dict[str, Any]] = text
+            if self.output_version == "v1":
+                blocks: list[dict[str, Any]] = []
+                if reasoning:
+                    blocks.append({"type": "reasoning", "reasoning": reasoning, "index": 0})
+                if text:
+                    blocks.append({"type": "text", "text": text, "index": 1})
+                for tool_chunk in tool_chunks:
+                    index = tool_chunk.get("index")
+                    blocks.append(
+                        {**tool_chunk, "type": "tool_call_chunk", "index": index + 2 if index is not None else 2}
+                    )
+                chunk_content = blocks
+                response_metadata["output_version"] = "v1"
             chunk = AIMessageChunk(
-                content=text,
+                content=chunk_content,
                 additional_kwargs=additional,
                 response_metadata=response_metadata,
                 tool_call_chunks=tool_chunks,

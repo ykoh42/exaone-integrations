@@ -9,7 +9,6 @@ from typing import Any
 import httpx
 from strands import ModelRetryStrategy
 from strands.hooks import AfterInvocationEvent, AfterModelCallEvent, HookRegistry
-from strands.types.exceptions import ModelThrottledException
 
 from .errors import ExaoneError, ExaoneThrottledError
 from .retry import RETRY_STATUSES, retry_delay
@@ -46,6 +45,14 @@ class ExaoneRetryStrategy(ModelRetryStrategy):
         registry.add_callback(AfterModelCallEvent, self._handle_after_model_call)
         registry.add_callback(AfterInvocationEvent, self._handle_after_invocation)
 
+    def is_retryable(self, exception: Exception) -> bool:
+        """Return whether a model error is eligible for a retry before output is exposed."""
+        if getattr(exception, "_exaone_events_exposed", False):
+            return False
+        if isinstance(exception, (ExaoneError, ExaoneThrottledError)) and exception.status_code in RETRY_STATUSES:
+            return True
+        return isinstance(exception, (httpx.ConnectError, httpx.ConnectTimeout)) or super().is_retryable(exception)
+
     async def _handle_after_model_call(self, event: AfterModelCallEvent) -> None:
         if event.retry:
             return
@@ -59,10 +66,7 @@ class ExaoneRetryStrategy(ModelRetryStrategy):
             return
         api_error = error if isinstance(error, (ExaoneError, ExaoneThrottledError)) else None
         headers = api_error.headers if api_error is not None else {}
-        status_code = api_error.status_code if api_error is not None else None
-        retryable_status = status_code in RETRY_STATUSES
-        retryable_transport = isinstance(error, (httpx.ConnectError, httpx.ConnectTimeout))
-        if not retryable_status and not retryable_transport and not isinstance(error, ModelThrottledException):
+        if error is None or not self.is_retryable(error):
             return
 
         invocation_id = id(event.invocation_state)

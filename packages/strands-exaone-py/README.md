@@ -57,7 +57,7 @@ For Agent and Harness calls, configure `ExaoneRetryStrategy` to honor server del
 | `max_tokens`, `top_k`, `presence_penalty` | Generation parameters. | Service defaults when omitted |
 | `reasoning_effort` | EXAONE reasoning setting. | Service default |
 | `preserve_thinking` | Ask EXAONE to preserve previous reasoning in model input. | `True` |
-| `enable_thinking` | EXAONE option for reasoning generation. | Service default |
+| `enable_thinking` | Reasoning-generation option for compatible custom models. K-EXAONE 2.5 always reasons. | Service default |
 | `include_usage` | Set `stream_options.include_usage` on streaming requests. | `True` |
 | `response_format` | Response format for ordinary agent calls. | Omitted |
 | `timeout` | Deadline for sending the request, retry waits, reading the response, asynchronous metadata callbacks, and time the caller pauses between yielded stream events. A custom transport that stalls during cleanup can finish after the deadline. | No provider-imposed timeout |
@@ -85,7 +85,7 @@ The context budget covers input plus output, including reasoning. See the [EXAON
 
 ## Reasoning and tools
 
-The provider stores reasoning separately from the final answer and sends it back as reasoning_content when it appears in the Strands conversation. By default, requests use EXAONE's recommended agent settings: temperature=1.0, top_p=0.95, and preserve_thinking=True. enable_thinking is a separate request option. Check the returned fields and content to see how a response handled reasoning.
+The provider stores reasoning separately from the final answer and sends it back as reasoning_content when it appears in the Strands conversation. By default, requests use EXAONE's recommended agent settings: temperature=1.0, top_p=0.95, and preserve_thinking=True. K-EXAONE 2.5 always reasons; `enable_thinking` can be forwarded for compatible custom models.
 
 Strands can summarize older conversation history during automatic context management. The provider forwards the reasoning that remains in the history it receives; it cannot restore content that was summarized or removed. Token counts used for proactive context management are estimates, not exact EXAONE token counts.
 
@@ -196,7 +196,9 @@ Strands owns Agent-level retry selection, so a model provider cannot silently re
 
 Strands' default retry strategy does not inspect EXAONE headers. Keeping it alongside the provider's own retry loop can multiply attempts, so leave `max_retries` at its default of zero when using `ExaoneRetryStrategy`. The strategy retries EXAONE transient HTTP errors, safe connection failures, and Strands throttling failures before the provider exposes output. It does not retry tool arguments that remain invalid after syntax-only completion or other model response errors.
 
-The Strands retry hook runs after the model call. Once the provider has yielded a stream event, it marks transport failures as non-retryable for `ExaoneRetryStrategy`, even when their HTTPX type is normally retryable. This preserves the HTTPX error type without replaying an exposed response.
+To extend or narrow retryable errors, subclass `ExaoneRetryStrategy` and override Strands' `is_retryable()` method. Call `super().is_retryable(error)` to retain the EXAONE defaults. The strategy does not retry a provider failure after a stream event has been exposed, even if an override marks the error as retryable.
+
+Unlike the SDK's default Python retry strategy, `ExaoneRetryStrategy` does not emit `event_loop_throttled_delay`. The current SDK exposes no public extension point for emitting this legacy event from a custom hook; supporting it while honoring server delay hints requires an upstream SDK extension.
 
 `ExaoneModel`'s optional `max_retries` setting remains available for direct model calls that do not use an Agent retry strategy. It retries connection failures before a response and retryable HTTP responses. The provider never replays a partially delivered stream. `timeout` bounds request work, provider retry waits, response reads, asynchronous metadata callbacks, and time the consumer pauses between yielded stream events. Agent-level `ExaoneRetryStrategy` waits are outside the model timeout. It cannot interrupt a synchronous callback while that function is running; an uncooperative custom transport can also delay response cleanup beyond the deadline. A caller-owned `http_client` retains its own transport timeouts.
 

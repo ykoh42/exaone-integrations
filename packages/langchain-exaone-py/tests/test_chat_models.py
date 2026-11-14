@@ -6,6 +6,7 @@ from urllib.parse import quote, quote_plus
 
 import httpx
 import pytest
+from langchain_core.load import dumpd, load
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from pydantic import BaseModel, ValidationError
 
@@ -99,9 +100,94 @@ def test_invoke_maps_reasoning_usage_and_recommended_defaults() -> None:
     assert requests[1]["model"] == "alternate-model"
 
 
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_generate_preserves_multiple_candidates(asynchronous: bool) -> None:
+    payload = _completion(content="First", reasoning="Plan A")
+    payload["choices"].append(
+        {
+            "index": 1,
+            "message": {"role": "assistant", "content": "Second", "reasoning_content": "Plan B"},
+            "finish_reason": "length",
+        }
+    )
+    requests: list[dict[str, Any]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json=payload)
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as async_client:
+            model = ChatEXAONE(
+                api_key="synthetic-key", http_client=client, http_async_client=async_client, model_kwargs={"n": 2}
+            )
+            messages = [[HumanMessage(content="Question")]]
+            result = await model.agenerate(messages) if asynchronous else model.generate(messages)
+
+    assert requests[0]["n"] == 2
+    assert [item.message.content for item in result.generations[0]] == ["First", "Second"]
+    assert [item.message.additional_kwargs["reasoning_content"] for item in result.generations[0]] == [
+        "Plan A",
+        "Plan B",
+    ]
+    assert [item.generation_info["finish_reason"] for item in result.generations[0]] == ["stop", "length"]
+    assert result.llm_output == {
+        "model_name": "k-exaone_v2.5",
+        "token_usage": {"prompt_tokens": 4, "completion_tokens": 5, "total_tokens": 9, "reasoning_tokens": 3},
+    }
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_generate_aggregates_usage_once_per_prompt(asynchronous: bool) -> None:
+    transport = httpx.MockTransport(lambda _: httpx.Response(200, json=_completion()))
+    with httpx.Client(transport=transport) as client:
+        async with httpx.AsyncClient(transport=transport) as async_client:
+            model = ChatEXAONE(api_key="synthetic-key", http_client=client, http_async_client=async_client)
+            messages = [[HumanMessage(content="First")], [HumanMessage(content="Second")]]
+            result = await model.agenerate(messages) if asynchronous else model.generate(messages)
+
+    assert result.llm_output == {
+        "model_name": "k-exaone_v2.5",
+        "token_usage": {"prompt_tokens": 8, "completion_tokens": 10, "total_tokens": 18, "reasoning_tokens": 6},
+    }
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_generate_rejects_malformed_candidate(asynchronous: bool) -> None:
+    payload = _completion()
+    payload["choices"].append(None)
+    transport = httpx.MockTransport(lambda _: httpx.Response(200, json=payload))
+    with httpx.Client(transport=transport) as client:
+        async with httpx.AsyncClient(transport=transport) as async_client:
+            model = ChatEXAONE(api_key="synthetic-key", http_client=client, http_async_client=async_client)
+            with pytest.raises(ValueError, match="choices must be objects"):
+                if asynchronous:
+                    await model.agenerate([[HumanMessage(content="Question")]])
+                else:
+                    model.generate([[HumanMessage(content="Question")]])
+
+
 def test_retries_default_to_two_and_can_be_disabled() -> None:
     assert ChatEXAONE(api_key="synthetic-key").max_retries == 2
     assert ChatEXAONE(api_key="synthetic-key", max_retries=0).max_retries == 0
+
+
+@pytest.mark.parametrize("choice,expected", [(True, "required"), (False, None), ("any", "required")])
+def test_bind_tools_normalizes_langchain_tool_choice(choice: bool | str, expected: str | None) -> None:
+    requests: list[dict[str, Any]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json=_completion())
+
+    tool = {"type": "function", "function": {"name": "lookup", "parameters": {"type": "object", "properties": {}}}}
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        model = ChatEXAONE(api_key="synthetic-key", http_client=client)
+        model.bind_tools([tool], tool_choice=choice).invoke("Use the tool.")
+
+    assert requests[0].get("tool_choice") == expected
+    if expected is None:
+        assert "tool_choice" not in requests[0]
 
 
 def test_reasoning_effort_medium_is_sent_on_the_wire() -> None:
@@ -200,6 +286,107 @@ def test_assistant_reasoning_and_tool_history_are_sent_back() -> None:
     assert assistant_request["reasoning_content"] == "first turn"
     assert assistant_request["tool_calls"] == [{"id": "call-1"}]
     assert requests[0]["messages"][2] == {"role": "tool", "tool_call_id": "call-1", "content": "Sunny"}
+
+
+def test_v1_output_can_be_reused_as_conversation_history() -> None:
+    payload = _completion(content="Calling tool", reasoning="Need a lookup")
+    payload["choices"][0]["message"]["tool_calls"] = [
+        {"id": "call-1", "type": "function", "function": {"name": "lookup", "arguments": '{"city":"Seoul"}'}}
+    ]
+    requests: list[dict[str, Any]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json=payload)
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        model = ChatEXAONE(api_key="synthetic-key", http_client=client, output_version="v1")
+        first = model.invoke("Lookup Seoul.")
+        model.invoke([first, ToolMessage("Sunny", tool_call_id="call-1")])
+
+    assert requests[1]["messages"][0] == {
+        "role": "assistant",
+        "content": "Calling tool",
+        "reasoning_content": "Need a lookup",
+        "tool_calls": payload["choices"][0]["message"]["tool_calls"],
+    }
+
+
+def test_v1_content_blocks_alone_can_supply_assistant_tool_calls() -> None:
+    requests: list[dict[str, Any]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json=_completion())
+
+    message = AIMessage(
+        content=[
+            {"type": "reasoning", "reasoning": "Need a lookup"},
+            {"type": "tool_call", "id": "call-1", "name": "lookup", "args": {"city": "Seoul"}},
+        ]
+    )
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        ChatEXAONE(api_key="synthetic-key", http_client=client).invoke([message])
+
+    assistant = requests[0]["messages"][0]
+    assert assistant["reasoning_content"] == "Need a lookup"
+    assert assistant["tool_calls"][0]["id"] == "call-1"
+    assert assistant["tool_calls"][0]["function"]["name"] == "lookup"
+    assert json.loads(assistant["tool_calls"][0]["function"]["arguments"]) == {"city": "Seoul"}
+
+
+def test_v1_stream_keeps_reasoning_and_tool_blocks_separate_when_combined() -> None:
+    frames = [
+        {"choices": [{"index": 0, "delta": {"reasoning_content": "Think"}}]},
+        {"choices": [{"index": 0, "delta": {"content": "Calling"}}]},
+        {
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [{"index": 0, "id": "call-1", "function": {"name": "lookup", "arguments": "{}"}}]
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ]
+        },
+    ]
+    stream = "".join(f"data: {json.dumps(frame)}\n\n" for frame in frames) + "data: [DONE]\n\n"
+    requests: list[dict[str, Any]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        requests.append(body)
+        return httpx.Response(200, content=stream) if body["stream"] else httpx.Response(200, json=_completion())
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        model = ChatEXAONE(api_key="synthetic-key", http_client=client, output_version="v1")
+        chunks = list(model.stream("Question"))
+        result = chunks[0]
+        for chunk in chunks[1:]:
+            result += chunk
+        model.invoke([result, ToolMessage("Done", tool_call_id="call-1")])
+
+    blocks = result.content
+    assert isinstance(blocks, list)
+    assert any(block.get("type") == "reasoning" and block.get("reasoning") == "Think" for block in blocks)
+    assert any(block.get("type") == "text" and block.get("text") == "Calling" for block in blocks)
+    assert any(block.get("type") == "tool_call" and block.get("id") == "call-1" for block in blocks)
+    assert result.tool_calls[0]["name"] == "lookup"
+    assert requests[1]["messages"][0]["reasoning_content"] == "Think"
+    assert requests[1]["messages"][0]["tool_calls"][0]["id"] == "call-1"
+
+
+def test_stream_message_supports_langchain_serialization() -> None:
+    frame = {"choices": [{"index": 0, "delta": {"reasoning_content": "Think"}}]}
+    stream = f"data: {json.dumps(frame)}\n\ndata: [DONE]\n\n"
+    with httpx.Client(transport=httpx.MockTransport(lambda _: httpx.Response(200, content=stream))) as client:
+        model = ChatEXAONE(api_key="synthetic-key", http_client=client, output_version="v1")
+        chunk = next(iter(model.stream("Question")))
+
+    restored = load(dumpd(chunk), allowed_objects="messages")
+    assert restored.content == chunk.content
+    assert restored.additional_kwargs == chunk.additional_kwargs
 
 
 def test_mixed_string_and_text_content_blocks_are_serialized() -> None:

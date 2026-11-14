@@ -176,6 +176,83 @@ async def test_exaone_retry_strategy_bounds_total_attempts(monkeypatch: pytest.M
     assert requests == 3
 
 
+async def test_retry_strategy_respects_subclass_disabling_retries() -> None:
+    requests = 0
+
+    class NeverRetry(ExaoneRetryStrategy):
+        def is_retryable(self, exception: Exception) -> bool:
+            return False
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        return httpx.Response(429, headers={"retry-after": "0"}, json={})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        agent = make_harness(
+            ExaoneModel(api_key="test-only-key", http_client=client),
+            retry_strategy=NeverRetry(max_attempts=2, base_retry_delay=0, max_retry_delay=0),
+        )
+        with pytest.raises(ExaoneThrottledError):
+            await agent.invoke_async("Say ok.")
+
+    assert requests == 1
+
+
+async def test_retry_strategy_respects_subclass_adding_retryable_errors() -> None:
+    requests = 0
+
+    class RetryReadTimeout(ExaoneRetryStrategy):
+        def is_retryable(self, exception: Exception) -> bool:
+            return isinstance(exception, httpx.ReadTimeout) or super().is_retryable(exception)
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        if requests == 1:
+            raise httpx.ReadTimeout("synthetic timeout")
+        return response(events(chunk({"content": "ok"}), chunk(finish="stop")))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        agent = make_harness(
+            ExaoneModel(api_key="test-only-key", http_client=client),
+            retry_strategy=RetryReadTimeout(max_attempts=2, base_retry_delay=0, max_retry_delay=0),
+        )
+        result = await agent.invoke_async("Say ok.")
+
+    assert requests == 2
+    assert result.message["content"]
+
+
+async def test_custom_retry_policy_does_not_replay_nontransport_error_after_output() -> None:
+    requests = 0
+
+    class RetryEverything(ExaoneRetryStrategy):
+        def is_retryable(self, exception: Exception) -> bool:
+            return True
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        return httpx.Response(
+            200,
+            content=events(chunk({"content": "partial"}), {"choices": "invalid"}),
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        agent = make_harness(
+            ExaoneModel(api_key="test-only-key", http_client=client),
+            retry_strategy=RetryEverything(max_attempts=2, base_retry_delay=0, max_retry_delay=0),
+        )
+        observed = []
+        with pytest.raises(ExaoneError):
+            async for event in agent.stream_async("Say ok."):
+                observed.append(event)
+
+    assert requests == 1
+    assert any(event.get("data") == "partial" for event in observed)
+
+
 @pytest.mark.parametrize("use_exaone_strategy", [False, True])
 async def test_retry_strategy_does_not_replay_after_stream_events_are_exposed(use_exaone_strategy: bool) -> None:
     requests = 0

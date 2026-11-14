@@ -1,6 +1,6 @@
 import { BaseChatModel } from "@langchain/core/language_models/chat_models";
 import type { BindToolsInput } from "@langchain/core/language_models/chat_models";
-import { AIMessageChunk, defaultToolCallParser } from "@langchain/core/messages";
+import { AIMessage, AIMessageChunk, defaultToolCallParser } from "@langchain/core/messages";
 import type {
   BaseMessage,
   StandardMessageStructure,
@@ -10,8 +10,14 @@ import { ChatGenerationChunk } from "@langchain/core/outputs";
 import type { ChatResult } from "@langchain/core/outputs";
 import { convertChunksToEvents } from "@langchain/core/language_models/compat";
 import type { ChatModelStreamEvent } from "@langchain/core/language_models/event";
-import { RunnableBinding } from "@langchain/core/runnables";
-import type { BaseLanguageModelInput } from "@langchain/core/language_models/base";
+import { RunnableBinding, RunnableLambda } from "@langchain/core/runnables";
+import type { BaseLanguageModelInput, StructuredOutputMethodOptions } from "@langchain/core/language_models/base";
+import { assembleStructuredOutputPipeline, createFunctionCallingParser } from "@langchain/core/language_models/structured_output";
+import { toJsonSchema } from "@langchain/core/utils/json_schema";
+import { getSchemaDescription, isInteropZodSchema } from "@langchain/core/utils/types";
+import type { InteropZodType } from "@langchain/core/utils/types";
+import { isSerializableSchema } from "@langchain/core/utils/standard_schema";
+import type { SerializableSchema } from "@langchain/core/utils/standard_schema";
 import type { ModelProfile } from "@langchain/core/language_models/profile";
 import type { Runnable } from "@langchain/core/runnables";
 import { convertToOpenAITool } from "@langchain/core/utils/function_calling";
@@ -166,6 +172,21 @@ export class ChatExaone extends BaseChatModel<
     return { model: this.model, baseUrl: this.baseUrl, ...this.defaultParams, ...this.modelKwargs };
   }
 
+  override _combineLLMOutput(...outputs: Array<Record<string, unknown> | undefined>): Record<string, unknown> | undefined {
+    let total: { promptTokens: number; completionTokens: number; totalTokens: number } | undefined;
+    for (const output of outputs) {
+      const usage = output?.tokenUsage;
+      if (!isRecord(usage)) continue;
+      const { promptTokens, completionTokens, totalTokens } = usage;
+      if (typeof promptTokens !== "number" || typeof completionTokens !== "number" || typeof totalTokens !== "number") continue;
+      total ??= { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+      total.promptTokens += promptTokens;
+      total.completionTokens += completionTokens;
+      total.totalTokens += totalTokens;
+    }
+    return total ? { tokenUsage: total } : undefined;
+  }
+
   override bindTools(
     tools: BindToolsInput[],
     kwargs?: Partial<ChatExaoneCallOptions>
@@ -182,6 +203,38 @@ export class ChatExaone extends BaseChatModel<
     });
   }
 
+  override withStructuredOutput<RunOutput extends Record<string, unknown> = Record<string, unknown>>(
+    outputSchema: InteropZodType<RunOutput> | SerializableSchema<RunOutput> | Record<string, unknown>,
+    config?: StructuredOutputMethodOptions<false>
+  ): Runnable<BaseLanguageModelInput, RunOutput>;
+  override withStructuredOutput<RunOutput extends Record<string, unknown> = Record<string, unknown>>(
+    outputSchema: InteropZodType<RunOutput> | SerializableSchema<RunOutput> | Record<string, unknown>,
+    config?: StructuredOutputMethodOptions<true>
+  ): Runnable<BaseLanguageModelInput, { raw: BaseMessage; parsed: RunOutput }>;
+  override withStructuredOutput<RunOutput extends Record<string, unknown> = Record<string, unknown>>(
+    outputSchema: InteropZodType<RunOutput> | SerializableSchema<RunOutput> | Record<string, unknown>,
+    config?: StructuredOutputMethodOptions<boolean>
+  ): Runnable<BaseLanguageModelInput, RunOutput> | Runnable<BaseLanguageModelInput, { raw: BaseMessage; parsed: RunOutput }> {
+    if (config?.strict) throw new Error('"strict" mode is not supported for this model by default.');
+    if (config?.method !== undefined && config.method !== "functionCalling") {
+      throw new Error('ChatExaone.withStructuredOutput supports only the "functionCalling" method.');
+    }
+    const isSchema = isInteropZodSchema(outputSchema) || isSerializableSchema(outputSchema);
+    const functionName = !isSchema && typeof outputSchema.name === "string" ? outputSchema.name : (config?.name ?? "extract");
+    const parameters = isSchema ? toJsonSchema(outputSchema) : outputSchema;
+    const model = this.bindTools([{
+      type: "function",
+      function: { name: functionName, description: getSchemaDescription(outputSchema) ?? "A function available to call.", parameters },
+    }], { tool_choice: { type: "function", function: { name: functionName } } });
+    const functionParser = createFunctionCallingParser(outputSchema, functionName);
+    const parser = RunnableLambda.from(async (input: BaseMessage): Promise<RunOutput> => {
+      const result = await functionParser.invoke(input);
+      if (result === undefined) throw new Error(`No tool call found with name ${functionName}.`);
+      return result as RunOutput;
+    });
+    return assembleStructuredOutputPipeline(model, parser, config?.includeRaw, config?.includeRaw ? "StructuredOutputRunnable" : "StructuredOutput");
+  }
+
   async _generate(
     messages: BaseMessage[],
     options: this["ParsedCallOptions"]
@@ -193,23 +246,26 @@ export class ChatExaone extends BaseChatModel<
       throw new ExaoneAPIError(response.status, safeHeaders(response.headers), payload, this.#apiKey);
     }
     const choices = payload.choices;
-    if (!Array.isArray(choices) || choices.length !== 1) {
-      throw new Error("EXAONE Chat Completions must return exactly one choice for LangChain.");
+    if (!Array.isArray(choices) || choices.length === 0) {
+      throw new Error("EXAONE Chat Completions must return at least one choice.");
     }
-    const choice = choices[0];
-    if (!choice || !isRecord(choice.message)) {
-      throw new Error("EXAONE Chat Completions returned a choice without an assistant message.");
-    }
-    const message = createAssistantMessage(choice.message, payload, choice, response.headers);
     const usage = mapUsage(payload.usage);
-    if (usage) message.usage_metadata = usage;
-    const generationInfo = responseMetadata(payload, choice, response.headers);
-    return {
-      generations: [{
+    const generations = choices.map((choice) => {
+      if (!isRecord(choice) || !isRecord(choice.message)) {
+        throw new Error("EXAONE Chat Completions returned a choice without an assistant message.");
+      }
+      const message = createAssistantMessage(choice.message, payload, choice, response.headers);
+      if ((options.outputVersion ?? this.outputVersion) === "v1") setStandardContent(message);
+      // EXAONE reports request-level usage, shared by all candidates.
+      if (usage) message.usage_metadata = usage;
+      return {
         text: typeof message.content === "string" ? message.content : "",
         message,
-        generationInfo,
-      }],
+        generationInfo: responseMetadata(payload, choice, response.headers),
+      };
+    });
+    return {
+      generations,
       ...(usage
         ? {
             llmOutput: {
@@ -234,7 +290,10 @@ export class ChatExaone extends BaseChatModel<
     if (!response.body) throw new Error("EXAONE returned an empty streaming response.");
 
     for await (const payload of parseSse<ChatCompletionChunk>(response.body, options.signal, this.#apiKey)) {
-      for (const generationChunk of streamResponseChunks(payload, response, this.#apiKey)) {
+      for (const originalChunk of streamResponseChunks(payload, response, this.#apiKey)) {
+        const generationChunk = (options.outputVersion ?? this.outputVersion) === "v1"
+          ? standardStreamChunk(originalChunk)
+          : originalChunk;
         yield generationChunk;
         if (generationChunk.text) {
           await runManager?.handleLLMNewToken(
@@ -397,6 +456,30 @@ function* streamResponseChunks(
   if (choice) yield createStreamGenerationChunk(payload, choice, response.headers);
 }
 
+function setStandardContent(message: AIMessage<ExaoneMessageStructure> | AIMessageChunk<ExaoneMessageStructure>): void {
+  if (message.response_metadata.output_version === "v1") return;
+  const blocks: Array<Record<string, unknown>> = [];
+  const reasoning = message.additional_kwargs.reasoning_content;
+  if (typeof reasoning === "string" && reasoning) blocks.push({ type: "reasoning", reasoning, index: 1 });
+  if (typeof message.content === "string" && message.content) blocks.push({ type: "text", text: message.content, index: 0 });
+  if (AIMessageChunk.isInstance(message) && message.tool_call_chunks?.length) {
+    for (const call of message.tool_call_chunks) {
+      blocks.push({ ...call, type: "tool_call_chunk", index: (call.index ?? 0) + 2 });
+    }
+  } else {
+    for (const [index, call] of (message.tool_calls ?? []).entries()) {
+      blocks.push({ ...call, type: "tool_call", index: index + 2 });
+    }
+  }
+  message.content = blocks as unknown as AIMessageChunk<ExaoneMessageStructure>["content"];
+  message.response_metadata = { ...message.response_metadata, output_version: "v1" };
+}
+
+function standardStreamChunk(chunk: ChatGenerationChunk): ChatGenerationChunk {
+  if (AIMessageChunk.isInstance(chunk.message)) setStandardContent(chunk.message);
+  return chunk;
+}
+
 async function* exposeReasoningContentBlocks(
   chunks: AsyncIterable<ChatGenerationChunk>
 ): AsyncGenerator<ChatGenerationChunk> {
@@ -555,8 +638,17 @@ function toolCallEntries(value: unknown, context: "response" | "stream delta"): 
     if (context === "stream delta" && toolCall.function != null && !isRecord(toolCall.function)) {
       throw new Error("EXAONE stream tool call function must be an object.");
     }
+    if (context === "response") validateResponseToolCall(toolCall);
   }
   return value;
+}
+
+function validateResponseToolCall(toolCall: Record<string, unknown>): void {
+  const fn = toolCall.function as Record<string, unknown>;
+  if (typeof fn.name !== "string" || typeof fn.arguments !== "string" ||
+      (toolCall.id != null && typeof toolCall.id !== "string")) {
+    throw new Error("EXAONE response tool calls require a name, string arguments, and optional string id.");
+  }
 }
 
 function streamGenerationInfo(
@@ -604,8 +696,8 @@ function validateRequestBody(body: Record<string, unknown>, model: string): void
       throw new RangeError(`max_tokens cannot exceed ${MAX_CONTEXT_TOKENS} for ${DEFAULT_MODEL}.`);
     }
   }
-  if (body.n !== undefined && body.n !== 1) {
-    throw new RangeError("LangChain ChatExaone supports exactly one completion per request (n=1).");
+  if (body.n !== undefined && (!Number.isInteger(body.n) || (body.n as number) < 1)) {
+    throw new RangeError("n must be a positive integer.");
   }
 }
 
@@ -653,7 +745,7 @@ function createAssistantMessage(
   response: ChatCompletionResponse,
   choice: NonNullable<ChatCompletionResponse["choices"]>[number],
   headers: Headers
-): AIMessageChunk<ExaoneMessageStructure> {
+): AIMessage<ExaoneMessageStructure> {
   const refusal = typeof source.refusal === "string" ? source.refusal : undefined;
   const content = typeof source.content === "string" ? source.content : "";
   const visibleContent = content.trim() === "" && refusal ? refusal : content;
@@ -663,15 +755,36 @@ function createAssistantMessage(
   if (source.function_call !== undefined) additional_kwargs.function_call = source.function_call;
 
   const rawToolCalls = toolCallEntries(source.tool_calls, "response");
-  const [tool_calls, invalid_tool_calls] = defaultToolCallParser(rawToolCalls);
+  const [tool_calls, invalid_tool_calls] = parseAssistantToolCalls(rawToolCalls);
   const metadata = responseMetadata(response, choice, headers);
-  return new AIMessageChunk<ExaoneMessageStructure>({
+  if (rawToolCalls.length) metadata.tool_calls = rawToolCalls;
+  const message = new AIMessage<ExaoneMessageStructure>({
     content: visibleContent,
-    ...(Object.keys(additional_kwargs).length === 0 ? {} : { additional_kwargs }),
-    ...(tool_calls.length === 0 ? {} : { tool_calls }),
+    additional_kwargs,
+    tool_calls,
     ...(invalid_tool_calls.length === 0 ? {} : { invalid_tool_calls }),
     response_metadata: metadata,
   });
+  return message;
+}
+
+function parseAssistantToolCalls(rawCalls: Record<string, unknown>[]): ReturnType<typeof defaultToolCallParser> {
+  const valid: ReturnType<typeof defaultToolCallParser>[0] = [];
+  const invalid: ReturnType<typeof defaultToolCallParser>[1] = [];
+  for (const raw of rawCalls) {
+    const [parsed, rejected] = defaultToolCallParser([raw]);
+    if (rejected.length) {
+      invalid.push(...rejected);
+      continue;
+    }
+    const fn = raw.function as { name: string; arguments: string };
+    if (!isRecord(JSON.parse(fn.arguments))) {
+      invalid.push({ name: fn.name, args: fn.arguments, ...(typeof raw.id === "string" ? { id: raw.id } : {}), error: "Arguments must be a JSON object." });
+    } else {
+      valid.push(...parsed);
+    }
+  }
+  return [valid, invalid];
 }
 
 function responseMetadata(
@@ -731,9 +844,9 @@ function mapUsage(usage: Record<string, unknown> | undefined): UsageMetadata | u
     output_tokens: output as number,
     total_tokens: total as number,
   };
-  const reasoning = isRecord(usage.completion_tokens_details)
+  const reasoning = (isRecord(usage.completion_tokens_details)
     ? usage.completion_tokens_details.reasoning_tokens
-    : usage.reasoning_tokens;
+    : undefined) ?? usage.reasoning_tokens;
   if (typeof reasoning === "number" && Number.isSafeInteger(reasoning) && reasoning >= 0) {
     result.output_token_details = { reasoning };
   }

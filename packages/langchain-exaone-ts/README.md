@@ -54,7 +54,7 @@ Retries are bounded, follow server delay hints, and stop before replaying a stre
 | `frequencyPenalty`, `presencePenalty`, `seed` | Generation settings. | Service defaults |
 | `reasoningEffort` | `low`, `medium`, `high`, or `max`. | Service default |
 | `preserveThinking` | Preserve earlier reasoning in multi-turn conversations. | `true` |
-| `enableThinking` | Set `chat_template_kwargs.enable_thinking`. | Service default |
+| `enableThinking` | Set `chat_template_kwargs.enable_thinking` for compatible custom models. K-EXAONE 2.5 always reasons. | Service default |
 | `timeout` | Request timeout in milliseconds. | No provider-imposed timeout |
 | `maxRetries` | Retries for 408, 429, 500, 502, 503, and 504 responses. | `2` |
 | `baseRetryDelayMs`, `maxRetryDelayMs` | Retry backoff bounds. | `1000`, `60000` |
@@ -90,7 +90,7 @@ When EXAONE returns `reasoning_content`, the integration stores it in `AIMessage
 import { HumanMessage } from '@langchain/core/messages'
 import { ChatExaone } from 'langchain-exaone'
 
-const model = new ChatExaone({ enableThinking: true })
+const model = new ChatExaone()
 const first = await model.invoke('Compare two approaches and recommend one.')
 const followUp = await model.invoke([
   new HumanMessage('Compare two approaches and recommend one.'),
@@ -103,9 +103,15 @@ console.log(followUp.content)
 
 The provider forwards reasoning found in the history it receives. It cannot restore reasoning that application memory or a chain has removed or summarized. Reasoning remains in `additional_kwargs.reasoning_content`; it is not merged into the answer text.
 
+LangChain's `outputVersion: "v1"` exposes reasoning and tool calls as standard content blocks. Keep the returned message, or a completed aggregation of stream chunks, to include those blocks in a later conversation.
+
+Like LangChain's OpenAI integration, a normal `invoke()` returns an `AIMessage`; streaming yields `AIMessageChunk` objects. The current `BaseChatModel` TypeScript signature types `invoke()` as returning a chunk, so use chunk-specific methods such as `concat()` on streamed chunks only.
+
 ## Tools
 
 `bindTools()` accepts LangChain tools and OpenAI-shaped function tool definitions. The response exposes parsed `tool_calls` and the raw response metadata. The [LangChain agent example](examples/langchain/agent.ts) runs tools and returns their results through LangChain's agent loop.
+
+`withStructuredOutput()` uses the `functionCalling` method: it requests its named tool and uses LangChain's parser. Zod schemas are validated, and `{ includeRaw: true }` includes the original message when parsing fails. The `jsonMode` and `jsonSchema` methods are not supported by this wrapper. Invalid tool arguments remain available in `invalid_tool_calls`, and the original calls are retained in response metadata for conversation history.
 
 The integration also preserves legacy `function_call` fields in assistant history. It does not execute tools by itself.
 
@@ -113,7 +119,7 @@ The integration also preserves legacy `function_call` fields in assistant histor
 
 This package sends requests directly to the EXAONE Chat Completions endpoint. It supports text messages, assistant reasoning history, function tools, sampling settings, JSON response-format passthrough, streaming, usage, response metadata, and HTTP errors. The service decides which forwarded tool definitions and optional generation fields it accepts.
 
-The integration accepts text and reasoning input blocks. It rejects image, audio, video, and other multimodal content. LangChain chat models represent one completion per run, so `n` must be `1`. When returned, `logprobs` and other response-specific fields are kept in metadata; the integration does not expose token-level log probabilities as a separate abstraction.
+The integration accepts text and reasoning input blocks. It rejects image, audio, video, and other multimodal content. Non-streaming `generate()` returns every candidate when `modelKwargs.n` requests multiple choices; `invoke()` returns the first candidate. Each candidate carries the same request-level usage, so use `generate()`'s `llmOutput` for totals rather than adding candidate usage together. Streaming raises an error if the endpoint returns multiple choices, since LangChain's stream represents one message. When returned, `logprobs` and other response-specific fields are kept in metadata; the integration does not expose token-level log probabilities as a separate abstraction.
 
 ## Development
 
