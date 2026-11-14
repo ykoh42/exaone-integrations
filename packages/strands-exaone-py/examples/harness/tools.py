@@ -1,7 +1,5 @@
 """Use a custom tool in Strands Harness across two conversation turns."""
 
-import os
-
 from strands import tool
 from strands_harness import create_harness
 
@@ -18,7 +16,7 @@ def get_ticket(ticket_id: str) -> str:
 
 def main() -> None:
     agent = create_harness(
-        model=ExaoneModel(base_url=os.getenv("EXAONE_BASE_URL", "https://api.exaone.ai/v1")),
+        model=ExaoneModel(),
         retry_strategy=ExaoneRetryStrategy(),
         tools=[get_ticket],
         builtin_tools={"*": False},

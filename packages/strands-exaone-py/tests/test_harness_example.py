@@ -19,9 +19,7 @@ EXAMPLE = Path(__file__).resolve().parents[1] / "examples" / "harness" / "agent.
 
 
 @pytest.mark.parametrize("web_search", [False, True])
-async def test_harness_example_explicitly_enables_file_read_and_opt_in_search(
-    tmp_path: Path, web_search: bool, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_harness_example_explicitly_enables_file_read_and_opt_in_search(tmp_path: Path, web_search: bool) -> None:
     path = tmp_path / "합성 파일.txt"
     path.write_text("SYNTHETIC_EXAMPLE_CONTENT\n")
     requests: list[dict[str, Any]] = []
@@ -42,7 +40,6 @@ async def test_harness_example_explicitly_enables_file_read_and_opt_in_search(
         return response(events(chunk({"content": "done"}), chunk(finish="stop")))
 
     module = runpy.run_path(str(EXAMPLE))
-    monkeypatch.setenv("EXAONE_BASE_URL", "https://injected-model-takes-precedence.invalid/v1")
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         model = ExaoneModel(api_key="test-only-key", http_client=client)
         agent = module["make_agent"](model=model, allow_file_read=True, web_search=web_search)
@@ -57,9 +54,7 @@ async def test_harness_example_explicitly_enables_file_read_and_opt_in_search(
     assert "SYNTHETIC_EXAMPLE_CONTENT" in tool_result["content"]
 
 
-async def test_harness_example_does_not_advertise_or_read_file_by_default(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_harness_example_does_not_advertise_or_read_file_by_default(tmp_path: Path) -> None:
     path = tmp_path / "synthetic-default-disabled.txt"
     path.write_text("SYNTHETIC_DEFAULT_FILE_CONTENT\n")
     requests: list[dict[str, Any]] = []
@@ -72,7 +67,6 @@ async def test_harness_example_does_not_advertise_or_read_file_by_default(
         return response(events(chunk({"content": "File reading is disabled by default."}), chunk(finish="stop")))
 
     module = runpy.run_path(str(EXAMPLE))
-    monkeypatch.setenv("EXAONE_BASE_URL", "https://injected-model-takes-precedence.invalid/v1")
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         model = ExaoneModel(api_key="test-only-key", http_client=client)
         agent = module["make_agent"](model=model)
@@ -89,16 +83,16 @@ def test_harness_example_help_needs_no_credentials() -> None:
     assert "--allow-file-read" in result.stdout
 
 
-def test_harness_example_uses_default_endpoint_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("EXAONE_BASE_URL", raising=False)
+def test_harness_example_uses_default_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EXAONE_BASE_URL", "https://ignored.example/v1")
     monkeypatch.setenv("EXAONE_API_KEY", "test-only-key")
     module = runpy.run_path(str(EXAMPLE))
     agent = module["make_agent"]()
     assert agent.model.get_config()["base_url"] == "https://api.exaone.ai/v1"
 
 
-def test_harness_example_command_uses_local_compatible_endpoint(tmp_path: Path) -> None:
-    """Run the documented command against a local synthetic SSE server."""
+def test_harness_example_uses_local_compatible_endpoint(tmp_path: Path) -> None:
+    """Run the custom endpoint example against a local synthetic SSE server."""
     import os
     import threading
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -146,7 +140,13 @@ def test_harness_example_command_uses_local_compatible_endpoint(tmp_path: Path) 
         env["EXAONE_BASE_URL"] = f"http://127.0.0.1:{server.server_port}/v1"
         env["NO_PROXY"] = "127.0.0.1,localhost"
         result = subprocess.run(
-            [sys.executable, str(EXAMPLE), "--allow-file-read", "Read the synthetic file."],
+            [
+                sys.executable,
+                "-c",
+                "import os; from agent import make_agent; from strands_exaone import ExaoneModel; "
+                "model = ExaoneModel(base_url=os.environ['EXAONE_BASE_URL']); "
+                "print(make_agent(model=model, allow_file_read=True)('Read the synthetic file.'))",
+            ],
             cwd=EXAMPLE.parent,
             env=env,
             capture_output=True,

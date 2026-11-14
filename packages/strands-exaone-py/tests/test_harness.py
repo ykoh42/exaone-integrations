@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -109,7 +110,7 @@ async def test_exaone_retry_strategy_honors_retry_after_in_harness(monkeypatch: 
             )
         return response(events(chunk({"content": "ok"}), chunk(finish="stop")))
 
-    monkeypatch.setattr("strands_exaone.retry_strategy.asyncio.sleep", record_sleep)
+    monkeypatch.setattr("strands_exaone.retry_strategy.asyncio", SimpleNamespace(sleep=record_sleep))
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         model = ExaoneModel(api_key="test-only-key", http_client=client)
         agent = make_harness(
@@ -162,7 +163,7 @@ async def test_exaone_retry_strategy_bounds_total_attempts(monkeypatch: pytest.M
             json={"error": {"type": "rate_limit_error", "message": "busy"}},
         )
 
-    monkeypatch.setattr("strands_exaone.retry_strategy.asyncio.sleep", skip_sleep)
+    monkeypatch.setattr("strands_exaone.retry_strategy.asyncio", SimpleNamespace(sleep=skip_sleep))
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         model = ExaoneModel(api_key="test-only-key", http_client=client)
         agent = make_harness(

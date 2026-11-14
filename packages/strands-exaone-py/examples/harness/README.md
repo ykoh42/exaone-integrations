@@ -12,11 +12,15 @@ python3 -m venv .venv
 export EXAONE_API_KEY='your-api-key'
 ```
 
-The provider reads `EXAONE_API_KEY` from the environment; it does not load `.env` files automatically. By default, model requests are sent to the EXAONE API.
-
-To use another compatible endpoint, set `EXAONE_BASE_URL` to its base URL, including `/v1`. If the variable is unset, the provider's default EXAONE endpoint is used.
+Set `EXAONE_API_KEY` to use the examples. `ExaoneModel()` uses `https://api.exaone.ai/v1` by default. The provider does not load `.env` files automatically.
 
 ## Run
+
+Start with a prompt:
+
+```bash
+.venv/bin/python agent.py 'Hello!'
+```
 
 To let the agent read a file you choose to share with the model, enable file reading explicitly:
 
@@ -49,5 +53,20 @@ Run the support-queue example to let the Harness execute `get_ticket` and answer
 ```
 
 This example uses synthetic ticket data. It disables built-in file and search tools, session persistence, memory, and skills. Harness automatic context management remains enabled. Both turns keep the complete assistant messages and supported reasoning in history.
+
+## Custom endpoint (optional)
+
+For a custom compatible server, pass its base URL including `/v1`:
+
+```python
+from agent import make_agent
+from strands_exaone import ExaoneModel
+
+model = ExaoneModel(base_url="https://your-endpoint.example/v1")
+agent = make_agent(model=model)
+print(agent("Hello!"))
+```
+
+The basic scripts do not read `EXAONE_BASE_URL`; pass the URL explicitly when constructing a model for a custom endpoint.
 
 See the official [Harness quickstart](https://strandsagents.com/docs/user-guide/harness/quickstart/) for the framework APIs.

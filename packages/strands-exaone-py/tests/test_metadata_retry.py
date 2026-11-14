@@ -6,6 +6,7 @@ import asyncio
 import json
 import threading
 from collections.abc import AsyncIterator
+from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
 from types import SimpleNamespace
@@ -68,7 +69,7 @@ async def test_captured_exaone_retry_hints_honor_the_longer_value(
     async def record_sleep(seconds: float) -> None:
         delays.append(seconds)
 
-    monkeypatch.setattr(model_module.asyncio, "sleep", record_sleep)
+    monkeypatch.setattr(model_module, "asyncio", SimpleNamespace(**(vars(asyncio) | {"sleep": record_sleep})))
 
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal attempts
@@ -109,8 +110,8 @@ async def test_captured_429_without_retry_hints_uses_bounded_backoff(monkeypatch
     async def record_sleep(seconds: float) -> None:
         delays.append(seconds)
 
-    monkeypatch.setattr(retry_module.random, "uniform", midpoint)
-    monkeypatch.setattr(model_module.asyncio, "sleep", record_sleep)
+    monkeypatch.setattr(retry_module, "random", SimpleNamespace(uniform=midpoint))
+    monkeypatch.setattr(model_module, "asyncio", SimpleNamespace(**(vars(asyncio) | {"sleep": record_sleep})))
 
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal attempts
@@ -310,26 +311,44 @@ async def test_no_retry_after_stream_has_started() -> None:
     assert any(event.get("contentBlockDelta", {}).get("delta", {}).get("text") == "partial" for event in observed)
 
 
-async def test_cancel_during_retry_wait() -> None:
+async def test_cancel_during_retry_wait(monkeypatch: pytest.MonkeyPatch) -> None:
     count = 0
-    issued = asyncio.Event()
+    wait_started = asyncio.Event()
+    wait_finished = asyncio.Event()
     signal = threading.Event()
+    delays: list[float] = []
+
+    async def controlled_sleep(delay: float) -> None:
+        delays.append(delay)
+        wait_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            wait_finished.set()
+
+    monkeypatch.setattr(model_module, "asyncio", SimpleNamespace(**(vars(asyncio) | {"sleep": controlled_sleep})))
 
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal count
         count += 1
-        issued.set()
         return httpx.Response(429, headers={"retry-after": "5"}, json={})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         model = ExaoneModel(api_key="key", http_client=client, max_retries=3, max_retry_delay=10)
         task = asyncio.create_task(events(model, cancel_signal=signal))
-        await issued.wait()
-        await asyncio.sleep(0.01)
-        signal.set()
-        with pytest.raises(asyncio.CancelledError):
-            await asyncio.wait_for(task, 1)
+        try:
+            await asyncio.wait_for(wait_started.wait(), 2)
+            signal.set()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 2)
+        finally:
+            if not task.done():
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
     assert count == 1
+    assert delays == [5.0]
+    assert wait_finished.is_set()
 
 
 async def test_stream_metadata_merges_logprobs_and_redacts_key() -> None:

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 from typing import cast
 
 from strands import Agent
@@ -21,8 +20,7 @@ def make_agent(*, model: Model | None = None, allow_file_read: bool = False, web
     if web_search:
         builtin_tools["web_search"] = "exa"
     if model is None:
-        base_url = os.environ.get("EXAONE_BASE_URL")
-        model = ExaoneModel(base_url=base_url) if base_url is not None else ExaoneModel()
+        model = ExaoneModel()
     return create_harness(
         model=model,
         retry_strategy=ExaoneRetryStrategy(),

@@ -73,6 +73,43 @@ async def collect(model: ExaoneModel, **kwargs: Any) -> list[dict[str, Any]]:
     return [event async for event in model.stream([{"role": "user", "content": [{"text": "안녕"}]}], **kwargs)]
 
 
+@pytest.mark.parametrize(
+    ("api_key_override", "expected_key"),
+    [(None, "env-test-key"), ("explicit-test-key", "explicit-test-key")],
+)
+async def test_api_key_authenticates_requests_with_explicit_key_taking_precedence(
+    monkeypatch: pytest.MonkeyPatch, api_key_override: str | None, expected_key: str
+) -> None:
+    monkeypatch.setenv("EXAONE_API_KEY", "env-test-key")
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, content=sse(chunk({"content": "ok"}), chunk(finish="stop")))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        kwargs = {"api_key": api_key_override} if api_key_override is not None else {}
+        model = ExaoneModel(http_client=client, **kwargs)
+        await collect(model)
+
+    assert len(requests) == 1
+    assert requests[0].headers["authorization"] == f"Bearer {expected_key}"
+    assert str(requests[0].url) == "https://api.exaone.ai/v1/chat/completions"
+
+
+@pytest.mark.parametrize("environment_key", [None, ""])
+def test_api_key_is_required_when_environment_key_is_missing_or_empty(
+    monkeypatch: pytest.MonkeyPatch, environment_key: str | None
+) -> None:
+    if environment_key is None:
+        monkeypatch.delenv("EXAONE_API_KEY", raising=False)
+    else:
+        monkeypatch.setenv("EXAONE_API_KEY", environment_key)
+
+    with pytest.raises(ValueError, match=r"EXAONE_API_KEY.*api_key"):
+        ExaoneModel()
+
+
 async def test_stream_sse_utf8_and_usage_callback() -> None:
     captured: list[dict[str, Any]] = []
     observed: list[dict[str, Any]] = []
@@ -231,7 +268,9 @@ async def test_interleaved_tools_are_assembled_and_replayed() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         bodies.append(json.loads(request.content))
-        return httpx.Response(200, content=events)
+        return httpx.Response(
+            200, content=events if len(bodies) == 1 else sse(chunk({"content": "done"}), chunk(finish="stop"))
+        )
 
     model, client = model_for(handler, preserve_thinking=True)
     try:
@@ -260,7 +299,9 @@ async def test_interleaved_tools_are_assembled_and_replayed() -> None:
                 ],
             },
         ]
-        body = model._request(history, None, None, None, None, stream=True)
+        _ = [event async for event in model.stream(history)]
+        assert len(bodies) == 2
+        body = bodies[1]
         assert body["messages"][0]["reasoning_content"] == "reason"
         assert body["messages"][0]["content"] == ""
         assert [m["tool_call_id"] for m in body["messages"][1:]] == ["a", "b"]
@@ -1178,7 +1219,7 @@ async def test_callback_failure_propagates() -> None:
         await client.aclose()
 
 
-def test_configuration_and_unsupported_media() -> None:
+def test_configuration() -> None:
     model = ExaoneModel(api_key="key", params={"n": 1}, top_p=0, top_k=-1)
     assert "api_key" not in model.get_config()
     with pytest.raises(ValueError, match="exactly one"):
@@ -1186,8 +1227,20 @@ def test_configuration_and_unsupported_media() -> None:
     with pytest.raises(ValueError, match="exactly one"):
         model.update_config(params={"n": True})
     assert model.get_config()["params"] == {"n": 1}
-    with pytest.raises(ValueError, match="Unsupported"):
-        model._request([{"role": "user", "content": [{"image": {}}]}], None, None, None, None, stream=True)
+
+
+async def test_unsupported_media_fails_before_http_request() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(500)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        model = ExaoneModel(api_key="key", http_client=client)
+        with pytest.raises(ValueError, match="Unsupported"):
+            _ = [event async for event in model.stream([{"role": "user", "content": [{"image": {}}]}])]
+    assert requests == []
 
 
 async def test_update_config_rejects_unknown_fields_before_copying() -> None:
