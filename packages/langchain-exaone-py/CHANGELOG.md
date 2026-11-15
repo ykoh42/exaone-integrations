@@ -2,6 +2,10 @@
 
 ## 0.1.3 (unreleased)
 
+- Keep refusal metadata and v1 refusal blocks separate from answer text during streaming and ordinary responses.
+- Respect removal of reasoning blocks from LangChain v1 message history.
+- Preserve `reasoning` from compatible server responses and accept HTTP endpoints supplied by the user.
+- Keep hosted model facts and request limits scoped to the hosted endpoint; forward custom server settings.
 - Preserve SPDX license metadata with the minimum supported build backend.
 
 - Respect call-level stop sequences over `model_kwargs` defaults.

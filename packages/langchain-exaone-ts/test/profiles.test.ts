@@ -19,6 +19,12 @@ describe("EXAONE model profiles", () => {
     expect(new ChatExaone({ apiKey: "synthetic", model: "unknown-model" }).profile).toEqual({});
   });
 
+  it("does not infer hosted facts from the model alias at a custom endpoint", () => {
+    expect(new ChatExaone({ apiKey: "synthetic", baseUrl: "http://server.example/v1" }).profile).toEqual({});
+    const profile = { maxInputTokens: 4096 };
+    expect(new ChatExaone({ apiKey: "synthetic", baseUrl: "http://server.example/v1", profile }).profile).toEqual(profile);
+  });
+
   it.each([null, [], "profile", 1])("rejects a non-object profile: %s", (profile) => {
     expect(() => new ChatExaone({ apiKey: "synthetic", profile: profile as never }))
       .toThrow("profile must be an object");

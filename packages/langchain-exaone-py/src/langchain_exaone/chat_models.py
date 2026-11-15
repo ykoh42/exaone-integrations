@@ -16,7 +16,7 @@ from email.utils import parsedate_to_datetime
 from functools import wraps
 from inspect import isasyncgenfunction, iscoroutinefunction, isgeneratorfunction
 from operator import itemgetter
-from typing import Any, Literal
+from typing import Any
 from urllib.parse import quote, quote_plus, urlsplit
 
 import httpx
@@ -44,13 +44,17 @@ from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResu
 from langchain_core.runnables import RunnableMap, RunnablePassthrough
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from langchain_core.utils.pydantic import is_basemodel_subclass
-from pydantic import ConfigDict, Field, SecretStr, field_validator
+from pydantic import ConfigDict, Field, SecretStr, ValidationInfo, field_validator
 
 from langchain_exaone._profiles import get_model_profile
 
 _RETRYABLE_STATUSES = {408, 429, 500, 502, 503, 504}
 _SAFE_HEADERS = {"content-type", "retry-after", "retry-after-ms", "x-request-id"}
 _HTTPX_ERRORS = (httpx.HTTPError, httpx.InvalidURL, httpx.CookieConflict, httpx.StreamError)
+
+
+def _is_hosted_default(data: Mapping[str, Any]) -> bool:
+    return data.get("model") == "k-exaone_v2.5" and data.get("base_url", "").rstrip("/") == "https://api.exaone.ai/v1"
 
 
 class ExaoneAPIError(Exception):
@@ -276,6 +280,7 @@ def _content_parts(message: BaseMessage) -> tuple[str, str | None, list[dict[str
     content = message.content
     text: list[str] = []
     reasoning: list[str] = []
+    refusals: list[str] = []
     tool_calls: list[dict[str, Any]] = []
     if isinstance(content, str):
         text.append(content)
@@ -292,6 +297,12 @@ def _content_parts(message: BaseMessage) -> tuple[str, str | None, list[dict[str
                     and isinstance(block.get("reasoning"), str)
                 ):
                     reasoning.append(block["reasoning"])
+                elif (
+                    isinstance(message, AIMessage)
+                    and block.get("type") == "refusal"
+                    and isinstance(block.get("refusal"), str)
+                ):
+                    refusals.append(block["refusal"])
                 elif isinstance(message, AIMessage) and block.get("type") == "tool_call":
                     name, args, call_id = block.get("name"), block.get("args"), block.get("id")
                     if (
@@ -310,8 +321,19 @@ def _content_parts(message: BaseMessage) -> tuple[str, str | None, list[dict[str
     else:
         raise TypeError("EXAONE message content must be text or text/reasoning blocks")
     if isinstance(message, AIMessage):
+        if message.response_metadata.get("output_version") != "v1" and not refusals:
+            prior_refusal = message.additional_kwargs.get("refusal")
+            if isinstance(prior_refusal, str):
+                refusals.append(prior_refusal)
+        if not "".join(text).strip() and refusals:
+            text = refusals
         prior = message.additional_kwargs.get("reasoning_content")
-        if not reasoning and isinstance(prior, str) and prior:
+        if (
+            message.response_metadata.get("output_version") != "v1"
+            and not reasoning
+            and isinstance(prior, str)
+            and prior
+        ):
             reasoning.append(prior)
     return "".join(text), "".join(reasoning) or None, tool_calls
 
@@ -439,6 +461,17 @@ def _tool_calls(raw_calls: Any) -> tuple[list[dict[str, Any]], list[dict[str, An
     return valid, invalid
 
 
+def _response_reasoning(source: Mapping[str, Any], context: str) -> str | None:
+    """Read equivalent EXAONE and vLLM reasoning fields without silently losing data."""
+    original, alternate = source.get("reasoning_content"), source.get("reasoning")
+    for name, value in (("reasoning_content", original), ("reasoning", alternate)):
+        if value is not None and not isinstance(value, str):
+            raise ValueError(f"EXAONE {context} {name} must be a string")
+    if original and alternate and original != alternate:
+        raise ValueError(f"EXAONE {context} has conflicting reasoning and reasoning_content fields")
+    return original or alternate
+
+
 def _assistant_message(choice: Mapping[str, Any], response: Mapping[str, Any], api_key: str) -> AIMessage:
     raw = choice.get("message")
     if not isinstance(raw, Mapping):
@@ -446,17 +479,9 @@ def _assistant_message(choice: Mapping[str, Any], response: Mapping[str, Any], a
     content, refusal = raw.get("content"), raw.get("refusal")
     if content is not None and not isinstance(content, str):
         raise ValueError("EXAONE assistant content must be a string")
-    reasoning = raw.get("reasoning_content")
-    if reasoning is not None and not isinstance(reasoning, str):
-        raise ValueError("EXAONE assistant reasoning_content must be a string")
+    reasoning = _response_reasoning(raw, "assistant")
     if refusal is not None and not isinstance(refusal, str):
         raise ValueError("EXAONE assistant refusal must be a string")
-    if (
-        (content is None or isinstance(content, str) and not content.strip())
-        and isinstance(refusal, str)
-        and refusal.strip()
-    ):
-        content = refusal
     additional: dict[str, Any] = {}
     if isinstance(reasoning, str) and reasoning:
         additional["reasoning_content"] = reasoning
@@ -570,14 +595,14 @@ class ChatEXAONE(BaseChatModel):
     )
     base_url: str = Field(
         default="https://api.exaone.ai/v1",
-        description="Chat Completions API base URL. Remote endpoints must use HTTPS.",
+        description="Chat Completions API base URL.",
     )
     temperature: float | None = Field(default=1.0, description="Sampling temperature.")
     top_p: float | None = Field(default=0.95, description="Nucleus sampling value.")
     presence_penalty: float | None = Field(default=0.0, description="Presence penalty.")
     max_tokens: int | None = Field(default=None, description="Maximum generated tokens, including reasoning tokens.")
     top_k: int = Field(default=-1, description="Top-k sampling value; -1 disables top-k filtering.")
-    reasoning_effort: Literal["low", "medium", "high", "max"] | None = Field(
+    reasoning_effort: str | float | None = Field(
         default=None,
         description="EXAONE reasoning effort. Omit to use the service default.",
     )
@@ -614,6 +639,8 @@ class ChatEXAONE(BaseChatModel):
 
     def _resolve_model_profile(self) -> ModelProfile | None:
         """Supply the default profile through LangChain's model-resolution hook."""
+        if not _is_hosted_default({"model": self.model, "base_url": self.base_url}):
+            return None
         return get_model_profile(self.model)
 
     @field_validator("base_url")
@@ -624,9 +651,8 @@ class ChatEXAONE(BaseChatModel):
             hostname = parsed.hostname
         except ValueError as error:
             raise ValueError("base_url must be a valid absolute URL") from error
-        loopback = hostname in {"localhost", "127.0.0.1", "::1"}
-        if not hostname or (parsed.scheme != "https" and not (parsed.scheme == "http" and loopback)):
-            raise ValueError("base_url must use HTTPS, except for loopback HTTP test servers")
+        if not hostname or parsed.scheme not in {"http", "https"}:
+            raise ValueError("base_url must be an absolute HTTP or HTTPS URL")
         if parsed.username is not None or parsed.password is not None:
             raise ValueError("base_url must not include URL credentials")
         if parsed.query or parsed.fragment:
@@ -635,9 +661,11 @@ class ChatEXAONE(BaseChatModel):
 
     @field_validator("max_tokens")
     @classmethod
-    def _check_max_tokens(cls, value: int | None) -> int | None:
-        if value is not None and not 0 <= value <= 524_288:
-            raise ValueError("max_tokens must be between 0 and 524288")
+    def _check_max_tokens(cls, value: int | None, info: ValidationInfo) -> int | None:
+        if value is not None and value < 0:
+            raise ValueError("max_tokens must be non-negative")
+        if value is not None and value > 524_288 and _is_hosted_default(info.data):
+            raise ValueError("max_tokens cannot exceed the EXAONE context limit of 524288")
         return value
 
     @field_validator("temperature")
@@ -686,9 +714,18 @@ class ChatEXAONE(BaseChatModel):
 
     @field_validator("top_k")
     @classmethod
-    def _check_top_k(cls, value: int) -> int:
-        if value != -1 and value < 1:
-            raise ValueError("top_k must be -1 or a positive integer")
+    def _check_top_k(cls, value: int, info: ValidationInfo) -> int:
+        if value < -1 or (value == 0 and _is_hosted_default(info.data)):
+            raise ValueError("top_k is not supported by the selected endpoint")
+        return value
+
+    @field_validator("reasoning_effort", mode="before")
+    @classmethod
+    def _check_reasoning_effort(cls, value: Any, info: ValidationInfo) -> Any:
+        if value is not None and not (isinstance(value, str) or (type(value) in (int, float) and math.isfinite(value))):
+            raise ValueError("reasoning_effort must be a string or finite number")
+        if value is not None and _is_hosted_default(info.data) and value not in ("low", "medium", "high", "max"):
+            raise ValueError("reasoning_effort must be one of low, medium, high, or max for the EXAONE API")
         return value
 
     @property
@@ -807,7 +844,7 @@ class ChatEXAONE(BaseChatModel):
             raise ValueError("EXAONE response choices must be objects")
         generations = [
             ChatGeneration(
-                message=_assistant_message(choice, payload, api_key),
+                message=self._standard_refusal(_assistant_message(choice, payload, api_key)),
                 generation_info={
                     key: choice.get(key)
                     for key in ("finish_reason", "matched_stop", "logprobs")
@@ -819,6 +856,13 @@ class ChatEXAONE(BaseChatModel):
         return ChatResult(
             generations=generations, llm_output={"model": payload.get("model"), "usage": payload.get("usage")}
         )
+
+    def _standard_refusal(self, message: AIMessage) -> AIMessage:
+        refusal = message.additional_kwargs.get("refusal")
+        if self.output_version == "v1" and isinstance(refusal, str) and refusal:
+            message.content = [*message.content_blocks, {"type": "refusal", "refusal": refusal}]
+            message.response_metadata["output_version"] = "v1"
+        return message
 
     @_safe_transport_errors
     def _generate(
@@ -1051,16 +1095,10 @@ class ChatEXAONE(BaseChatModel):
             text = delta.get("content")
             if text is None:
                 text = ""
-            reasoning = delta.get("reasoning_content")
+            reasoning = _response_reasoning(delta, "stream delta")
             refusal = delta.get("refusal")
-            if (
-                not isinstance(text, str)
-                or (reasoning is not None and not isinstance(reasoning, str))
-                or (refusal is not None and not isinstance(refusal, str))
-            ):
+            if not isinstance(text, str) or (refusal is not None and not isinstance(refusal, str)):
                 raise ValueError("EXAONE stream delta content, reasoning, and refusal must be text")
-            if not text.strip() and isinstance(refusal, str) and refusal.strip():
-                text = refusal
             tool_chunks = []
             raw_tool_calls = delta.get("tool_calls")
             if raw_tool_calls is not None and not isinstance(raw_tool_calls, list):
@@ -1112,10 +1150,12 @@ class ChatEXAONE(BaseChatModel):
                     blocks.append({"type": "reasoning", "reasoning": reasoning, "index": 0})
                 if text:
                     blocks.append({"type": "text", "text": text, "index": 1})
+                if isinstance(refusal, str) and refusal:
+                    blocks.append({"type": "refusal", "refusal": refusal.replace(api_key, "[REDACTED]"), "index": 2})
                 for tool_chunk in tool_chunks:
                     index = tool_chunk.get("index")
                     blocks.append(
-                        {**tool_chunk, "type": "tool_call_chunk", "index": index + 2 if index is not None else 2}
+                        {**tool_chunk, "type": "tool_call_chunk", "index": index + 3 if index is not None else 3}
                     )
                 chunk_content = blocks
                 response_metadata["output_version"] = "v1"

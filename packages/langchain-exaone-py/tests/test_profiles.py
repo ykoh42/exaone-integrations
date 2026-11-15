@@ -46,6 +46,17 @@ def test_unknown_models_have_no_inferred_profile() -> None:
     assert ChatEXAONE(model="unknown-model", api_key="synthetic").profile is None
 
 
+def test_custom_endpoint_does_not_infer_hosted_profile_from_model_alias() -> None:
+    model = ChatEXAONE(api_key="synthetic", base_url="http://server.example/v1")
+    assert model.profile is None
+    custom = (
+        {"reasoning_effort_levels": ["none", "low"]}
+        if "reasoning_effort_levels" in ModelProfile.__annotations__
+        else {"max_input_tokens": 4096}
+    )
+    assert ChatEXAONE(api_key="synthetic", base_url="http://server.example/v1", profile=custom).profile == custom
+
+
 def test_explicit_profile_replaces_defaults() -> None:
     custom = {"max_input_tokens": 4096, "tool_calling": False}
     assert ChatEXAONE(api_key="synthetic", profile=custom).profile == custom

@@ -40,6 +40,14 @@ def test_custom_model_does_not_inherit_exaone_context_and_tracks_model_changes()
     assert model.model_info.limits.context_window is None
 
 
+def test_custom_endpoint_does_not_infer_hosted_facts_from_model_alias() -> None:
+    model = ExaoneModel(api_key="synthetic", base_url="http://server.example/v1")
+    assert model.model_info.limits.context_window is None
+    assert model.model_info.capabilities.forced_tool_choice is None
+    model.update_config(model_info=ModelInfo(limits=ModelLimits(context_window=4096)))
+    assert model.model_info.limits.context_window == 4096
+
+
 def test_custom_model_keeps_explicit_context_and_model_info_precedence() -> None:
     model = ExaoneModel(api_key="synthetic", model_id="unknown-model", context_window_limit=4096)
     assert model.context_window_limit == 4096

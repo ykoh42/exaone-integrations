@@ -54,6 +54,75 @@ function requestBody(fetcher: typeof fetch): Record<string, unknown> {
 describe("ChatExaone", () => {
   afterEach(() => vi.useRealTimers());
 
+  it.each(["v0", "v1"] as const)("preserves vLLM reasoning and tool history in %s responses", async (outputVersion) => {
+    const toolCall = { id: "call-1", type: "function", function: { name: "lookup", arguments: "{}" } };
+    const fetcher = mockFetch([
+      completion({ role: "assistant", content: "Calling", reasoning: "Plan", tool_calls: [toolCall] }),
+      completion({ role: "assistant", content: "Done" }),
+    ]);
+    const model = new ChatExaone({ apiKey: "fixture-key", fetch: fetcher, outputVersion });
+    const first = await model.invoke("Use lookup");
+    expect(first.additional_kwargs.reasoning_content).toBe("Plan");
+    if (outputVersion === "v1") {
+      expect(first.content).toEqual(expect.arrayContaining([expect.objectContaining({ type: "reasoning", reasoning: "Plan" })]));
+    }
+    await model.invoke([first, new ToolMessage({ content: "result", tool_call_id: "call-1" })]);
+    expect(requestBody(fetcher).messages).toMatchObject([
+      { role: "assistant", reasoning_content: "Plan", tool_calls: [toolCall] },
+      { role: "tool", tool_call_id: "call-1" },
+    ]);
+  });
+
+  it.each(["v0", "v1"] as const)("preserves vLLM streaming reasoning and tool history in %s", async (outputVersion) => {
+    // Tool fragments mirror synthetic output from the model-card SGLang qwen3_coder parser.
+    const fetcher = mockFetch([sseResponse([
+      { choices: [{ index: 0, delta: { reasoning: "Plan ", reasoning_content: "Plan " } }] },
+      { choices: [{ index: 0, delta: { reasoning: "more", reasoning_content: "" } }] },
+      { choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: "call-1", type: "function", function: { name: "lookup" } }] } }] },
+      { choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: "{" } }] } }] },
+      { choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: "}" } }] } }] },
+      { choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] },
+    ]), completion({ role: "assistant", content: "Done" })]);
+    const model = new ChatExaone({ apiKey: "fixture-key", fetch: fetcher, outputVersion });
+    const chunks = [];
+    for await (const chunk of await model.stream("Use lookup")) chunks.push(chunk);
+    const first = chunks.reduce((combined, chunk) => combined.concat(chunk));
+    expect(first.additional_kwargs.reasoning_content).toBe("Plan more");
+    if (outputVersion === "v1") {
+      expect(first.content).toEqual(expect.arrayContaining([expect.objectContaining({ type: "reasoning", reasoning: "Plan more" })]));
+    }
+    await model.invoke([first, new ToolMessage({ content: "result", tool_call_id: "call-1" })]);
+    expect(requestBody(fetcher).messages).toMatchObject([
+      { role: "assistant", reasoning_content: "Plan more", tool_calls: [{ id: "call-1" }] },
+      { role: "tool", tool_call_id: "call-1" },
+    ]);
+  });
+
+  it.each([
+    [{ reasoning: "alternate" }, "alternate"],
+    [{ reasoning_content: "original" }, "original"],
+    [{ reasoning: "same", reasoning_content: "same" }, "same"],
+    [{ reasoning: "alternate", reasoning_content: "" }, "alternate"],
+    [{ reasoning: "", reasoning_content: "original" }, "original"],
+    [{ reasoning: null, reasoning_content: null }, undefined],
+  ])("normalizes nonstream reasoning aliases %j", async (fields, expected) => {
+    const model = new ChatExaone({ apiKey: "fixture-key", fetch: mockFetch([completion({ content: "answer", ...fields })]) });
+    expect((await model.invoke("question")).additional_kwargs.reasoning_content).toBe(expected);
+  });
+
+  it.each([
+    [{ reasoning: ["invalid"] }, "reasoning must"],
+    [{ reasoning_content: ["invalid"], reasoning: "valid" }, "reasoning_content must"],
+    [{ reasoning_content: "first", reasoning: "second" }, "conflicting reasoning"],
+  ])("rejects invalid or conflicting reasoning aliases %j", async (fields, error) => {
+    const invoked = new ChatExaone({ apiKey: "fixture-key", fetch: mockFetch([completion({ content: "answer", ...fields })]) });
+    await expect(invoked.invoke("question")).rejects.toThrow(error);
+    const streamed = new ChatExaone({ apiKey: "fixture-key", fetch: mockFetch([sseResponse([{ choices: [{ index: 0, delta: fields }] }])]) });
+    await expect(async () => {
+      for await (const _chunk of await streamed.stream("question")) { /* consume the stream */ }
+    }).rejects.toThrow(error);
+  });
+
   it("accepts a v1 assistant message with tool calls in content blocks", async () => {
     const fetcher = mockFetch([completion({ role: "assistant", content: "Done" })]);
     const model = new ChatExaone({ apiKey: "fixture-key", fetch: fetcher });
@@ -72,10 +141,9 @@ describe("ChatExaone", () => {
     }]);
   });
 
-  it("supports explicitly removing the v1 reasoning metadata fallback", async () => {
+  it("does not restore removed v1 reasoning from metadata", async () => {
     const fetcher = mockFetch([
       completion({ role: "assistant", content: "Answer", reasoning_content: "Original reasoning" }),
-      completion({ role: "assistant", content: "Done" }),
       completion({ role: "assistant", content: "Done" }),
     ]);
     const model = new ChatExaone({ apiKey: "fixture-key", fetch: fetcher, outputVersion: "v1" });
@@ -83,9 +151,7 @@ describe("ChatExaone", () => {
     if (!Array.isArray(message.content)) throw new Error("Expected standard v1 content blocks.");
     message.content = message.content.filter((part) => typeof part === "string" || part.type !== "reasoning");
     await model.invoke([message]);
-    expect(requestBody(fetcher).messages).toMatchObject([{ reasoning_content: "Original reasoning" }]);
-    delete message.additional_kwargs.reasoning_content;
-    await model.invoke([message]);
+    expect(message.additional_kwargs.reasoning_content).toBe("Original reasoning");
     expect((requestBody(fetcher).messages as Array<Record<string, unknown>>)[0]).not.toHaveProperty("reasoning_content");
   });
 
@@ -362,7 +428,6 @@ describe("ChatExaone", () => {
   });
 
   it.each([
-    "http://api.example/v1",
     "ftp://api.example/v1",
     "https://user:password@api.example/v1",
     "https://api.example/v1?token=secret",
@@ -374,6 +439,36 @@ describe("ChatExaone", () => {
   it.each(["localhost", "127.0.0.1", "[::1]"])("allows loopback HTTP for local test servers: %s", (host) => {
     const model = new ChatExaone({ apiKey: "fixture-key", baseUrl: `http://${host}:8000/v1` });
     expect(model.baseUrl).toBe(`http://${host}:8000/v1`);
+  });
+
+  it("sends remote HTTP requests to the supplied endpoint", async () => {
+    const fetcher = mockFetch([completion({ content: "ok" })]);
+    const model = new ChatExaone({ apiKey: "synthetic", baseUrl: "http://server.example/v1", fetch: fetcher });
+    await model.invoke("Hi");
+    const [url, init] = vi.mocked(fetcher).mock.calls[0]!;
+    expect(url).toBe("http://server.example/v1/chat/completions");
+    expect(new Headers(init?.headers).get("authorization")).toBe("Bearer synthetic");
+  });
+
+  it.each(["k-exaone_v2.5", "custom-model"])("forwards maxTokens for %s without assuming a server limit", async (model) => {
+    const fetcher = mockFetch([completion({ content: "ok" })]);
+    await new ChatExaone({ apiKey: "synthetic", model, baseUrl: "http://server.example/v1", maxTokens: 524_289, fetch: fetcher }).invoke("Hi");
+    expect(requestBody(fetcher).max_tokens).toBe(524_289);
+  });
+
+  it.each(["none", "minimal", "xhigh", 0.5])("forwards reasoning effort %s without changing thinking", async (reasoningEffort) => {
+    for (const enableThinking of [undefined, false, true]) {
+      const fetcher = mockFetch([completion({ content: "ok" })]);
+      await new ChatExaone({ apiKey: "synthetic", model: "custom-model", baseUrl: "http://server.example/v1", reasoningEffort, ...(enableThinking === undefined ? {} : { enableThinking }), topK: 0, fetch: fetcher }).invoke("Hi");
+      const body = requestBody(fetcher);
+      expect(body).toMatchObject({ reasoning_effort: reasoningEffort, top_k: 0 });
+      if (enableThinking === undefined) expect(body.chat_template_kwargs).not.toHaveProperty("enable_thinking");
+      else expect(body.chat_template_kwargs).toHaveProperty("enable_thinking", enableThinking);
+    }
+  });
+
+  it("retains the hosted default context limit", () => {
+    expect(() => new ChatExaone({ apiKey: "synthetic", maxTokens: 524_289 })).toThrow(/context limit|cannot exceed/);
   });
 
   it("keeps the API key out of model inspection and API errors", async () => {
@@ -521,16 +616,21 @@ describe("ChatExaone", () => {
     });
   });
 
-  it("uses a refusal when ordinary content is whitespace only and preserves refusal metadata", async () => {
+  it.each(["v0", "v1"] as const)("keeps %s refusal separate from content and usable in history", async (outputVersion) => {
     const fetcher = mockFetch([
       completion({ role: "assistant", content: "\n\n", refusal: "I cannot help with that request." }),
+      completion({ role: "assistant", content: "Done" }),
     ]);
-    const model = new ChatExaone({ apiKey: "fixture-key", fetch: fetcher });
+    const model = new ChatExaone({ apiKey: "fixture-key", fetch: fetcher, outputVersion });
 
     const result = await model.invoke("Request");
 
-    expect(result.content).toBe("I cannot help with that request.");
     expect(result.additional_kwargs).toMatchObject({ refusal: "I cannot help with that request." });
+    if (outputVersion === "v1") {
+      expect(result.content).toEqual(expect.arrayContaining([expect.objectContaining({ type: "refusal", refusal: "I cannot help with that request." })]));
+    } else expect(result.content).toBe("\n\n");
+    await model.invoke([result]);
+    expect(requestBody(fetcher).messages).toMatchObject([{ role: "assistant", content: "I cannot help with that request." }]);
   });
 
   it("round-trips tool calls and tool results", async () => {
@@ -1000,19 +1100,131 @@ describe("ChatExaone", () => {
     expect(message.tool_calls).toEqual([{ id: "call-1", name: "lookup", args: {}, type: "tool_call" }]);
   });
 
-  it("uses a streamed refusal when the corresponding content is whitespace only", async () => {
+  it.each(["v0", "v1"] as const)("preserves %s tool calls when reasoning arrives between fragments", async (outputVersion) => {
+    const fetcher = mockFetch([sseResponse([
+      { choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: "call-1", function: { name: "lookup", arguments: '{"x":' } }] } }] },
+      { choices: [{ index: 0, delta: { reasoning_content: "Plan" } }] },
+      { choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: "2}" } }] }, finish_reason: "tool_calls" }] },
+    ])]);
+    const stream = new ChatExaone({ apiKey: "fixture-key", fetch: fetcher, outputVersion }).streamEvents("Question");
+    await expect(stream.reasoning).resolves.toBe("Plan");
+    const message = await stream;
+    expect(message.tool_calls).toEqual([{ id: "call-1", name: "lookup", args: { x: 2 }, type: "tool_call" }]);
+    expect(message.invalid_tool_calls).toEqual([]);
+    if (!Array.isArray(message.content)) throw new Error("Expected content blocks.");
+    expect(message.content.filter((block) => typeof block !== "string" && block.type === "invalid_tool_call")).toEqual([]);
+  });
+
+  it.each(["v0", "v1"] as const)("preserves parallel %s tool calls without reasoning in typed stream events", async (outputVersion) => {
+    const fetcher = mockFetch([sseResponse([
+      { choices: [{ index: 0, delta: { content: "Calling", tool_calls: [
+        { index: 0, id: "call-1", function: { name: "first", arguments: '{"x":' } },
+        { index: 1, id: "call-2", function: { name: "second", arguments: '{"y":' } },
+      ] } }] },
+      { choices: [{ index: 0, delta: { tool_calls: [
+        { index: 1, function: { arguments: "3}" } },
+        { index: 0, function: { arguments: "2}" } },
+      ] }, finish_reason: "tool_calls" }] },
+    ])]);
+    const stream = new ChatExaone({ apiKey: "fixture-key", fetch: fetcher, outputVersion }).streamEvents("Question");
+    await expect(stream.text).resolves.toBe("Calling");
+    const message = await stream;
+    expect(message.tool_calls).toEqual([
+      { id: "call-1", name: "first", args: { x: 2 }, type: "tool_call" },
+      { id: "call-2", name: "second", args: { y: 3 }, type: "tool_call" },
+    ]);
+    expect(message.invalid_tool_calls).toEqual([]);
+    if (!Array.isArray(message.content)) throw new Error("Expected content blocks.");
+    expect(message.content.filter((block) => typeof block !== "string" && block.type === "invalid_tool_call")).toEqual([]);
+  });
+
+  it.each(["v0", "v1"] as const)("preserves %s text without reasoning in typed stream events", async (outputVersion) => {
+    const fetcher = mockFetch([sseResponse([
+      { choices: [{ index: 0, delta: { content: "Hello " } }] },
+      { choices: [{ index: 0, delta: { content: "there" }, finish_reason: "stop" }] },
+    ])]);
+    const stream = new ChatExaone({ apiKey: "fixture-key", fetch: fetcher, outputVersion }).streamEvents("Question");
+    await expect(stream.text).resolves.toBe("Hello there");
+    expect((await stream).content).toEqual([expect.objectContaining({ type: "text", text: "Hello there" })]);
+  });
+
+  it.each(["v0", "v1"] as const)("keeps streamed %s refusal separate from later content", async (outputVersion) => {
     const fetcher = mockFetch([
       sseResponse([
-        { choices: [{ index: 0, delta: { content: "\n\n", refusal: "I cannot help with that request." } }] },
+        { choices: [{ index: 0, delta: { refusal: "I cannot help with that request." } }] },
+        { choices: [{ index: 0, delta: { content: "Answer" }, finish_reason: "stop" }] },
       ]),
     ]);
-    const model = new ChatExaone({ apiKey: "fixture-key", fetch: fetcher });
+    const model = new ChatExaone({ apiKey: "fixture-key", fetch: fetcher, outputVersion });
     const chunks = [];
     for await (const chunk of await model.stream("Request")) chunks.push(chunk);
     const final = chunks.reduce((message, chunk) => message.concat(chunk));
 
-    expect(final.content).toBe("I cannot help with that request.");
     expect(final.additional_kwargs.refusal).toBe("I cannot help with that request.");
+    if (outputVersion === "v1") {
+      expect(final.content).toEqual(expect.arrayContaining([
+        expect.objectContaining({ type: "refusal", refusal: "I cannot help with that request." }),
+        expect.objectContaining({ type: "text", text: "Answer" }),
+      ]));
+    } else expect(final.content).toBe("Answer");
+  });
+
+  it("merges v1 refusal fragments without losing reasoning or text blocks", async () => {
+    const fetcher = mockFetch([sseResponse([
+      { choices: [{ index: 0, delta: { reasoning_content: "Plan", refusal: "No " } }] },
+      { choices: [{ index: 0, delta: { content: "Answer", refusal: "thanks" }, finish_reason: "stop" }] },
+    ])]);
+    const model = new ChatExaone({ apiKey: "fixture-key", fetch: fetcher, outputVersion: "v1" });
+    const chunks = [];
+    for await (const chunk of await model.stream("hello")) chunks.push(chunk);
+    const result = chunks.reduce((combined, chunk) => combined.concat(chunk));
+    expect(result.additional_kwargs.refusal).toBe("No thanks");
+    expect(result.content).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "refusal", refusal: "No thanks" }),
+      expect.objectContaining({ type: "reasoning", reasoning: "Plan" }),
+      expect.objectContaining({ type: "text", text: "Answer" }),
+    ]));
+  });
+
+  it("does not restore a removed v1 refusal block from metadata", async () => {
+    const fetcher = mockFetch([
+      completion({ content: "", refusal: "No thanks" }),
+      completion({ content: "Done" }),
+    ]);
+    const model = new ChatExaone({ apiKey: "fixture-key", fetch: fetcher, outputVersion: "v1" });
+    const message = await model.invoke("Hello");
+    if (!Array.isArray(message.content)) throw new Error("Expected standard v1 content blocks.");
+    message.content = message.content.filter((block) => typeof block === "string" || block.type !== "refusal");
+    await model.invoke([message]);
+    expect(message.additional_kwargs.refusal).toBe("No thanks");
+    expect(requestBody(fetcher).messages).toMatchObject([{ role: "assistant", content: "" }]);
+  });
+
+  it.each(["v0", "v1"] as const)("exposes %s refusal separately through typed stream events", async (outputVersion) => {
+    const fetcher = mockFetch([sseResponse([
+      { choices: [{ index: 0, delta: { refusal: "No " } }] },
+      { choices: [{ index: 0, delta: { refusal: "thanks" } }] },
+      { choices: [{ index: 0, delta: { content: "Answer" }, finish_reason: "stop" }] },
+    ])]);
+    const model = new ChatExaone({ apiKey: "fixture-key", fetch: fetcher, outputVersion });
+    const stream = model.streamEvents("Question");
+    await expect(stream.text).resolves.toBe("Answer");
+    const message = await stream;
+    expect(message.content).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "refusal", refusal: "No thanks" }),
+      expect.objectContaining({ type: "text", text: "Answer" }),
+    ]));
+  });
+
+  it.each(["v0", "v1"] as const)("keeps %s refusal and fragmented tool calls separate in typed stream events", async (outputVersion) => {
+    const fetcher = mockFetch([sseResponse([
+      { choices: [{ index: 0, delta: { refusal: "No thanks", tool_calls: [{ index: 0, id: "call-1", function: { name: "lookup", arguments: '{"x":' } }] } }] },
+      { choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: "2}" } }] }, finish_reason: "tool_calls" }] },
+    ])]);
+    const stream = new ChatExaone({ apiKey: "fixture-key", fetch: fetcher, outputVersion }).streamEvents("Question");
+    const message = await stream;
+    expect(message.content).toEqual(expect.arrayContaining([expect.objectContaining({ type: "refusal", refusal: "No thanks" })]));
+    expect(message.tool_calls).toEqual([{ id: "call-1", name: "lookup", args: { x: 2 }, type: "tool_call" }]);
   });
 
   it("honors Retry-After without a short default timeout", async () => {

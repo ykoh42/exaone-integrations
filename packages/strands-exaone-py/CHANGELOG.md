@@ -2,6 +2,11 @@
 
 ## 0.1.3 (unreleased)
 
+- Limit tool-argument syntax completion to the hosted 2.5 endpoint.
+- Preserve `reasoning` responses from compatible self-hosted servers as Strands reasoning.
+- Handle the `stop` finish reason used by vLLM for named tool calls.
+- Accept HTTP endpoints supplied by the user.
+- Keep hosted model facts and request limits scoped to the hosted endpoint; forward custom server settings.
 - Preserve SPDX license metadata with the minimum supported build backend.
 
 - Restrict source and wheel distributions to intended package files and public examples.

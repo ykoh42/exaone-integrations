@@ -31,3 +31,26 @@ it('preserves success and error status for parallel tool calls with identical re
   expect(callback).toHaveBeenCalledTimes(2)
   await agent.shutdown()
 })
+
+it('returns a validation error for a null string argument without changing it', async () => {
+  const requests: Record<string, unknown>[] = []
+  const callback = vi.fn(() => 'unexpected')
+  const lookup = tool({ name: 'lookup', description: 'Synthetic lookup', inputSchema: z.object({ text: z.string() }), callback })
+  const fetcher: typeof fetch = async (_url, init) => {
+    requests.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
+    if (requests.length === 1) return response([
+      chunk({ tool_calls: [{ index: 0, id: 'call_1', type: 'function', function: { name: 'lookup', arguments: '{"text":null}' } }] }),
+      chunk({}, 'tool_calls'),
+    ])
+    return response([chunk({ content: 'done' }), chunk({}, 'stop')])
+  }
+  const agent = await createHarness({ model: new ExaoneModel({ apiKey: 'key', fetch: fetcher }), tools: [lookup], builtinTools: [], builtinPlugins: [], session: false, memory: false, skills: false, caching: false, printer: false, retryStrategy: null })
+  await agent.invoke('Use lookup')
+  const messages = requests[1]!.messages as Record<string, unknown>[]
+  const assistant = messages.find(message => message.role === 'assistant')!
+  const calls = assistant.tool_calls as { function: { arguments: string } }[]
+  expect(JSON.parse(calls[0]!.function.arguments)).toEqual({ text: null })
+  expect(messages.find(message => message.role === 'tool')?.content).toMatch(/^\[ERROR\]/)
+  expect(callback).not.toHaveBeenCalled()
+  await agent.shutdown()
+})

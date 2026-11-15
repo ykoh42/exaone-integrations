@@ -129,7 +129,7 @@ export class ChatExaone extends BaseChatModel<
     super({ ...baseParams, maxRetries: 0 });
 
     const resolvedApiKey = resolveApiKey(apiKey);
-    validateOptions({ maxRetries, baseRetryDelayMs, maxRetryDelayMs, timeout, model, maxTokens });
+    validateOptions({ maxRetries, baseRetryDelayMs, maxRetryDelayMs, timeout, model, maxTokens, baseUrl });
     if (profile !== undefined && !isRecord(profile)) {
       throw new TypeError("profile must be an object");
     }
@@ -167,7 +167,7 @@ export class ChatExaone extends BaseChatModel<
 
   override get profile(): ModelProfile {
     return this.profileOverride === undefined
-      ? getModelProfile(this.model)
+      ? (this.baseUrl === DEFAULT_BASE_URL ? getModelProfile(this.model) : {})
       : structuredClone(this.profileOverride);
   }
 
@@ -385,7 +385,7 @@ export class ChatExaone extends BaseChatModel<
     } else {
       delete body.stream_options;
     }
-    validateRequestBody(body, this.model);
+    validateRequestBody(body, this.baseUrl);
     return body;
   }
 
@@ -478,13 +478,15 @@ function setStandardContent(message: AIMessage<ExaoneMessageStructure> | AIMessa
   const reasoning = message.additional_kwargs.reasoning_content;
   if (typeof reasoning === "string" && reasoning) blocks.push({ type: "reasoning", reasoning, index: 1 });
   if (typeof message.content === "string" && message.content) blocks.push({ type: "text", text: message.content, index: 0 });
+  const refusal = message.additional_kwargs.refusal;
+  if (typeof refusal === "string" && refusal) blocks.push({ type: "refusal", refusal, index: 2 });
   if (AIMessageChunk.isInstance(message) && message.tool_call_chunks?.length) {
     for (const call of message.tool_call_chunks) {
-      blocks.push({ ...call, type: "tool_call_chunk", index: (call.index ?? 0) + 2 });
+      blocks.push({ ...call, type: "tool_call_chunk", index: (call.index ?? 0) + 3 });
     }
   } else {
     for (const [index, call] of (message.tool_calls ?? []).entries()) {
-      blocks.push({ ...call, type: "tool_call", index: index + 2 });
+      blocks.push({ ...call, type: "tool_call", index: index + 3 });
     }
   }
   message.content = blocks as unknown as AIMessageChunk<ExaoneMessageStructure>["content"];
@@ -499,7 +501,7 @@ function standardStreamChunk(chunk: ChatGenerationChunk): ChatGenerationChunk {
 async function* exposeReasoningContentBlocks(
   chunks: AsyncIterable<ChatGenerationChunk>
 ): AsyncGenerator<ChatGenerationChunk> {
-  const state = { reasoningBlockStarted: false, textBlockStarted: false };
+  const state = { reasoningBlockStarted: false, textBlockStarted: false, refusal: "" };
 
   for await (const chunk of chunks) {
     const message = chunk.message;
@@ -520,19 +522,30 @@ async function* exposeReasoningContentBlocks(
 
 type ReasoningEventBlock =
   | { type: "reasoning"; reasoning: string; index: number }
+  | { type: "refusal"; refusal: string; index: number }
   | { type: "text"; text: string; index: number };
 
 function reasoningEventContent(
   message: AIMessageChunk<ExaoneMessageStructure>,
-  state: { reasoningBlockStarted: boolean; textBlockStarted: boolean }
+  state: { reasoningBlockStarted: boolean; textBlockStarted: boolean; refusal: string }
 ): ReasoningEventBlock[] | undefined {
   const reasoning = message.additional_kwargs.reasoning_content;
-  const text = typeof message.content === "string" ? message.content : "";
+  const text = typeof message.content === "string" ? message.content : message.content
+    .filter((part) => typeof part !== "string" && part.type === "text")
+    .map((part) => typeof part === "object" && "text" in part && typeof part.text === "string" ? part.text : "")
+    .join("");
+  const refusal = message.additional_kwargs.refusal;
   const hasReasoning = typeof reasoning === "string" && reasoning.length > 0;
-  if (!hasReasoning && (!state.reasoningBlockStarted || text.length === 0)) return undefined;
+  const hasRefusal = typeof refusal === "string" && refusal.length > 0;
+  const hasToolChunks = (message.tool_call_chunks?.length ?? 0) > 0;
+  // Tool chunks need stable, separate indices even before reasoning appears. v1 also
+  // includes them in content, so rebuild content without duplicating those chunks.
+  const hasStandardText = message.response_metadata.output_version === "v1" && text.length > 0;
+  if (!hasReasoning && !hasRefusal && !hasToolChunks && !hasStandardText &&
+      (!(state.reasoningBlockStarted || state.refusal) || !text)) return undefined;
 
   const content: ReasoningEventBlock[] = [];
-  if (!state.textBlockStarted && (hasReasoning || text.length > 0)) {
+  if (!state.textBlockStarted && (hasReasoning || hasRefusal || text.length > 0)) {
     content.push({ type: "text", text: "", index: 0 });
     state.textBlockStarted = true;
   }
@@ -540,6 +553,10 @@ function reasoningEventContent(
   if (hasReasoning) {
     content.push({ type: "reasoning", reasoning, index: 1 });
     state.reasoningBlockStarted = true;
+  }
+  if (hasRefusal) {
+    state.refusal += refusal;
+    content.push({ type: "refusal", refusal: state.refusal, index: 2 });
   }
   return content;
 }
@@ -559,7 +576,7 @@ function chunkWithContentBlocks(
     name: message.name,
     id: message.id,
     response_metadata: message.response_metadata,
-    tool_call_chunks: message.tool_call_chunks,
+    tool_call_chunks: message.tool_call_chunks?.map((call) => ({ ...call, index: (call.index ?? 0) + 3 })),
   });
   if (message.usage_metadata !== undefined) eventMessage.usage_metadata = message.usage_metadata;
 
@@ -599,25 +616,23 @@ function createStreamGenerationChunk(
   headers: Headers
 ): ChatGenerationChunk {
   const delta = choice.delta ?? {};
-  for (const field of ["content", "reasoning_content", "refusal"] as const) {
+  for (const field of ["content", "reasoning_content", "reasoning", "refusal"] as const) {
     if (delta[field] != null && typeof delta[field] !== "string") {
       throw new Error(`EXAONE stream delta ${field} must be text.`);
     }
   }
   const content = typeof delta.content === "string" ? delta.content : "";
-  const refusal = typeof delta.refusal === "string" ? delta.refusal : undefined;
-  const visibleContent = content.trim() === "" && refusal ? refusal : content;
   const additional_kwargs = streamAdditionalKwargs(delta);
   const toolCallChunks = streamToolCallChunks(delta);
   const message = new AIMessageChunk<ExaoneMessageStructure>({
-    content: visibleContent,
+    content,
     ...(Object.keys(additional_kwargs).length === 0 ? {} : { additional_kwargs }),
     ...(toolCallChunks.length === 0 ? {} : { tool_call_chunks: toolCallChunks }),
     response_metadata: responseMetadata(payload, choice, headers),
   });
   const generationInfo = streamGenerationInfo(choice);
   return new ChatGenerationChunk({
-    text: visibleContent,
+    text: content,
     message,
     ...(Object.keys(generationInfo).length === 0 ? {} : { generationInfo }),
   });
@@ -625,7 +640,8 @@ function createStreamGenerationChunk(
 
 function streamAdditionalKwargs(delta: Record<string, unknown>): Record<string, unknown> {
   const additional: Record<string, unknown> = {};
-  if (typeof delta.reasoning_content === "string") additional.reasoning_content = delta.reasoning_content;
+  const reasoning = responseReasoning(delta, "stream delta");
+  if (reasoning !== undefined) additional.reasoning_content = reasoning;
   if (typeof delta.refusal === "string") additional.refusal = delta.refusal;
   if (isRecord(delta.function_call)) additional.function_call = delta.function_call;
   return additional;
@@ -719,13 +735,16 @@ function buildStreamOptions(
   };
 }
 
-function validateRequestBody(body: Record<string, unknown>, model: string): void {
+function validateRequestBody(body: Record<string, unknown>, baseUrl: string): void {
+  if (typeof body.reasoning_effort === "number" && !Number.isFinite(body.reasoning_effort)) {
+    throw new TypeError("reasoning_effort must be finite.");
+  }
   const maxTokens = body.max_tokens;
   if (maxTokens !== undefined) {
     if (typeof maxTokens !== "number" || !Number.isInteger(maxTokens) || maxTokens < 0) {
       throw new RangeError("max_tokens must be a non-negative integer.");
     }
-    if (model === DEFAULT_MODEL && maxTokens > MAX_CONTEXT_TOKENS) {
+    if (body.model === DEFAULT_MODEL && baseUrl === DEFAULT_BASE_URL && maxTokens > MAX_CONTEXT_TOKENS) {
       throw new RangeError(`max_tokens cannot exceed ${MAX_CONTEXT_TOKENS} for ${DEFAULT_MODEL}.`);
     }
   }
@@ -751,6 +770,7 @@ function validateOptions(options: {
   timeout: number | undefined;
   model: string;
   maxTokens: number | undefined;
+  baseUrl: string;
 }): void {
   if (!Number.isInteger(options.maxRetries) || options.maxRetries < 0) {
     throw new RangeError("maxRetries must be a non-negative integer.");
@@ -764,17 +784,23 @@ function validateOptions(options: {
   if (options.timeout !== undefined && (!Number.isFinite(options.timeout) || options.timeout < 0)) {
     throw new RangeError("timeout must be finite and non-negative.");
   }
-  if (
-    options.model === DEFAULT_MODEL &&
-    options.maxTokens !== undefined &&
-    options.maxTokens > MAX_CONTEXT_TOKENS
-  ) {
+  if (options.model === DEFAULT_MODEL && options.baseUrl.replace(/\/+$/, "") === DEFAULT_BASE_URL &&
+      options.maxTokens !== undefined && options.maxTokens > MAX_CONTEXT_TOKENS) {
     throw new RangeError(`maxTokens cannot exceed ${MAX_CONTEXT_TOKENS} for ${DEFAULT_MODEL}.`);
   }
 }
 
+function responseReasoning(source: Record<string, unknown>, context: string): string | undefined {
+  const original = typeof source.reasoning_content === "string" ? source.reasoning_content : undefined;
+  const alternate = typeof source.reasoning === "string" ? source.reasoning : undefined;
+  if (original && alternate && original !== alternate) {
+    throw new Error(`EXAONE ${context} has conflicting reasoning and reasoning_content fields.`);
+  }
+  return original || alternate || original;
+}
+
 function validateAssistantTextFields(source: Record<string, unknown>): void {
-  for (const field of ["content", "reasoning_content", "refusal"] as const) {
+  for (const field of ["content", "reasoning_content", "reasoning", "refusal"] as const) {
     if (source[field] != null && typeof source[field] !== "string") {
       throw new Error(`EXAONE assistant ${field} must be a string.`);
     }
@@ -790,9 +816,9 @@ function createAssistantMessage(
   validateAssistantTextFields(source);
   const refusal = typeof source.refusal === "string" ? source.refusal : undefined;
   const content = typeof source.content === "string" ? source.content : "";
-  const visibleContent = content.trim() === "" && refusal ? refusal : content;
   const additional_kwargs: Record<string, unknown> = {};
-  if (typeof source.reasoning_content === "string") additional_kwargs.reasoning_content = source.reasoning_content;
+  const reasoning = responseReasoning(source, "assistant");
+  if (reasoning !== undefined) additional_kwargs.reasoning_content = reasoning;
   if (refusal !== undefined) additional_kwargs.refusal = refusal;
   if (source.function_call !== undefined) additional_kwargs.function_call = source.function_call;
   for (const field of ["annotations", "audio"] as const) {
@@ -804,7 +830,7 @@ function createAssistantMessage(
   const metadata = responseMetadata(response, choice, headers);
   if (rawToolCalls.length) metadata.tool_calls = rawToolCalls;
   const message = new AIMessage<ExaoneMessageStructure>({
-    content: visibleContent,
+    content,
     additional_kwargs,
     tool_calls,
     ...(invalid_tool_calls.length === 0 ? {} : { invalid_tool_calls }),
@@ -1031,9 +1057,8 @@ function normalizeBaseUrl(value: string): string {
   } catch {
     throw new TypeError("EXAONE baseUrl must be an absolute URL.");
   }
-  const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
-  if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) {
-    throw new TypeError("EXAONE baseUrl must use HTTPS, except for loopback HTTP test servers.");
+  if (url.protocol !== "https:" && url.protocol !== "http:") {
+    throw new TypeError("EXAONE baseUrl must be an absolute HTTP or HTTPS URL.");
   }
   if (url.username || url.password) throw new TypeError("EXAONE baseUrl must not include URL credentials.");
   if (url.search || url.hash) throw new TypeError("EXAONE baseUrl must not include a query or fragment.");

@@ -16,7 +16,6 @@ from langchain_exaone import ChatEXAONE, ExaoneAPIError
 @pytest.mark.parametrize(
     "base_url",
     [
-        "http://api.example/v1",
         "ftp://api.example/v1",
         "https://user:password@api.example/v1",
         "https://api.example/v1?token=secret",
@@ -33,6 +32,80 @@ def test_allows_loopback_http_for_local_test_servers(hostname: str) -> None:
     model = ChatEXAONE(api_key="synthetic-key", base_url=f"http://{hostname}:8000/v1")
 
     assert model.base_url == f"http://{hostname}:8000/v1"
+
+
+def test_remote_http_sends_request_to_supplied_endpoint() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json=_completion())
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        model = ChatEXAONE(api_key="synthetic", base_url="http://server.example/v1", http_client=client)
+        model.invoke("Hi")
+    assert len(requests) == 1
+    assert str(requests[0].url) == "http://server.example/v1/chat/completions"
+    assert requests[0].headers["authorization"] == "Bearer synthetic"
+
+
+@pytest.mark.parametrize("model_name", ["k-exaone_v2.5", "custom-model"])
+def test_forwards_token_limit_without_assuming_the_server_limit(model_name: str) -> None:
+    requests: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json=_completion())
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        ChatEXAONE(
+            api_key="synthetic",
+            model=model_name,
+            base_url="http://server.example/v1",
+            max_tokens=524_289,
+            http_client=client,
+        ).invoke("Hi")
+    assert requests[0]["max_tokens"] == 524_289
+
+
+@pytest.mark.parametrize("effort", ["none", "minimal", "xhigh", 0.5])
+@pytest.mark.parametrize("thinking", [None, False, True])
+def test_forwards_endpoint_reasoning_effort_without_changing_thinking(
+    effort: str | float, thinking: bool | None
+) -> None:
+    requests: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json=_completion())
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        ChatEXAONE(
+            api_key="synthetic",
+            model="custom-model",
+            base_url="http://server.example/v1",
+            reasoning_effort=effort,
+            top_k=0,
+            chat_template_kwargs={} if thinking is None else {"enable_thinking": thinking},
+            http_client=client,
+        ).invoke("Hi")
+    assert requests[0]["reasoning_effort"] == effort
+    assert requests[0]["top_k"] == 0
+    template = requests[0]["chat_template_kwargs"]
+    if thinking is None:
+        assert "enable_thinking" not in template
+    else:
+        assert template["enable_thinking"] is thinking
+
+
+def test_hosted_default_retains_known_request_limits() -> None:
+    with pytest.raises(ValidationError, match="context limit"):
+        ChatEXAONE(api_key="synthetic", max_tokens=524_289)
+    with pytest.raises(ValidationError, match="top_k"):
+        ChatEXAONE(api_key="synthetic", top_k=0)
+    with pytest.raises(ValidationError, match="reasoning_effort"):
+        ChatEXAONE(api_key="synthetic", reasoning_effort="xhigh")
+    assert ChatEXAONE(api_key="synthetic", reasoning_effort="medium").reasoning_effort == "medium"
 
 
 def _completion(*, content: str = "4", reasoning: str = "Let me calculate.") -> dict:
@@ -57,6 +130,160 @@ def _completion(*, content: str = "4", reasoning: str = "Let me calculate.") -> 
             "reasoning_tokens": 3,
         },
     }
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("output_version", ["v0", "v1"])
+@pytest.mark.asyncio
+async def test_vllm_reasoning_and_tool_history_round_trip(asynchronous: bool, output_version: str) -> None:
+    requests: list[dict[str, Any]] = []
+    tool_call = {"id": "call-1", "type": "function", "function": {"name": "lookup", "arguments": "{}"}}
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        requests.append(body)
+        payload = _completion(content="Using tool")
+        message = payload["choices"][0]["message"]
+        message.pop("reasoning_content")
+        message.update(reasoning="Plan", tool_calls=[tool_call])
+        return httpx.Response(200, json=payload)
+
+    transport = httpx.MockTransport(respond)
+    with httpx.Client(transport=transport) as client:
+        async with httpx.AsyncClient(transport=transport) as async_client:
+            model = ChatEXAONE(
+                api_key="synthetic-key",
+                http_client=client,
+                http_async_client=async_client,
+                output_version=output_version,
+            )
+            if asynchronous:
+                first = await model.ainvoke("Use lookup")
+                await model.ainvoke([first, ToolMessage("result", tool_call_id="call-1")])
+            else:
+                first = model.invoke("Use lookup")
+                model.invoke([first, ToolMessage("result", tool_call_id="call-1")])
+
+    assert first.additional_kwargs["reasoning_content"] == "Plan"
+    if output_version == "v1":
+        assert any(block.get("type") == "reasoning" and block.get("reasoning") == "Plan" for block in first.content)
+    assert requests[1]["messages"][0]["reasoning_content"] == "Plan"
+    assert requests[1]["messages"][0]["tool_calls"] == [tool_call]
+    assert requests[1]["messages"][1]["tool_call_id"] == "call-1"
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("output_version", ["v0", "v1"])
+@pytest.mark.asyncio
+async def test_vllm_streamed_reasoning_with_tools_round_trips(asynchronous: bool, output_version: str) -> None:
+    # The tool fragments mirror synthetic output from the model-card SGLang qwen3_coder parser.
+    frames = [
+        {"choices": [{"index": 0, "delta": {"reasoning": "Plan ", "reasoning_content": "Plan "}}]},
+        {"choices": [{"index": 0, "delta": {"reasoning": "more", "reasoning_content": ""}}]},
+        {
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call-1",
+                                "type": "function",
+                                "function": {"name": "lookup"},
+                            }
+                        ]
+                    },
+                }
+            ]
+        },
+        {"choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "function": {"arguments": "{"}}]}}]},
+        {"choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "function": {"arguments": "}"}}]}}]},
+        {"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]},
+    ]
+    stream = "".join(f"data: {json.dumps(frame)}\n\n" for frame in frames) + "data: [DONE]\n\n"
+    requests: list[dict[str, Any]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        requests.append(body)
+        return httpx.Response(200, text=stream) if body["stream"] else httpx.Response(200, json=_completion())
+
+    transport = httpx.MockTransport(respond)
+    with httpx.Client(transport=transport) as client:
+        async with httpx.AsyncClient(transport=transport) as async_client:
+            model = ChatEXAONE(
+                api_key="synthetic-key",
+                http_client=client,
+                http_async_client=async_client,
+                output_version=output_version,
+            )
+            chunks = (
+                [chunk async for chunk in model.astream("Use lookup")]
+                if asynchronous
+                else list(model.stream("Use lookup"))
+            )
+            combined = chunks[0]
+            for chunk in chunks[1:]:
+                combined += chunk
+            if asynchronous:
+                await model.ainvoke([combined, ToolMessage("result", tool_call_id="call-1")])
+            else:
+                model.invoke([combined, ToolMessage("result", tool_call_id="call-1")])
+
+    assert combined.additional_kwargs["reasoning_content"] == "Plan more"
+    if output_version == "v1":
+        assert any(
+            block.get("type") == "reasoning" and block.get("reasoning") == "Plan more" for block in combined.content
+        )
+    assert requests[1]["messages"][0]["reasoning_content"] == "Plan more"
+    assert requests[1]["messages"][0]["tool_calls"][0]["id"] == "call-1"
+
+
+@pytest.mark.parametrize(
+    "values,expected",
+    [
+        ({"reasoning": "alternate"}, "alternate"),
+        ({"reasoning_content": "original"}, "original"),
+        ({"reasoning": "same", "reasoning_content": "same"}, "same"),
+        ({"reasoning": "alternate", "reasoning_content": ""}, "alternate"),
+        ({"reasoning": "", "reasoning_content": "original"}, "original"),
+        ({"reasoning": None, "reasoning_content": None}, None),
+    ],
+)
+def test_reasoning_aliases_in_nonstream_response(values: dict[str, Any], expected: str | None) -> None:
+    payload = _completion()
+    message = payload["choices"][0]["message"]
+    message.pop("reasoning_content")
+    message.update(values)
+    with httpx.Client(transport=httpx.MockTransport(lambda _: httpx.Response(200, json=payload))) as client:
+        result = ChatEXAONE(api_key="synthetic-key", http_client=client).invoke("question")
+    assert result.additional_kwargs.get("reasoning_content") == expected
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize(
+    "fields,error",
+    [
+        ({"reasoning": ["invalid"]}, "reasoning must be a string"),
+        ({"reasoning_content": ["invalid"], "reasoning": "valid"}, "reasoning_content must be a string"),
+        ({"reasoning_content": "first", "reasoning": "second"}, "conflicting reasoning"),
+    ],
+)
+def test_rejects_invalid_or_conflicting_reasoning_aliases(streaming: bool, fields: dict[str, Any], error: str) -> None:
+    if streaming:
+        frame = {"choices": [{"index": 0, "delta": fields}]}
+        response = httpx.Response(200, text=f"data: {json.dumps(frame)}\n\ndata: [DONE]\n\n")
+    else:
+        payload = _completion()
+        message = payload["choices"][0]["message"]
+        message.pop("reasoning_content")
+        message.update(fields)
+        response = httpx.Response(200, json=payload)
+    with httpx.Client(transport=httpx.MockTransport(lambda _: response)) as client:
+        model = ChatEXAONE(api_key="synthetic-key", http_client=client)
+        with pytest.raises(ValueError, match=error):
+            list(model.stream("question")) if streaming else model.invoke("question")
 
 
 @pytest.mark.parametrize("asynchronous", [False, True])
@@ -512,7 +739,7 @@ def test_v1_output_can_be_reused_as_conversation_history() -> None:
     }
 
 
-def test_v1_reasoning_metadata_fallback_can_be_removed_explicitly() -> None:
+def test_v1_removed_reasoning_is_not_restored_from_metadata() -> None:
     requests: list[dict[str, Any]] = []
 
     def respond(request: httpx.Request) -> httpx.Response:
@@ -525,11 +752,8 @@ def test_v1_reasoning_metadata_fallback_can_be_removed_explicitly() -> None:
         assert isinstance(message.content, list)
         message.content = [block for block in message.content if block.get("type") != "reasoning"]
         model.invoke([message])
-        message.additional_kwargs.pop("reasoning_content")
-        model.invoke([message])
-
-    assert requests[1]["messages"][0]["reasoning_content"] == "Original reasoning"
-    assert "reasoning_content" not in requests[2]["messages"][0]
+    assert message.additional_kwargs["reasoning_content"] == "Original reasoning"
+    assert "reasoning_content" not in requests[1]["messages"][0]
 
 
 def test_v1_content_blocks_alone_can_supply_assistant_tool_calls() -> None:
@@ -734,17 +958,30 @@ async def test_stream_rejects_malformed_tool_call_shapes(
 
 
 @pytest.mark.parametrize("content", [" \n\t", None])
-def test_refusal_replaces_empty_content_and_keeps_metadata(content: str | None) -> None:
+@pytest.mark.parametrize("output_version", ["v0", "v1"])
+def test_refusal_is_separate_from_content_and_available_in_history(content: str | None, output_version: str) -> None:
     payload = _completion(content="")
     payload["choices"][0]["message"]["content"] = content
     payload["choices"][0]["message"]["refusal"] = "This request is refused."
-    client = httpx.Client(transport=httpx.MockTransport(lambda _: httpx.Response(200, json=payload)))
+    requests = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json=payload)
+
+    client = httpx.Client(transport=httpx.MockTransport(respond))
     try:
-        response = ChatEXAONE(api_key="synthetic-key", http_client=client).invoke("hello")
+        model = ChatEXAONE(api_key="synthetic-key", http_client=client, output_version=output_version)
+        response = model.invoke("hello")
+        model.invoke([response])
     finally:
         client.close()
-    assert response.content == "This request is refused."
     assert response.additional_kwargs["refusal"] == "This request is refused."
+    if output_version == "v1":
+        assert {"type": "refusal", "refusal": "This request is refused."} in response.content
+    else:
+        assert response.content == (content or "")
+    assert requests[-1]["messages"][0]["content"] == "This request is refused."
 
 
 def test_streamed_tool_call_fragments_form_a_langchain_tool_call() -> None:
@@ -984,34 +1221,44 @@ def test_stream_preserves_reasoning_text_and_usage_chunks() -> None:
     assert any(chunk.usage_metadata == {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3} for chunk in chunks)
 
 
-def test_streamed_refusal_replaces_empty_text_and_keeps_refusal_metadata() -> None:
+@pytest.mark.parametrize("output_version", ["v0", "v1"])
+def test_streamed_refusal_and_text_are_separate(output_version: str) -> None:
     event = {
         "id": "refusal-stream",
         "model": "k-exaone_v2.5",
         "choices": [
             {
                 "index": 0,
-                "delta": {"content": " \n", "refusal": "This request is refused."},
-                "finish_reason": "stop",
+                "delta": {"refusal": "This request is refused."},
             }
         ],
     }
-    body = f"data: {json.dumps(event)}\n\ndata: [DONE]\n\n"
+    followup = {"choices": [{"index": 0, "delta": {"content": "Answer"}, "finish_reason": "stop"}]}
+    body = f"data: {json.dumps(event)}\n\ndata: {json.dumps(followup)}\n\ndata: [DONE]\n\n"
     client = httpx.Client(transport=httpx.MockTransport(lambda _: httpx.Response(200, content=body)))
     try:
-        chunks = list(ChatEXAONE(api_key="synthetic-key", http_client=client).stream("hello"))
+        chunks = list(
+            ChatEXAONE(api_key="synthetic-key", http_client=client, output_version=output_version).stream("hello")
+        )
     finally:
         client.close()
 
     final = chunks[0]
     for chunk in chunks[1:]:
         final = final + chunk
-    assert final.content == "This request is refused."
     assert final.additional_kwargs["refusal"] == "This request is refused."
+    if output_version == "v1":
+        assert any(
+            block.get("type") == "refusal" and block.get("refusal") == "This request is refused."
+            for block in final.content
+        )
+        assert any(block.get("type") == "text" and block.get("text") == "Answer" for block in final.content)
+    else:
+        assert final.content == "Answer"
 
 
 @pytest.mark.asyncio
-async def test_async_streamed_refusal_is_available_as_content_and_metadata() -> None:
+async def test_async_streamed_refusal_is_available_in_metadata() -> None:
     event = {
         "id": "async-refusal-stream",
         "model": "k-exaone_v2.5",
@@ -1035,8 +1282,43 @@ async def test_async_streamed_refusal_is_available_as_content_and_metadata() -> 
     final = chunks[0]
     for chunk in chunks[1:]:
         final = final + chunk
-    assert final.content == "This request is refused."
+    assert final.content == ""
     assert final.additional_kwargs["refusal"] == "This request is refused."
+
+
+def test_v1_streamed_refusal_fragments_merge_without_losing_other_blocks() -> None:
+    events = [
+        {"choices": [{"index": 0, "delta": {"reasoning_content": "Plan", "refusal": "No "}}]},
+        {"choices": [{"index": 0, "delta": {"refusal": "thanks", "content": "Answer"}, "finish_reason": "stop"}]},
+    ]
+    body = "".join(f"data: {json.dumps(event)}\n\n" for event in events) + "data: [DONE]\n\n"
+    with httpx.Client(transport=httpx.MockTransport(lambda _: httpx.Response(200, content=body))) as client:
+        chunks = list(ChatEXAONE(api_key="synthetic-key", http_client=client, output_version="v1").stream("hello"))
+    final = chunks[0]
+    for chunk in chunks[1:]:
+        final += chunk
+    assert final.additional_kwargs["refusal"] == "No thanks"
+    assert any(block.get("type") == "refusal" and block.get("refusal") == "No thanks" for block in final.content)
+    assert any(block.get("type") == "reasoning" and block.get("reasoning") == "Plan" for block in final.content)
+    assert any(block.get("type") == "text" and block.get("text") == "Answer" for block in final.content)
+
+
+def test_removed_v1_refusal_is_not_restored_from_metadata() -> None:
+    requests: list[dict[str, Any]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        payload = _completion(content="")
+        payload["choices"][0]["message"]["refusal"] = "No thanks"
+        return httpx.Response(200, json=payload)
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        model = ChatEXAONE(api_key="synthetic", http_client=client, output_version="v1")
+        message = model.invoke("hello")
+        message.content = [block for block in message.content if block.get("type") != "refusal"]
+        model.invoke([message])
+    assert message.additional_kwargs["refusal"] == "No thanks"
+    assert requests[-1]["messages"][0]["content"] == ""
 
 
 def test_stream_rejects_multiple_choices_instead_of_merging_them() -> None:

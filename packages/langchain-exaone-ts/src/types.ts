@@ -6,7 +6,7 @@ import type {
 import type { ToolDefinition } from "@langchain/core/language_models/base";
 import type { ModelProfile } from "@langchain/core/language_models/profile";
 
-export type ExaoneReasoningEffort = "low" | "medium" | "high" | "max";
+export type ExaoneReasoningEffort = string | number;
 
 /** Configuration for a LangChain chat model that calls the EXAONE API. */
 export interface ChatExaoneParams extends BaseChatModelParams {
@@ -14,7 +14,7 @@ export interface ChatExaoneParams extends BaseChatModelParams {
   profile?: ModelProfile;
   /** EXAONE API key. Defaults to the `EXAONE_API_KEY` environment variable. */
   apiKey?: string;
-  /** API base URL, including `/v1`. Remote URLs must use HTTPS. */
+  /** API base URL, including `/v1`. */
   baseUrl?: string;
   /** EXAONE model ID. Defaults to `k-exaone_v2.5`. */
   model?: string;

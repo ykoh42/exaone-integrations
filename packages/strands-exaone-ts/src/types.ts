@@ -6,7 +6,6 @@ export interface ExaoneModelConfig extends BaseModelConfig {
   apiKey?: string
   /**
    * API base URL, including /v1; defaults to https://api.exaone.ai/v1.
-   * Remote endpoints require HTTPS; loopback HTTP is allowed for tests.
    */
   baseURL?: string
   /** Deadline for attempts, retry waits, response reads, and stream consumption; custom fetch must honor abort. */
@@ -29,7 +28,7 @@ export interface ExaoneModelConfig extends BaseModelConfig {
   /** Adjusts how strongly repeated topics are penalized. */
   presencePenalty?: number
   /** Controls the EXAONE reasoning effort. */
-  reasoningEffort?: 'low' | 'medium' | 'high' | 'max'
+  reasoningEffort?: string | number
   /**
    * Ask EXAONE to retain earlier assistant reasoning in model input. Reasoning
    * present in conversation history is forwarded independently of this setting.

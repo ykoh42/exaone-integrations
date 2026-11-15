@@ -23,6 +23,7 @@ function textFromContent(message: BaseMessage, allowReasoning: boolean): {
 
   let text = "";
   let reasoning = "";
+  let refusal = "";
   for (const part of content) {
     if (typeof part === "string") {
       text += part;
@@ -32,13 +33,14 @@ function textFromContent(message: BaseMessage, allowReasoning: boolean): {
       text += part.text;
       continue;
     }
-    if (
-      allowReasoning &&
-      part.type === "reasoning" &&
-      "reasoning" in part &&
-      typeof part.reasoning === "string"
-    ) {
-      reasoning += part.reasoning;
+    const reasoningPart = assistantReasoning(part, allowReasoning);
+    if (reasoningPart !== undefined) {
+      reasoning += reasoningPart;
+      continue;
+    }
+    const refusalPart = assistantRefusal(part, allowReasoning);
+    if (refusalPart !== undefined) {
+      refusal += refusalPart;
       continue;
     }
     if (allowReasoning && isSupportedToolCallBlock(message, part)) continue;
@@ -46,7 +48,19 @@ function textFromContent(message: BaseMessage, allowReasoning: boolean): {
       `EXAONE Chat Completions accepts text content only; received '${part.type}'.`
     );
   }
-  return { text, reasoning };
+  return { text: textOrRefusal(text, refusal), reasoning };
+}
+
+function textOrRefusal(text: string, refusal: string): string {
+  return text.trim() ? text : refusal || text;
+}
+
+function assistantReasoning(part: Record<string, unknown>, allowReasoning: boolean): string | undefined {
+  return allowReasoning && part.type === "reasoning" && typeof part.reasoning === "string" ? part.reasoning : undefined;
+}
+
+function assistantRefusal(part: Record<string, unknown>, allowReasoning: boolean): string | undefined {
+  return allowReasoning && part.type === "refusal" && typeof part.refusal === "string" ? part.refusal : undefined;
 }
 
 function isSupportedToolCallBlock(message: BaseMessage, part: Record<string, unknown>): boolean {
@@ -187,7 +201,12 @@ function addAssistantMessageFields(message: BaseMessage, result: ExaoneRequestMe
   };
   const rawReasoning = assistantMessage.additional_kwargs?.reasoning_content;
   if (reasoning) result.reasoning_content = reasoning;
-  else if (typeof rawReasoning === "string") result.reasoning_content = rawReasoning;
+  else if (message.response_metadata?.output_version !== "v1" && typeof rawReasoning === "string") result.reasoning_content = rawReasoning;
+
+  const refusal = assistantMessage.additional_kwargs?.refusal;
+  if (message.response_metadata?.output_version !== "v1" && !result.content?.trim() && typeof refusal === "string") {
+    result.content = refusal;
+  }
 
   const legacyFunctionCall = assistantMessage.additional_kwargs?.function_call;
   if (isRecord(legacyFunctionCall)) result.function_call = legacyFunctionCall;

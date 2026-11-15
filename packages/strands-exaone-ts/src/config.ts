@@ -3,6 +3,11 @@ import { validateRetryConfig } from './retry.js'
 
 const MANAGED_PARAMS = new Set(['model', 'messages', 'stream', 'tools', 'tool_choice'])
 
+export function isHostedDefault(config: ExaoneModelConfig): boolean {
+  return (config.modelId ?? 'k-exaone_v2.5') === 'k-exaone_v2.5' &&
+    (config.baseURL ?? 'https://api.exaone.ai/v1').replace(/\/+$/, '') === 'https://api.exaone.ai/v1'
+}
+
 function validateFiniteRange(name: string, value: number | undefined, minimum: number, maximum?: number): void {
   if (value === undefined) return
   if (typeof value !== 'number' || !Number.isFinite(value) || value < minimum || (maximum !== undefined && value > maximum)) {
@@ -41,9 +46,8 @@ function validateBaseURL(value: string): void {
   } catch {
     throw new TypeError('baseURL must be an absolute URL')
   }
-  const loopback = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)
-  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && loopback)) {
-    throw new TypeError('baseURL must use HTTPS, except for loopback HTTP test servers')
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') {
+    throw new TypeError('baseURL must be an absolute HTTP or HTTPS URL')
   }
   if (url.username || url.password) throw new TypeError('baseURL must not include URL credentials')
   if (url.search || url.hash) throw new TypeError('baseURL must not include a query or fragment')
@@ -70,7 +74,7 @@ function validateLimits(config: ExaoneModelConfig): void {
   if (config.maxTokens !== undefined && (!Number.isInteger(config.maxTokens) || config.maxTokens < 0)) {
     throw new TypeError('maxTokens must be a non-negative integer')
   }
-  if ((config.modelId ?? 'k-exaone_v2.5') === 'k-exaone_v2.5' && (config.maxTokens ?? 0) > 524_288) {
+  if (isHostedDefault(config) && (config.maxTokens ?? 0) > 524_288) {
     throw new RangeError('maxTokens cannot exceed the EXAONE context limit of 524288')
   }
   if (config.contextWindowLimit !== undefined && (!Number.isInteger(config.contextWindowLimit) || config.contextWindowLimit <= 0)) {
@@ -90,8 +94,13 @@ function validateModelInfo(config: ExaoneModelConfig): void {
 }
 
 function validateReasoningEffort(config: ExaoneModelConfig): void {
-  if (config.reasoningEffort !== undefined && !['low', 'medium', 'high', 'max'].includes(config.reasoningEffort)) {
-    throw new TypeError('reasoningEffort must be one of low, medium, high, or max')
+  if (config.reasoningEffort !== undefined && typeof config.reasoningEffort !== 'string' &&
+      (typeof config.reasoningEffort !== 'number' || !Number.isFinite(config.reasoningEffort))) {
+    throw new TypeError('reasoningEffort must be a string or finite number')
+  }
+  if (config.reasoningEffort !== undefined && isHostedDefault(config) &&
+      (typeof config.reasoningEffort !== 'string' || !['low', 'medium', 'high', 'max'].includes(config.reasoningEffort))) {
+    throw new TypeError('reasoningEffort must be one of low, medium, high, or max for the EXAONE API')
   }
 }
 
@@ -117,8 +126,8 @@ function validateSampling(config: ExaoneModelConfig): void {
   validateFiniteRange('temperature', config.temperature, 0)
   validateFiniteRange('topP', config.topP, 0, 1)
   validateFiniteRange('presencePenalty', config.presencePenalty, -2, 2)
-  if (config.topK !== undefined && (!Number.isInteger(config.topK) || (config.topK !== -1 && config.topK < 1))) {
-    throw new TypeError('topK must be -1 or a positive integer')
+  if (config.topK !== undefined && (!Number.isInteger(config.topK) || config.topK < -1 || (config.topK === 0 && isHostedDefault(config)))) {
+    throw new TypeError('topK must be -1 or a positive integer for this endpoint')
   }
 }
 

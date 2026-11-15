@@ -53,6 +53,14 @@ describe('EXAONE model info', () => {
     expect(model.modelInfo.capabilities?.nativeStructuredOutput).toBe(true)
   })
 
+  it('does not infer hosted facts from the model alias at a custom endpoint', () => {
+    const model = new ExaoneModel({ baseURL: 'http://server.example/v1' })
+    expect(model.modelInfo.limits?.contextWindow).toBeUndefined()
+    expect(model.modelInfo.capabilities?.forcedToolChoice).toBeUndefined()
+    model.updateConfig({ modelInfo: { limits: { contextWindow: 4096 } } })
+    expect(model.modelInfo.limits?.contextWindow).toBe(4096)
+  })
+
   it('keeps caller context limits and model info precedence across model changes', () => {
     const unknown = new ExaoneModel({ modelId: 'unknown-model' })
     expect(unknown.modelInfo.limits?.contextWindow).toBeUndefined()

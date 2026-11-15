@@ -2,6 +2,10 @@
 
 ## 0.1.3 (unreleased)
 
+- Keep refusal metadata and v1 refusal blocks separate from answer text during streaming and ordinary responses.
+- Respect removal of reasoning blocks from LangChain v1 message history.
+- Preserve `reasoning` from compatible server responses and accept HTTP endpoints supplied by the user.
+- Keep hosted model facts and request limits scoped to the hosted endpoint; forward custom server settings.
 - Process CR-only stream event boundaries and completion markers without waiting for more data.
 - Reject non-text assistant content, reasoning, and refusal fields instead of discarding them.
 - Preserve assistant annotations and audio in additional kwargs, and retain incomplete streamed usage in response metadata.

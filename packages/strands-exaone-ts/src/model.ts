@@ -6,7 +6,7 @@
 import { Model, ModelError, ModelNetworkError, ModelThrottledError, ContextWindowOverflowError } from '@strands-agents/sdk'
 import type { Message, ModelInfo, ModelStreamEvent, StreamOptions, StopReason } from '@strands-agents/sdk'
 import { z } from 'zod'
-import { copyConfig, validateModelConfig } from './config.js'
+import { copyConfig, isHostedDefault, validateModelConfig } from './config.js'
 import { formatMessages } from './messages.js'
 import { redactMetadata, ResponseMetadataCollector } from './metadata.js'
 import { sendWithRetry } from './retry.js'
@@ -26,6 +26,7 @@ interface WireCall {
 interface WireMessage {
   content?: string | null
   reasoning_content?: string | null
+  reasoning?: string | null
   refusal?: string | null
   tool_calls?: WireCall[] | null
 }
@@ -374,6 +375,19 @@ function wireResponse(value: unknown): WireResponse {
   return value as WireResponse
 }
 
+/** Normalize the two compatible server fields without dropping conflicting data. */
+function reasoningText(message: WireMessage): string | undefined {
+  const content = message.reasoning_content
+  const reasoning = message.reasoning
+  if ((content != null && typeof content !== 'string') || (reasoning != null && typeof reasoning !== 'string')) {
+    throw new ModelError('EXAONE returned invalid reasoning content; expected a string')
+  }
+  if (content && reasoning && content !== reasoning) {
+    throw new ModelError('EXAONE returned conflicting reasoning and reasoning_content values')
+  }
+  return content || reasoning || undefined
+}
+
 /** Convert OpenAI-compatible deltas to non-overlapping Strands content blocks. */
 class EventMapper {
   private active: TextKind | undefined
@@ -384,7 +398,7 @@ class EventMapper {
   usage: Record<string, unknown> | undefined
   readonly responseMetadata = new ResponseMetadataCollector()
 
-  constructor(private readonly key: string) {}
+  constructor(private readonly key: string, private readonly namedToolChoice: boolean, private readonly allowToolRepair: boolean) {}
 
   private textEvents(kind: TextKind, value: unknown): ModelStreamEvent[] {
     if (value === null || value === undefined || value === '') return []
@@ -434,7 +448,7 @@ class EventMapper {
   private acceptChoice(choice: WireChoice, streaming: boolean): ModelStreamEvent[] {
     if ((choice.index ?? 0) !== 0) throw new ModelError('EXAONE returned multiple choices, which Strands cannot represent')
     const delta = choice.delta ?? choice.message ?? {}
-    const result = this.textEvents('reasoning', delta.reasoning_content)
+    const result = this.textEvents('reasoning', reasoningText(delta))
     this.acceptRefusal(delta.refusal)
     if (typeof delta.content === 'string' && delta.content.trim().length > 0) this.hasNonWhitespaceContent = true
     result.push(...this.textEvents('text', delta.content))
@@ -463,7 +477,8 @@ class EventMapper {
     if (this.active) result.push({ type: 'modelContentBlockStopEvent' })
     this.appendToolCalls(result)
     this.validateToolFinishReason()
-    result.push({ type: 'modelMessageStopEvent', stopReason: finishReason(this.finished, key) })
+    const namedToolStop = this.namedToolChoice && this.calls.size > 0 && this.finished === 'stop'
+    result.push({ type: 'modelMessageStopEvent', stopReason: namedToolStop ? 'toolUse' : finishReason(this.finished, key) })
     return result
   }
 
@@ -482,16 +497,17 @@ class EventMapper {
     if (!call.id || !call.name) throw new ModelError('EXAONE returned an incomplete tool call')
     if (ids.has(call.id)) throw new ModelError('EXAONE returned duplicate tool call IDs')
     ids.add(call.id)
-    // Blank arguments represent a zero-argument tool; emit JSON the SDK can aggregate as an object.
-    let input = call.arguments.trim() ? call.arguments : '{}'
-    let args: unknown
-    try { args = JSON.parse(input) as unknown } catch {
-      const repaired = closeToolArguments(input)
-      if (repaired === undefined) throw new ModelError('EXAONE returned invalid tool call arguments')
-      input = repaired
-      args = JSON.parse(input) as unknown
+    let input = call.arguments
+    if (input.trim()) {
+      let args: unknown
+      try { args = JSON.parse(input) as unknown } catch {
+        const repaired = this.allowToolRepair ? closeToolArguments(input) : undefined
+        if (repaired === undefined) throw new ModelError('EXAONE returned invalid tool call arguments')
+        input = repaired
+        args = JSON.parse(input) as unknown
+      }
+      if (!args || typeof args !== 'object' || Array.isArray(args)) throw new ModelError('EXAONE tool call arguments must be an object')
     }
-    if (!args || typeof args !== 'object' || Array.isArray(args)) throw new ModelError('EXAONE tool call arguments must be an object')
     events.push({ type: 'modelContentBlockStartEvent', start: { type: 'toolUseStart', name: call.name, toolUseId: call.id } })
     events.push({ type: 'modelContentBlockDeltaEvent', delta: { type: 'toolUseInputDelta', input } })
     events.push({ type: 'modelContentBlockStopEvent' })
@@ -499,7 +515,9 @@ class EventMapper {
 
   private validateToolFinishReason(): void {
     if (this.finished === 'tool_calls' && !this.calls.size) throw new ModelError('EXAONE returned tool_calls without a tool call')
-    if (this.calls.size && this.finished !== 'tool_calls') throw new ModelError('EXAONE returned tool calls without a tool_calls finish reason')
+    if (this.calls.size && this.finished !== 'tool_calls' && !(this.namedToolChoice && this.finished === 'stop')) {
+      throw new ModelError('EXAONE returned tool calls without a tool_calls finish reason')
+    }
   }
 }
 
@@ -653,7 +671,7 @@ export class ExaoneModel extends Model<ExaoneModelConfig> {
   /** Known EXAONE capabilities, with caller overrides taking precedence. */
   override get modelInfo(): ModelInfo {
     const info = super.modelInfo
-    if (this.#config.modelId !== 'k-exaone_v2.5') return info
+    if (this.#config.modelId !== 'k-exaone_v2.5' || (this.#config.baseURL ?? 'https://api.exaone.ai/v1').replace(/\/+$/, '') !== 'https://api.exaone.ai/v1') return info
     const overrides = this.#config.modelInfo?.capabilities
     return Object.freeze({
       ...info,
@@ -689,7 +707,7 @@ export class ExaoneModel extends Model<ExaoneModelConfig> {
       const response = await sendWithRetry(config, signal, () => fetchResponse(config, body, key, signal))
       signal.throwIfAborted()
       if (!response.ok) await throwHttpError(response, key, signal)
-      const mapper = new EventMapper(key)
+      const mapper = new EventMapper(key, !!options?.toolSpecs?.length && !!options.toolChoice && 'tool' in options.toolChoice, isHostedDefault(config))
       const messageStartState = { started: false }
       try {
         yield* withMessageStart(responseEvents(response, request.stream !== false, mapper), signal, messageStartState)

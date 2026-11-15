@@ -21,7 +21,6 @@ from strands_exaone import ExaoneError, ExaoneModel, ExaoneThrottledError
 @pytest.mark.parametrize(
     "base_url",
     [
-        "http://api.example/v1",
         "ftp://api.example/v1",
         "https://user:password@api.example/v1",
         "https://api.example/v1?token=secret",
@@ -38,6 +37,21 @@ def test_allows_loopback_http_for_local_test_servers(hostname: str) -> None:
     model = ExaoneModel(api_key="test-secret", base_url=f"http://{hostname}:8000/v1")
 
     assert model.get_config()["base_url"] == f"http://{hostname}:8000/v1"
+
+
+async def test_remote_http_sends_request_to_supplied_endpoint() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, content=sse(chunk({"content": "ok"}), chunk(finish="stop")))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        model = ExaoneModel(api_key="synthetic", base_url="http://server.example/v1", http_client=client)
+        _ = [event async for event in model.stream([{"role": "user", "content": [{"text": "Hi"}]}])]
+    assert len(requests) == 1
+    assert str(requests[0].url) == "http://server.example/v1/chat/completions"
+    assert requests[0].headers["authorization"] == "Bearer synthetic"
 
 
 class Chunks(httpx.AsyncByteStream):
@@ -71,6 +85,99 @@ def model_for(handler: Any, **kwargs: Any) -> tuple[ExaoneModel, httpx.AsyncClie
 
 async def collect(model: ExaoneModel, **kwargs: Any) -> list[dict[str, Any]]:
     return [event async for event in model.stream([{"role": "user", "content": [{"text": "안녕"}]}], **kwargs)]
+
+
+@pytest.mark.parametrize("stream", [True, False])
+async def test_named_tool_choice_accepts_vllm_stop_with_tool_call(stream: bool) -> None:
+    call = {"id": "call_1", "type": "function", "function": {"name": "lookup", "arguments": '{"x":2}'}}
+    requests: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        if stream:
+            payload = sse(chunk({"tool_calls": [{"index": 0, **call}]}), chunk(finish="stop"))
+            return httpx.Response(200, content=payload)
+        return httpx.Response(200, json={"choices": [{"message": {"tool_calls": [call]}, "finish_reason": "stop"}]})
+
+    model, client = model_for(handler, stream=stream)
+    try:
+        events = await collect(model, tool_choice={"tool": {"name": "lookup"}})
+    finally:
+        await client.aclose()
+    assert requests[0]["tool_choice"] == {"type": "function", "function": {"name": "lookup"}}
+    assert {"messageStop": {"stopReason": "tool_use"}} in events
+    assert {"contentBlockDelta": {"delta": {"toolUse": {"input": '{"x":2}'}}}} in events
+
+
+@pytest.mark.parametrize(("choice", "finish"), [({"auto": {}}, "stop"), ({"tool": {"name": "lookup"}}, "length")])
+async def test_named_tool_compatibility_does_not_accept_other_inconsistent_finishes(choice: Any, finish: str) -> None:
+    call = {"index": 0, "id": "call_1", "type": "function", "function": {"name": "lookup", "arguments": "{}"}}
+    model, client = model_for(
+        lambda request: httpx.Response(200, content=sse(chunk({"tool_calls": [call]}), chunk(finish=finish)))
+    )
+    try:
+        with pytest.raises(ExaoneError, match="finish reason are inconsistent"):
+            await collect(model, tool_choice=choice)
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.parametrize("model_id", ["k-exaone_v2.5", "custom-model"])
+async def test_forwards_token_limit_without_assuming_the_server_limit(model_id: str) -> None:
+    requests: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, content=sse(chunk({"content": "ok"}), chunk(finish="stop")))
+
+    model, client = model_for(handler, model_id=model_id, max_tokens=524_289, base_url="http://server.example/v1")
+    try:
+        await collect(model)
+    finally:
+        await client.aclose()
+    assert requests[0]["max_tokens"] == 524_289
+
+
+@pytest.mark.parametrize("effort", ["none", "minimal", "xhigh", 0.5])
+@pytest.mark.parametrize("thinking", [None, False, True])
+async def test_forwards_endpoint_reasoning_effort_without_changing_thinking(
+    effort: str | float, thinking: bool | None
+) -> None:
+    requests: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, content=sse(chunk({"content": "ok"}), chunk(finish="stop")))
+
+    model, client = model_for(
+        handler,
+        model_id="custom-model",
+        base_url="http://server.example/v1",
+        reasoning_effort=effort,
+        enable_thinking=thinking,
+        top_k=0,
+    )
+    try:
+        await collect(model)
+    finally:
+        await client.aclose()
+    assert requests[0]["reasoning_effort"] == effort
+    assert requests[0]["top_k"] == 0
+    template = requests[0]["chat_template_kwargs"]
+    if thinking is None:
+        assert "enable_thinking" not in template
+    else:
+        assert template["enable_thinking"] is thinking
+
+
+def test_hosted_default_retains_known_request_limits() -> None:
+    with pytest.raises(ValueError, match="context limit"):
+        ExaoneModel(api_key="synthetic", max_tokens=524_289)
+    with pytest.raises(ValueError, match="top_k"):
+        ExaoneModel(api_key="synthetic", top_k=0)
+    with pytest.raises(ValueError, match="reasoning_effort"):
+        ExaoneModel(api_key="synthetic", reasoning_effort="xhigh")
+    assert ExaoneModel(api_key="synthetic", reasoning_effort="medium").get_config()["reasoning_effort"] == "medium"
 
 
 @pytest.mark.parametrize(
@@ -146,6 +253,82 @@ async def test_stream_sse_utf8_and_usage_callback() -> None:
         assert observed[0]["response"]["result_code"] == "SUCCESS"
         assert observed[0]["response"]["description"] == "Synthetic success metadata"
         assert chunks.closed
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.parametrize("stream", [True, False])
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"reasoning": "synthetic-thought"},
+        {"reasoning_content": "synthetic-thought"},
+        {"reasoning": "synthetic-thought", "reasoning_content": "synthetic-thought"},
+        {"reasoning": "synthetic-thought", "reasoning_content": ""},
+        {"reasoning": "", "reasoning_content": "synthetic-thought"},
+    ],
+)
+async def test_reasoning_response_aliases(stream: bool, fields: dict[str, str]) -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        if stream:
+            return httpx.Response(200, content=sse(chunk(fields), chunk({"content": "answer"}), chunk(finish="stop")))
+        return httpx.Response(
+            200,
+            json={"choices": [{"index": 0, "message": {**fields, "content": "answer"}, "finish_reason": "stop"}]},
+        )
+
+    model, client = model_for(handler, stream=stream)
+    try:
+        events = await collect(model)
+        reasoning = [
+            event["contentBlockDelta"]["delta"]["reasoningContent"]["text"]
+            for event in events
+            if "reasoningContent" in event.get("contentBlockDelta", {}).get("delta", {})
+        ]
+        assert reasoning == ["synthetic-thought"]
+        assert any(event.get("contentBlockDelta", {}).get("delta", {}).get("text") == "answer" for event in events)
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.parametrize("stream", [True, False])
+@pytest.mark.parametrize(
+    ("fields", "message"),
+    [
+        ({"reasoning": {"invalid": True}}, "Invalid reasoning delta"),
+        ({"reasoning": "valid", "reasoning_content": ["invalid"]}, "Invalid reasoning_content delta"),
+        ({"reasoning": "first", "reasoning_content": "second"}, "Conflicting reasoning"),
+    ],
+)
+async def test_invalid_or_conflicting_reasoning_response(stream: bool, fields: dict[str, Any], message: str) -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        if stream:
+            return httpx.Response(200, content=sse(chunk(fields), chunk(finish="stop")))
+        return httpx.Response(200, json={"choices": [{"index": 0, "message": fields, "finish_reason": "stop"}]})
+
+    model, client = model_for(handler, stream=stream)
+    try:
+        with pytest.raises(ExaoneError, match=message):
+            await collect(model)
+    finally:
+        await client.aclose()
+
+
+async def test_reasoning_alias_streams_separate_deltas() -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=sse(chunk({"reasoning": "first "}), chunk({"reasoning": "second"}), chunk(finish="stop")),
+        )
+
+    model, client = model_for(handler)
+    try:
+        events = await collect(model)
+        assert [
+            event["contentBlockDelta"]["delta"]["reasoningContent"]["text"]
+            for event in events
+            if "reasoningContent" in event.get("contentBlockDelta", {}).get("delta", {})
+        ] == ["first ", "second"]
     finally:
         await client.aclose()
 
@@ -310,7 +493,8 @@ async def test_interleaved_tools_are_assembled_and_replayed() -> None:
         await client.aclose()
 
 
-async def test_agent_tool_round_trip() -> None:
+@pytest.mark.parametrize("reasoning_field", ["reasoning_content", "reasoning"])
+async def test_agent_tool_round_trip(reasoning_field: str) -> None:
     bodies: list[dict[str, Any]] = []
 
     @tool
@@ -321,15 +505,12 @@ async def test_agent_tool_round_trip() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         bodies.append(json.loads(request.content))
         if len(bodies) == 1:
+            # Mirror synthetic fragments from the model-card SGLang qwen3_coder parser.
             payload = sse(
-                chunk({"reasoning_content": "thinking"}),
-                chunk(
-                    {
-                        "tool_calls": [
-                            {"index": 0, "id": "call-1", "function": {"name": "get_test_number", "arguments": "{}"}}
-                        ]
-                    }
-                ),
+                chunk({reasoning_field: "thinking"}),
+                chunk({"tool_calls": [{"index": 0, "id": "call-1", "function": {"name": "get_test_number"}}]}),
+                chunk({"tool_calls": [{"index": 0, "function": {"arguments": "{"}}]}),
+                chunk({"tool_calls": [{"index": 0, "function": {"arguments": "}"}}]}),
                 chunk(finish="tool_calls"),
             )
         else:
@@ -684,9 +865,7 @@ def test_strands_model_info_override_is_supported() -> None:
         ({"context_window_limit": 0}, "context_window_limit must be a positive integer"),
         ({"context_window_limit": -1}, "context_window_limit must be a positive integer"),
         ({"context_window_limit": 1.5}, "context_window_limit must be an integer"),
-        ({"max_tokens": 524289}, "max_tokens cannot exceed the EXAONE context limit"),
-        ({"reasoning_effort": 1}, "reasoning_effort must be one of"),
-        ({"reasoning_effort": "extreme"}, "reasoning_effort must be one of"),
+        ({"reasoning_effort": True}, "reasoning_effort must be a string or finite number"),
     ],
 )
 def test_invalid_model_limits_and_reasoning_effort_fail_early(config: dict[str, Any], message: str) -> None:
@@ -866,7 +1045,7 @@ async def test_incomplete_and_malformed_tool_arguments_never_emit_tool_block(arg
         ('{"items":[1,2,]}', '{"items":[1,2]}'),
     ],
 )
-async def test_repairs_tool_arguments_with_syntax_only_repairs(raw: str, expected: str) -> None:
+async def test_hosted_25_completes_supported_tool_argument_syntax(raw: str, expected: str) -> None:
     stream = sse(
         chunk({"tool_calls": [{"index": 0, "id": "call_1", "function": {"name": "lookup", "arguments": raw}}]}),
         chunk(finish="tool_calls"),
@@ -880,6 +1059,23 @@ async def test_repairs_tool_arguments_with_syntax_only_repairs(raw: str, expecte
             if "toolUse" in event.get("contentBlockDelta", {}).get("delta", {})
         ]
         assert tool_inputs == [expected]
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.parametrize("raw", ['{"count":12', '{"query":"EXAONE",}'])
+async def test_self_hosted_malformed_arguments_are_not_repaired(raw: str) -> None:
+    stream = sse(
+        chunk({"tool_calls": [{"index": 0, "id": "call_1", "function": {"name": "lookup", "arguments": raw}}]}),
+        chunk(finish="tool_calls"),
+    )
+    model, client = model_for(lambda request: httpx.Response(200, content=stream), base_url="http://localhost:8000/v1")
+    events: list[dict[str, Any]] = []
+    try:
+        with pytest.raises(ExaoneError, match="Invalid tool arguments"):
+            async for event in model.stream([{"role": "user", "content": [{"text": "hello"}]}]):
+                events.append(event)
+        assert not any(event.get("contentBlockStart", {}).get("start", {}).get("toolUse") for event in events)
     finally:
         await client.aclose()
 

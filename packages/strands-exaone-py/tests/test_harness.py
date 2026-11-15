@@ -727,6 +727,73 @@ async def test_harness_tool_choice_and_system_text_blocks(choice: dict[str, Any]
     ]
 
 
+async def test_harness_executes_vllm_named_tool_with_stop_finish() -> None:
+    from strands.middleware import InvokeModelStage
+
+    requests: list[dict[str, Any]] = []
+    calls: list[bool] = []
+
+    @tool
+    def get_number() -> str:
+        """Return a synthetic number."""
+        calls.append(True)
+        return "7"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        if len(requests) == 1:
+            return response(
+                events(
+                    chunk({"reasoning": "synthetic reasoning"}),
+                    chunk(tool_delta("call_1", "get_number")),
+                    chunk(finish="stop"),
+                )
+            )
+        return response(events(chunk({"content": "done"}), chunk(finish="stop")))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        agent = make_harness(ExaoneModel(api_key="test-only-key", http_client=client), [get_number])
+        agent.add_middleware(
+            InvokeModelStage.Input,
+            lambda context: context.replace(tool_choice={"tool": {"name": "get_number"}}) if not requests else context,
+        )
+        await agent.invoke_async("Use a number.")
+
+    assert calls == [True]
+    assert len(requests) == 2
+    assert requests[0]["tool_choice"] == {"type": "function", "function": {"name": "get_number"}}
+    assistant = next(message for message in requests[1]["messages"] if message["role"] == "assistant")
+    assert assistant["reasoning_content"] == "synthetic reasoning"
+    assert any(message.get("tool_call_id") == "call_1" for message in requests[1]["messages"])
+
+
+async def test_harness_returns_validation_error_for_null_string_argument() -> None:
+    requests: list[dict[str, Any]] = []
+    calls: list[str] = []
+
+    @tool
+    def lookup(text: str) -> str:
+        """Return synthetic text."""
+        calls.append(text)
+        return text
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        if len(requests) == 1:
+            return response(events(chunk(tool_delta("call_1", "lookup", '{"text":null}')), chunk(finish="tool_calls")))
+        return response(events(chunk({"content": "done"}), chunk(finish="stop")))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        agent = make_harness(ExaoneModel(api_key="test-only-key", http_client=client), [lookup])
+        await agent.invoke_async("Use lookup.")
+
+    assert calls == []
+    assistant = next(message for message in requests[1]["messages"] if message["role"] == "assistant")
+    assert json.loads(assistant["tool_calls"][0]["function"]["arguments"]) == {"text": None}
+    result = next(message for message in requests[1]["messages"] if message["role"] == "tool")
+    assert result["content"].startswith("[ERROR]")
+
+
 @pytest.mark.parametrize(
     "block",
     [{"cachePoint": {"type": "default"}}, {"image": {"format": "png", "source": {"bytes": b"synthetic"}}}],

@@ -98,9 +98,8 @@ def _validate_base_url(value: str) -> None:
         hostname = parsed.hostname
     except ValueError as error:
         raise ValueError("base_url must be a valid absolute URL") from error
-    loopback = hostname in {"localhost", "127.0.0.1", "::1"}
-    if not hostname or (parsed.scheme != "https" and not (parsed.scheme == "http" and loopback)):
-        raise ValueError("base_url must use HTTPS, except for loopback HTTP test servers")
+    if not hostname or parsed.scheme not in {"http", "https"}:
+        raise ValueError("base_url must be an absolute HTTP or HTTPS URL")
     if parsed.username is not None or parsed.password is not None:
         raise ValueError("base_url must not include URL credentials")
     if parsed.query or parsed.fragment:
@@ -165,6 +164,10 @@ def _validate_numbers(config: dict[str, Any]) -> None:
     _validate_retry_config(config)
 
 
+def _is_hosted_default(config: dict[str, Any]) -> bool:
+    return config["model_id"] == "k-exaone_v2.5" and config["base_url"].rstrip("/") == "https://api.exaone.ai/v1"
+
+
 def _validate_sampling_numbers(config: dict[str, Any]) -> None:
     for field, minimum, maximum in (("temperature", 0, None), ("top_p", 0, 1), ("presence_penalty", -2, 2)):
         value = config.get(field)
@@ -175,8 +178,10 @@ def _validate_sampling_numbers(config: dict[str, Any]) -> None:
         if value is not None and type(value) is not int:
             raise ValueError(f"{field} must be an integer")
 
-    if config.get("top_k") is not None and config["top_k"] != -1 and config["top_k"] < 1:
-        raise ValueError("top_k must be -1 or a positive integer")
+    if config.get("top_k") is not None and (
+        config["top_k"] < -1 or (config["top_k"] == 0 and _is_hosted_default(config))
+    ):
+        raise ValueError("top_k is not supported by the selected endpoint")
 
 
 def _validate_token_limits(config: dict[str, Any]) -> None:
@@ -187,8 +192,8 @@ def _validate_token_limits(config: dict[str, Any]) -> None:
         raise ValueError("max_tokens cannot be negative")
     if (
         config.get("max_tokens") is not None
-        and config["model_id"] == "k-exaone_v2.5"
         and config["max_tokens"] > MAX_CONTEXT_TOKENS
+        and _is_hosted_default(config)
     ):
         raise ValueError(f"max_tokens cannot exceed the EXAONE context limit of {MAX_CONTEXT_TOKENS}")
     if config.get("context_window_limit") is not None and config["context_window_limit"] <= 0:
@@ -197,8 +202,10 @@ def _validate_token_limits(config: dict[str, Any]) -> None:
 
 def _validate_reasoning_effort(config: dict[str, Any]) -> None:
     effort = config.get("reasoning_effort")
-    if effort is not None and effort not in ("low", "medium", "high", "max"):
-        raise ValueError("reasoning_effort must be one of low, medium, high, or max")
+    if effort is not None and not (isinstance(effort, str) or (type(effort) in (int, float) and math.isfinite(effort))):
+        raise ValueError("reasoning_effort must be a string or finite number")
+    if effort is not None and _is_hosted_default(config) and effort not in ("low", "medium", "high", "max"):
+        raise ValueError("reasoning_effort must be one of low, medium, high, or max for the EXAONE API")
 
 
 def _validate_timeout(config: dict[str, Any]) -> None:
@@ -426,7 +433,7 @@ class ExaoneModel(Model):
         top_p: float | None = None,
         top_k: int | None = None,
         presence_penalty: float | None = None,
-        reasoning_effort: str | None = None,
+        reasoning_effort: str | float | None = None,
         preserve_thinking: bool | None = None,
         enable_thinking: bool | None = None,
         include_usage: bool | None = None,
@@ -521,7 +528,7 @@ class ExaoneModel(Model):
     def model_info(self) -> ModelInfo:
         """Expose known EXAONE capabilities, with caller overrides taking precedence."""
         info = super().model_info
-        if self._config["model_id"] != "k-exaone_v2.5":
+        if not _is_hosted_default(self._config):
             return info
         return ModelInfo.merge(
             info,
@@ -786,7 +793,10 @@ class ExaoneModel(Model):
             messages, tool_specs, system_prompt, system_prompt_content, tool_choice, stream=streaming, config=config
         )
         callback = kwargs.get("metadata_callback", self._callback)
-        decoder = StreamDecoder()
+        decoder = StreamDecoder(
+            named_tool_choice=tool_choice is not None and "tool" in tool_choice,
+            allow_tool_repair=_is_hosted_default(config),
+        )
         metadata = ResponseMetadata(enabled=callback is not None)
         started = time.monotonic()
         deadline = _operation_deadline(config["timeout"])

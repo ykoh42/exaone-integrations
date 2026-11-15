@@ -60,7 +60,7 @@ Where supported by the installed LangChain version, the profile reports reasonin
 
 The default profile includes only fields recognized by the installed `langchain-core` version. Upgrading LangChain makes additional profile fields available without changing the model's API behavior.
 
-LangChain and Deep Agents can use this profile for context management and structured-output strategy selection. An unknown model ID has no inferred profile. Pass `profile={...}` to replace the defaults using LangChain's public constructor option; `profile={}` leaves capabilities unspecified. Profiles are application metadata and are not sent as API parameters.
+LangChain and Deep Agents can use this profile for context management and structured-output strategy selection. A custom endpoint or unknown model ID has no inferred profile. Pass `profile={...}` to replace the defaults using LangChain's public constructor option; `profile={}` leaves capabilities unspecified. Profiles are application metadata and are not sent as API parameters.
 
 The default profile leaves `structured_output` unspecified because native JSON Schema output combined with tool calls in one request has not been established as compatible with LangChain's provider strategy. Agents use LangChain's tool-based strategy by default. To request native output without tools, select `ProviderStrategy` explicitly. This choice does not change the provider's request parameters or structured-output methods.
 
@@ -90,7 +90,9 @@ Each candidate in a non-streaming response carries the same request-level usage.
 
 LangChain's `output_version="v1"` standard content blocks can also be retained in conversation history, including reasoning and tool calls.
 
-If you remove every reasoning block from a v1 message before reusing it, remove `additional_kwargs["reasoning_content"]` too. When no nonempty reasoning block remains, the provider uses that field as a fallback.
+For v1 messages, reasoning blocks in `content` are authoritative: removing them prevents that reasoning from being sent again. For older message formats, the provider also reads `additional_kwargs["reasoning_content"]`.
+
+Refusal text is kept separately in `additional_kwargs["refusal"]`, and v1 messages also expose a `refusal` content block. It is not merged into answer text. When reusing an assistant message that has no answer text, the provider sends its refusal as text in the next request: a refusal content block in message history was rejected by the hosted 2.5 endpoint in a compatibility check. If answer text is present, that text is sent instead.
 
 ## Tools and structured output
 
@@ -123,13 +125,13 @@ Legacy `function_call` fields and LangChain `FunctionMessage` results are also p
 | --- | --- | --- |
 | `model` | `k-exaone_v2.5` | EXAONE model ID |
 | `api_key` | `EXAONE_API_KEY` | API credential |
-| `base_url` | `https://api.exaone.ai/v1` | API base URL. Remote endpoints must use HTTPS; HTTP is allowed for loopback test servers. |
+| `base_url` | `https://api.exaone.ai/v1` | HTTP or HTTPS API base URL. |
 | `temperature` | `1.0` | Recommended EXAONE sampling value |
 | `top_p` | `0.95` | Recommended EXAONE sampling value |
 | `top_k` | `-1` | Disable top-k filtering, as in the API default |
 | `presence_penalty` | `0.0` | Recommended EXAONE sampling value |
 | `max_tokens` | API default | Maximum generated tokens, including reasoning |
-| `reasoning_effort` | API default | `low`, `medium`, `high`, or `max` |
+| `reasoning_effort` | API default | Reasoning setting accepted by the selected endpoint |
 | `preserve_thinking` | `true` | Keep earlier assistant reasoning in multi-turn agent conversations |
 | `chat_template_kwargs` | `{}` | Additional chat-template options; `preserve_thinking` is set from its dedicated option |
 | `max_retries` | `2` | Retries for transient API errors before output is returned; set to `0` to disable |
@@ -137,7 +139,25 @@ Legacy `function_call` fields and LangChain `FunctionMessage` results are also p
 
 The API always enables reasoning. The provider stores returned `reasoning_content` on assistant messages and sends it with later turns. By default, `preserve_thinking=True` also sets EXAONE's recommended `chat_template_kwargs.preserve_thinking` option. Keep assistant messages intact when continuing a conversation.
 
-`max_tokens` is capped at the documented 524,288-token context limit. The provider cannot count an arbitrary prompt locally, so the API still validates the combined input and output token budget.
+For an already-running K-EXAONE 2.0 endpoint, set `base_url` and `model` to the server's URL and served model name. If supported by the server, `chat_template_kwargs={"enable_thinking": False}` requests non-reasoning mode. The provider accepts `reasoning` and `reasoning_content` response fields and preserves them as `reasoning_content` for later turns. Identical values are emitted once; conflicting nonempty values are rejected. Protocol fixtures have been tested; actual K-EXAONE 2.0 inference has not been verified by this project.
+
+For serving instructions and parser settings, see the [model card](https://huggingface.co/LGAI-EXAONE/K-EXAONE-2.0-750B-A37B). Its examples use forked servers; [vLLM 0.27.0](https://github.com/vllm-project/vllm/releases/tag/v0.27.0) also includes K-EXAONE 2.0 model support. Verify the specific server version and configuration you deploy.
+
+The SGLang `qwen3_coder` parser in the inspected [model-card fork](https://github.com/lkm2835/sglang/blob/918653d22b2f1ae853b81fc0f5539b7c9311487e/python/sglang/srt/function_call/qwen3_coder_detector.py#L104) and [upstream revision](https://github.com/sgl-project/sglang/blob/d9ec74eb72b856419c6eb44733e00193d28ed840/python/sglang/srt/function_call/qwen3_coder_detector.py#L112) converts the text `null` to JSON null even for a string parameter. This can cause tool validation to fail; check your server's parser version.
+
+Some servers accept `reasoning_effort` and may use it to select thinking on or off. Accepting the field does not establish that the model supports distinct reasoning-intensity levels; check the deployed server and model documentation.
+
+```python
+model = ChatEXAONE(
+    base_url="http://127.0.0.1:8000/v1",
+    model="K-EXAONE-2.0-750B-A37B",  # Use the served name.
+    api_key="EMPTY",  # Use the server's configured credential, if any.
+)
+```
+
+The configured API key is sent to the selected endpoint; if omitted, it comes from `EXAONE_API_KEY`. For a server that does not require authentication, pass a placeholder such as `api_key="EMPTY"` rather than the hosted API key. HTTP does not encrypt credentials or conversation data; use HTTPS or a trusted transport.
+
+The default model's documented context window is 524,288 tokens. The selected endpoint validates its own input and output token budget.
 
 The provider retries HTTP 408, 429, 500, 502, 503, and 504 errors up to two times by default; set `max_retries=0` to disable retries. It honors the longer valid `Retry-After` or `Retry-After-Ms` delay. If neither header is present, the first retry waits at least one second to respect the API's per-second rate limit; a `max_retry_delay` below one second disables that retry. It does not retry after streaming output has started.
 

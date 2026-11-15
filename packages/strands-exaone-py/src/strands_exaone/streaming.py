@@ -118,7 +118,7 @@ def _open_json_closers(raw: str, outside: list[bool]) -> list[str] | None:
 
 
 def _close_tool_arguments(raw: str) -> str | None:
-    """Complete only JSON delimiters that can be added without guessing values."""
+    """Complete limited JSON syntax; truncated values cannot be recovered."""
     outside = _json_outside_string_mask(raw)
     if outside is None:
         return None
@@ -145,14 +145,14 @@ def _close_tool_arguments(raw: str) -> str | None:
     return candidate if isinstance(arguments, dict) else None
 
 
-def _normalize_tool_arguments(raw: str) -> str:
+def _normalize_tool_arguments(raw: str, *, allow_repair: bool) -> str:
     """Require an object and return its original or mechanically completed JSON."""
     if not raw.strip():
         return raw
     try:
         arguments = json.loads(raw, parse_constant=_reject_json_constant)
     except (TypeError, ValueError):
-        repaired = _close_tool_arguments(raw)
+        repaired = _close_tool_arguments(raw) if allow_repair else None
     else:
         if isinstance(arguments, dict):
             return raw
@@ -172,10 +172,24 @@ def _tool_text(value: Any) -> str:
     return value
 
 
+def _reasoning_text(delta: dict[str, Any]) -> str | None:
+    """Accept the reasoning field used by EXAONE, SGLang, and vLLM."""
+    content = delta.get("reasoning_content")
+    reasoning = delta.get("reasoning")
+    for name, value in (("reasoning_content", content), ("reasoning", reasoning)):
+        if value is not None and not isinstance(value, str):
+            raise ExaoneError(f"Invalid {name} delta")
+    if content and reasoning and content != reasoning:
+        raise ExaoneError("Conflicting reasoning and reasoning_content values")
+    return content or reasoning or None
+
+
 @dataclass
 class StreamDecoder:
     """Accumulate interleaved tool calls while emitting text and reasoning deltas."""
 
+    named_tool_choice: bool = False
+    allow_tool_repair: bool = False
     active: str | None = None
     tools: dict[int, _Tool] = field(default_factory=dict)
     finish_reason: str | None = None
@@ -192,9 +206,7 @@ class StreamDecoder:
             self.active = kind
 
     def _text_events(self, delta: dict[str, Any]) -> Iterator[dict[str, Any]]:
-        reasoning = delta.get("reasoning_content")
-        if reasoning is not None and not isinstance(reasoning, str):
-            raise ExaoneError("Invalid reasoning_content delta")
+        reasoning = _reasoning_text(delta)
         if reasoning:
             yield from self._switch("reasoning")
             yield {"contentBlockDelta": {"delta": {"reasoningContent": {"text": reasoning}}}}
@@ -280,7 +292,7 @@ class StreamDecoder:
             if item.ident in ids:
                 raise ExaoneError("Duplicate tool call IDs in EXAONE response")
             ids.add(item.ident)
-            arguments = _normalize_tool_arguments(arguments)
+            arguments = _normalize_tool_arguments(arguments, allow_repair=self.allow_tool_repair)
             validated.append((item, arguments))
         for item, arguments in validated:
             yield {"contentBlockStart": {"start": {"toolUse": {"name": item.name, "toolUseId": item.ident}}}}
@@ -300,7 +312,8 @@ class StreamDecoder:
         if not isinstance(self.finish_reason, str) or self.finish_reason not in reasons:
             reason = redact(self.finish_reason, secret) if isinstance(self.finish_reason, str) else None
             raise ExaoneError(f"EXAONE response ended with unsupported finish reason: {reason!r}", finish_reason=reason)
-        if bool(self.tools) != (self.finish_reason == "tool_calls"):
+        named_tool_stop = bool(self.tools) and self.named_tool_choice and self.finish_reason == "stop"
+        if bool(self.tools) != (self.finish_reason == "tool_calls" or named_tool_stop):
             raise ExaoneError("Tool calls and finish reason are inconsistent")
         if self.active is not None:
             yield {"contentBlockStop": {}}
@@ -313,7 +326,7 @@ class StreamDecoder:
             yield {"contentBlockStop": {}}
             self.active = None
         yield from self._tool_events()
-        yield {"messageStop": {"stopReason": reasons[self.finish_reason]}}
+        yield {"messageStop": {"stopReason": "tool_use" if named_tool_stop else reasons[self.finish_reason]}}
 
 
 def nonstream_chunk(data: dict[str, Any]) -> dict[str, Any]:

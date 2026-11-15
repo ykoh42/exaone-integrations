@@ -48,7 +48,7 @@ For SDK tool use, streaming, structured output, Harness, and CLI walkthroughs, s
 
 ## Why use this provider?
 
-A standard OpenAI provider configured for EXAONE's endpoint can handle basic chat. `ExaoneModel` also carries EXAONE reasoning through conversation history and defaults to `preserveThinking: true`. It maps model information, streaming, tools, usage, and API errors to Strands' interfaces. For tool arguments, it repairs a small set of syntax errors without changing values and rejects other malformed input.
+A standard OpenAI provider configured for EXAONE's endpoint can handle basic chat. `ExaoneModel` also carries EXAONE reasoning through conversation history and defaults to `preserveThinking: true`. It maps model information, streaming, tools, usage, and API errors to Strands' interfaces. For the hosted 2.5 endpoint, it also completes a limited set of malformed tool argument syntax.
 
 For Agent and Harness calls, configure `ExaoneRetryStrategy` to honor server delay hints. The model's own HTTP retries are disabled by default. Other adapters may provide similar behavior through configuration or extensions; this package keeps the EXAONE mapping in one tested integration. See the [project comparison](https://github.com/ykoh42/exaone-integrations#why-use-a-dedicated-provider) for scope and trade-offs.
 
@@ -57,7 +57,7 @@ For Agent and Harness calls, configure `ExaoneRetryStrategy` to honor server del
 | Option | Description | Default |
 | --- | --- | --- |
 | `modelId` | EXAONE model ID. | `k-exaone_v2.5` |
-| `baseURL` | API base URL, including `/v1`. Remote endpoints must use HTTPS; HTTP is allowed for loopback test servers. | `https://api.exaone.ai/v1` |
+| `baseURL` | HTTP or HTTPS API base URL, including `/v1`. | `https://api.exaone.ai/v1` |
 | `stream` | Request a streaming response; `false` adapts a non-streaming response to Strands events. | `true` |
 | `maxTokens`, `topK`, `presencePenalty` | Generation parameters. | Service defaults when omitted |
 | `temperature` | Sampling temperature. | `1.0` |
@@ -85,11 +85,35 @@ If EXAONE returns a refusal without ordinary non-whitespace response text, the p
 
 Strands tool execution uses the Chat Completions `tool_calls` field. Legacy `function_call` response fields are retained in metadata but do not trigger a Strands tool.
 
+## Self-hosted K-EXAONE 2.0
+
+For an OpenAI-compatible local server, pass the model name exposed by its `/v1/models` endpoint:
+
+```typescript
+import { ExaoneModel } from 'strands-exaone'
+
+const model = new ExaoneModel({
+  baseURL: 'http://127.0.0.1:8000/v1',
+  apiKey: 'EMPTY', // Use the server's configured credential, if any.
+  modelId: 'K-EXAONE-2.0-750B-A37B', // Use the server's actual model name.
+})
+```
+
+The provider accepts both `reasoning_content` and `reasoning` in compatible server responses and sends preserved reasoning back as `reasoning_content`. Identical values are emitted once; conflicting nonempty values are rejected. The model card lists a 262,144-token context window, but a deployment can configure a lower limit. Use the limit exposed by your deployment. Server and model compatibility depend on the versions and serving options you use.
+
+For serving instructions and parser settings, see the [model card](https://huggingface.co/LGAI-EXAONE/K-EXAONE-2.0-750B-A37B). Its examples use forked servers; [vLLM 0.27.0](https://github.com/vllm-project/vllm/releases/tag/v0.27.0) also includes K-EXAONE 2.0 model support. Verify the specific server version and configuration you deploy.
+
+The SGLang `qwen3_coder` parser in the inspected [model-card fork](https://github.com/lkm2835/sglang/blob/918653d22b2f1ae853b81fc0f5539b7c9311487e/python/sglang/srt/function_call/qwen3_coder_detector.py#L104) and [upstream revision](https://github.com/sgl-project/sglang/blob/d9ec74eb72b856419c6eb44733e00193d28ed840/python/sglang/srt/function_call/qwen3_coder_detector.py#L112) converts the text `null` to JSON null even for a string parameter. This can cause tool validation to fail; check your server's parser version.
+
+Some servers accept `reasoning_effort` and may use it to select thinking on or off. Accepting the field does not establish that the model supports distinct reasoning-intensity levels; check the deployed server and model documentation.
+
+The configured API key is sent to the selected endpoint; if omitted, it comes from `EXAONE_API_KEY`. For a server that does not require authentication, pass a placeholder such as `apiKey: 'EMPTY'` rather than the hosted API key. HTTP does not encrypt credentials or conversation data; use HTTPS or a trusted transport. Protocol fixtures have been tested, but K-EXAONE 2.0 model inference has not been verified by this project.
+
 ## Model information
 
 `ExaoneModel.modelInfo` exposes the known `k-exaone_v2.5` capabilities through Strands' standard `ModelInfo`: stateless Chat Completions, forced tool choice, native JSON Schema output, and a 524,288-token context window. An independent maximum output size and a prompt-caching mechanism are left unknown.
 
-The SDK owns how these facts are used. Explicit `modelInfo` fields override the provider's defaults; unspecified fields inherit. `modelInfo.limits.contextWindow` takes precedence over `contextWindowLimit`. Provider defaults apply only to the exact known model ID. For another model ID, the SDK's lookup or fallback applies unless you configure its actual limits and capabilities. Explicit limits remain in effect when changing models.
+The SDK owns how these facts are used. Explicit `modelInfo` fields override the provider's defaults; unspecified fields inherit. `modelInfo.limits.contextWindow` takes precedence over `contextWindowLimit`. Provider defaults apply only to the known model ID at the hosted endpoint. For other endpoints or model IDs, the SDK's lookup or fallback applies unless you configure its actual limits and capabilities. Explicit limits remain in effect when changing models.
 
 The context budget covers input plus output, including reasoning. See the [EXAONE API specification](https://docs.exaone.ai/ko/docs/k-exaone-2.5) and [Strands model-info contract](https://github.com/strands-agents/harness-sdk/blob/main/shared/README.md).
 
@@ -121,7 +145,7 @@ const agent = new Agent({
 await agent.invoke('Use the tool to get the number, then add 3.')
 ```
 
-The provider assembles streamed tool-call arguments before exposing calls to Strands. It treats blank arguments as an empty object, which lets zero-argument tools run. If a completed tool call has a JSON object with only closing braces or brackets missing, or has a trailing comma, the provider repairs that syntax without changing argument values. Unterminated strings, missing values, and other malformed arguments remain errors. The Harness validates arguments against each tool's schema. The provider accepts text, reasoning, tool calls, and text or JSON tool results; it rejects unsupported content types and reasoning signatures in the received history.
+The provider assembles streamed tool-call arguments before exposing calls to Strands. For the hosted `k-exaone_v2.5` endpoint only, it completes missing closing braces or brackets and removes trailing commas when that produces a JSON object. This cannot detect a truncated value: for example, `12` may have been intended as `123`. The Harness validates the resulting object against the tool schema, but cannot determine the intended value. Other malformed arguments are rejected; self-hosted endpoints receive no such syntax completion. Empty and whitespace-only arguments are passed through to Strands. The provider accepts text, reasoning, tool calls, and text or JSON tool results; it rejects unsupported content types and reasoning signatures in the received history.
 
 Because Chat Completions tool messages have no separate status field, tool results marked as errors are sent with an `[ERROR] ` prefix. Successful results are sent without a prefix.
 

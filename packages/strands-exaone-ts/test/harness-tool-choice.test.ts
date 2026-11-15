@@ -11,12 +11,13 @@ const options = { builtinTools: [] as const, builtinPlugins: [] as const, sessio
 
 /** SDK and harness behavior with a synthetic provider transport. */
 describe('tool choice and content boundaries', () => {
-  const choices: { label: string; choice: ToolChoice; expected: unknown }[] = [
+  const choices: { label: string; choice: ToolChoice; expected: unknown; finish?: string }[] = [
     { label: 'auto', choice: { auto: {} }, expected: 'auto' },
     { label: 'any', choice: { any: {} }, expected: 'required' },
     { label: 'named', choice: { tool: { name: 'lookup' } }, expected: { type: 'function', function: { name: 'lookup' } } },
+    { label: 'named with vLLM stop', choice: { tool: { name: 'lookup' } }, expected: { type: 'function', function: { name: 'lookup' } }, finish: 'stop' },
   ]
-  it.each(choices)('maps the SDK $label tool choice through harness middleware', async ({ choice, expected }) => {
+  it.each(choices)('maps the SDK $label tool choice through harness middleware', async ({ choice, expected, finish }) => {
     const requests: Record<string, unknown>[] = []
     const callback = vi.fn(() => 'synthetic result')
     const lookup = tool({ name: 'lookup', description: 'Synthetic lookup', inputSchema: z.object({}), callback })
@@ -25,7 +26,7 @@ describe('tool choice and content boundaries', () => {
       if (requests.length === 1) return response([
         chunk({ reasoning_content: 'choice reasoning' }),
         chunk({ tool_calls: [{ index: 0, id: 'choice-1', type: 'function', function: { name: 'lookup', arguments: '{}' } }] }),
-        chunk({}, 'tool_calls'),
+        chunk({}, finish ?? 'tool_calls'),
       ])
       if (requests.length === 2) return response([chunk({ content: 'Done.' }), chunk({}, 'stop')])
       throw new Error('Unexpected synthetic request')
@@ -47,7 +48,8 @@ describe('tool choice and content boundaries', () => {
     expect(callback).toHaveBeenCalledOnce()
   })
 
-  it.each(['', ' \t\n'])('executes a zero-argument tool when EXAONE sends blank arguments (%j)', async (argumentsText) => {
+  it('executes a zero-argument tool when EXAONE sends empty arguments', async () => {
+    const argumentsText = ''
     const requests: Record<string, unknown>[] = []
     const callback = vi.fn(() => 'synthetic result')
     const noArguments = tool({ name: 'no_arguments', description: 'Return a fixed value', inputSchema: z.object({}), callback })
@@ -71,6 +73,18 @@ describe('tool choice and content boundaries', () => {
     const assistant = history.find((message) => message.role === 'assistant')!
     const toolCalls = assistant.tool_calls as { function: { arguments: string } }[]
     expect(JSON.parse(toolCalls[0]!.function.arguments)).toEqual({})
+  })
+
+  it('leaves whitespace arguments to the Strands SDK instead of rewriting them', async () => {
+    const callback = vi.fn(() => 'synthetic result')
+    const noArguments = tool({ name: 'no_arguments', description: 'Return a fixed value', inputSchema: z.object({}), callback })
+    const fetcher: typeof fetch = async () => response([
+      chunk({ tool_calls: [{ index: 0, id: 'blank-args', type: 'function', function: { name: 'no_arguments', arguments: ' \t\n' } }] }),
+      chunk({}, 'tool_calls'),
+    ])
+    const agent = await createHarness({ ...options, model: new ExaoneModel({ apiKey: 'test-key', fetch: fetcher }), tools: [noArguments] })
+    await expect(agent.invoke('Use the tool')).rejects.toThrow()
+    expect(callback).not.toHaveBeenCalled()
   })
 
   it('executes a tool when EXAONE omits only the final object brace', async () => {
