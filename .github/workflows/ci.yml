@@ -113,6 +113,135 @@ jobs:
           "$RUNNER_TEMP/langchain-exaone-minimum-core-venv/bin/python" -c 'from langchain_core.language_models import BaseChatModel; from langchain_exaone import ChatEXAONE; model = ChatEXAONE(api_key="package-check"); assert isinstance(model, BaseChatModel); assert model.profile["max_input_tokens"] == 524288'
           "$RUNNER_TEMP/langchain-exaone-minimum-core-venv/bin/python" -m pytest tests
 
+  python-package-boundaries:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - package: strands-exaone-py
+            module: strands_exaone
+            model: ExaoneModel
+            sdk: 'strands-agents==1.63.0'
+          - package: langchain-exaone-py
+            module: langchain_exaone
+            model: ChatEXAONE
+            sdk: 'langchain-core==1.3.3'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.10'
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          version: 0.13.7
+      - name: Build an isolated package with synthetic environment files
+        env:
+          PACKAGE: ${{ matrix.package }}
+          MODULE: ${{ matrix.module }}
+        run: |
+          cp -R "packages/$PACKAGE" "$RUNNER_TEMP/python-package-source"
+          for dir in "$RUNNER_TEMP/python-package-source" "$RUNNER_TEMP/python-package-source/src/$MODULE"; do
+            for file in .netrc .npmrc .pypirc; do
+              printf '%s\n' 'SYNTHETIC_PACKAGE_SECRET' > "$dir/$file"
+            done
+            printf '%s\n' 'SYNTHETIC_PACKAGE_SECRET' > "$dir/.env"
+            printf '%s\n' 'SYNTHETIC_PACKAGE_SECRET' > "$dir/.env.local"
+            printf '%s\n' 'SYNTHETIC_PACKAGE_SECRET' > "$dir/.envrc"
+            printf '%s\n' 'SYNTHETIC_PACKAGE_SECRET' > "$dir/.envrc.local"
+            printf '%s\n' 'EXAONE_API_KEY=your-api-key' > "$dir/.env.example"
+            printf '%s\n' 'export EXAONE_API_KEY=your-api-key' > "$dir/.envrc.example"
+            mkdir -p "$dir/.direnv"
+            printf '%s\n' 'SYNTHETIC_PACKAGE_SECRET' > "$dir/.direnv/state"
+            mkdir -p "$dir/.aws" "$dir/.config/cloud"
+            printf '%s\n' 'SYNTHETIC_PACKAGE_SECRET' > "$dir/.aws/credentials"
+            printf '%s\n' 'SYNTHETIC_PACKAGE_SECRET' > "$dir/.config/cloud/credentials.json"
+            printf '%s\n' 'SYNTHETIC_PACKAGE_SECRET' > "$dir/local-credentials.json"
+          done
+          mkdir -p "$RUNNER_TEMP/python-package-source/src/unrelated_package"
+          printf '%s\n' 'SYNTHETIC_PACKAGE_SECRET' > "$RUNNER_TEMP/python-package-source/src/unrelated_package/__init__.py"
+          mkdir -p "$RUNNER_TEMP/python-package-source/examples/.aws"
+          printf '%s\n' 'SYNTHETIC_PACKAGE_SECRET' > "$RUNNER_TEMP/python-package-source/examples/.aws/credentials"
+          uv build --directory "$RUNNER_TEMP/python-package-source" --out-dir "$RUNNER_TEMP/python-package-dist"
+          python scripts/check-package-secrets.py "$RUNNER_TEMP"/python-package-dist/*.tar.gz --expected-public-examples 4
+          python scripts/check-package-secrets.py "$RUNNER_TEMP"/python-package-dist/*.whl --expected-public-examples 2
+          uv build --wheel --directory "$RUNNER_TEMP/python-package-source" --out-dir "$RUNNER_TEMP/python-package-direct-wheel"
+          python scripts/check-package-secrets.py "$RUNNER_TEMP"/python-package-direct-wheel/*.whl --expected-public-examples 2
+      - name: Verify license metadata with the minimum build backend
+        env:
+          MODULE: ${{ matrix.module }}
+          MODEL: ${{ matrix.model }}
+          SDK: ${{ matrix.sdk }}
+        run: |
+          uv venv --python 3.10 "$RUNNER_TEMP/hatch-minimum"
+          uv pip install --python "$RUNNER_TEMP/hatch-minimum/bin/python" 'hatchling==1.27.0'
+          mkdir -p "$RUNNER_TEMP/hatch-minimum-dist" "$RUNNER_TEMP/hatch-minimum-source" "$RUNNER_TEMP/hatch-minimum-rebuilt"
+          cd "$RUNNER_TEMP/python-package-source"
+          "$RUNNER_TEMP/hatch-minimum/bin/python" -m hatchling build -t sdist -t wheel -d "$RUNNER_TEMP/hatch-minimum-dist"
+          tar -xzf "$RUNNER_TEMP"/hatch-minimum-dist/*.tar.gz -C "$RUNNER_TEMP/hatch-minimum-source"
+          cd "$RUNNER_TEMP"/hatch-minimum-source/*
+          "$RUNNER_TEMP/hatch-minimum/bin/python" -m hatchling build -t wheel -d "$RUNNER_TEMP/hatch-minimum-rebuilt"
+          python - "$RUNNER_TEMP" <<'PY'
+          import email.parser
+          import pathlib
+          import sys
+          import tarfile
+          import zipfile
+
+          base = pathlib.Path(sys.argv[1])
+          archives = list((base / 'hatch-minimum-dist').glob('*.whl'))
+          archives += list((base / 'hatch-minimum-dist').glob('*.tar.gz'))
+          archives += list((base / 'hatch-minimum-rebuilt').glob('*.whl'))
+          assert len(archives) == 3
+          for archive in archives:
+              if archive.suffix == '.whl':
+                  with zipfile.ZipFile(archive) as package:
+                      metadata = package.read(next(name for name in package.namelist() if name.endswith('.dist-info/METADATA')))
+                      assert any(name.endswith('.dist-info/licenses/LICENSE') for name in package.namelist())
+              else:
+                  with tarfile.open(archive, 'r:gz') as package:
+                      metadata = package.extractfile(next(name for name in package.getnames() if name.endswith('/PKG-INFO'))).read()
+              info = email.parser.BytesParser().parsebytes(metadata)
+              assert tuple(map(int, info['Metadata-Version'].split('.'))) >= (2, 4)
+              assert info['License-Expression'] == 'MIT'
+              assert 'LICENSE' in info.get_all('License-File', [])
+          PY
+          uv venv --python 3.10 "$RUNNER_TEMP/hatch-minimum-runtime"
+          uv pip install --python "$RUNNER_TEMP/hatch-minimum-runtime/bin/python" "$RUNNER_TEMP"/hatch-minimum-rebuilt/*.whl "$SDK"
+          "$RUNNER_TEMP/hatch-minimum-runtime/bin/python" - <<'PY'
+          import importlib
+          import os
+          from importlib.resources import files
+
+          module = importlib.import_module(os.environ['MODULE'])
+          assert getattr(module, os.environ['MODEL'])(api_key='synthetic')
+          assert files(module).joinpath('py.typed').is_file()
+          PY
+      - name: Install the wheel and source distribution independently
+        env:
+          MODULE: ${{ matrix.module }}
+          MODEL: ${{ matrix.model }}
+          SDK: ${{ matrix.sdk }}
+        run: |
+          for artifact in "$RUNNER_TEMP"/python-package-dist/*.whl "$RUNNER_TEMP"/python-package-dist/*.tar.gz; do
+            venv="$RUNNER_TEMP/$(basename "$artifact").venv"
+            uv venv --python 3.10 "$venv"
+            uv pip install --python "$venv/bin/python" "$artifact" "$SDK"
+            "$venv/bin/python" - <<'PY'
+          import importlib
+          import os
+          from importlib.resources import files
+
+          module = importlib.import_module(os.environ["MODULE"])
+          assert getattr(module, os.environ["MODEL"])(api_key="synthetic")
+          assert files(module).joinpath("py.typed").is_file()
+          PY
+          done
+
   typescript:
     runs-on: ubuntu-24.04
     timeout-minutes: 25
@@ -242,19 +371,63 @@ jobs:
           cache: npm
           cache-dependency-path: packages/strands-exaone-ts/package-lock.json
       - run: npm install --global npm@11.20.0
-      - working-directory: packages/strands-exaone-ts
+      - name: Copy the package outside the repository
+        run: cp -R packages/strands-exaone-ts "$RUNNER_TEMP/strands-exaone-source"
+      - working-directory: ${{ runner.temp }}/strands-exaone-source
         run: npm ci --ignore-scripts --workspaces=false
-      - working-directory: packages/strands-exaone-ts
+      - working-directory: ${{ runner.temp }}/strands-exaone-source
         run: npm run check --workspaces=false
       - name: Verify npm package in an independent project
-        working-directory: packages/strands-exaone-ts
+        working-directory: ${{ runner.temp }}/strands-exaone-source
         run: |
+          mkdir -p src/nested
+          for dir in . src src/nested; do
+            for file in .netrc .npmrc .pypirc; do
+              printf '%s\n' 'SYNTHETIC_PACKAGE_SECRET' > "$dir/$file"
+            done
+            printf '%s\n' 'SYNTHETIC_PACKAGE_SECRET' > "$dir/.env"
+            printf '%s\n' 'SYNTHETIC_PACKAGE_SECRET' > "$dir/.env.local"
+            printf '%s\n' 'SYNTHETIC_PACKAGE_SECRET' > "$dir/.envrc"
+            printf '%s\n' 'SYNTHETIC_PACKAGE_SECRET' > "$dir/.envrc.local"
+            printf '%s\n' 'EXAONE_API_KEY=your-api-key' > "$dir/.env.example"
+            printf '%s\n' 'export EXAONE_API_KEY=your-api-key' > "$dir/.envrc.example"
+            mkdir -p "$dir/.direnv"
+            printf '%s\n' 'SYNTHETIC_PACKAGE_SECRET' > "$dir/.direnv/state.ts"
+            printf '%s\n' '!/*' > "$dir/.direnv/.npmignore"
+          done
+          printf '%s\n' '!/.env' '!/.env.local' '!/.envrc' '!/.envrc.local' '!/.netrc' '!/.npmrc' '!/.pypirc' > src/.npmignore
+          printf '%s\n' '!/.env' '!/.env.local' '!/.envrc' '!/.envrc.local' '!/.netrc' '!/.npmrc' '!/.pypirc' > src/nested/.npmignore
+          mkdir -p dist/nested "$RUNNER_TEMP/strands-exaone-prepack"
+          for dir in dist dist/nested; do
+            for file in .env .env.local .env.js .env.map .envrc .envrc.local .envrc.js .envrc.map; do
+              printf '%s\n' 'SYNTHETIC_PACKAGE_SECRET' > "$dir/$file"
+            done
+            printf '%s\n' '!/.env' '!/.env.*' '!/.envrc' '!/.envrc.*' > "$dir/.npmignore"
+            mkdir -p "$dir/.direnv"
+            printf '%s\n' 'SYNTHETIC_PACKAGE_SECRET' > "$dir/.direnv/state.js"
+            printf '%s\n' '!/*' > "$dir/.direnv/.npmignore"
+          done
+          npm pack --ignore-scripts --pack-destination "$RUNNER_TEMP/strands-exaone-prepack"
+          python "$GITHUB_WORKSPACE/scripts/check-package-secrets.py" "$RUNNER_TEMP"/strands-exaone-prepack/*.tgz --expected-public-examples 6
           npm pack --pack-destination "$RUNNER_TEMP"
+          python "$GITHUB_WORKSPACE/scripts/check-package-secrets.py" "$RUNNER_TEMP"/strands-exaone-*.tgz --expected-public-examples 6
           mkdir "$RUNNER_TEMP/strands-exaone-package-check"
           cd "$RUNNER_TEMP/strands-exaone-package-check"
           printf '%s\n' '{"private":true}' > package.json
           npm install --ignore-scripts "$RUNNER_TEMP"/strands-exaone-*.tgz
           node --input-type=module -e "import { ExaoneModel } from 'strands-exaone'; import { Model } from '@strands-agents/sdk'; if (!(new ExaoneModel() instanceof Model)) process.exit(1)"
+          node <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const dir = 'node_modules/strands-exaone/dist';
+          const maps = fs.readdirSync(dir).filter((name) => name.endsWith('.d.ts.map'));
+          if (maps.length === 0) throw new Error('No declaration maps in the package');
+          for (const name of maps) {
+            for (const source of JSON.parse(fs.readFileSync(path.join(dir, name))).sources) {
+              if (!fs.existsSync(path.resolve(dir, source))) throw new Error(`Missing declaration source: ${source}`);
+            }
+          }
+          NODE
 
   langchain-typescript:
     runs-on: ubuntu-24.04
@@ -274,14 +447,46 @@ jobs:
           cache: npm
           cache-dependency-path: packages/langchain-exaone-ts/package-lock.json
       - run: npm install --global npm@11.20.0
-      - working-directory: packages/langchain-exaone-ts
+      - name: Copy the package outside the repository
+        run: cp -R packages/langchain-exaone-ts "$RUNNER_TEMP/langchain-exaone-source"
+      - working-directory: ${{ runner.temp }}/langchain-exaone-source
         run: npm ci --ignore-scripts --workspaces=false
-      - working-directory: packages/langchain-exaone-ts
+      - working-directory: ${{ runner.temp }}/langchain-exaone-source
         run: npm run check --workspaces=false
       - name: Verify npm package in an independent project
-        working-directory: packages/langchain-exaone-ts
+        working-directory: ${{ runner.temp }}/langchain-exaone-source
         run: |
+          mkdir -p src/nested
+          for dir in . src src/nested; do
+            for file in .netrc .npmrc .pypirc; do
+              printf '%s\n' 'SYNTHETIC_PACKAGE_SECRET' > "$dir/$file"
+            done
+            printf '%s\n' 'SYNTHETIC_PACKAGE_SECRET' > "$dir/.env"
+            printf '%s\n' 'SYNTHETIC_PACKAGE_SECRET' > "$dir/.env.local"
+            printf '%s\n' 'SYNTHETIC_PACKAGE_SECRET' > "$dir/.envrc"
+            printf '%s\n' 'SYNTHETIC_PACKAGE_SECRET' > "$dir/.envrc.local"
+            printf '%s\n' 'EXAONE_API_KEY=your-api-key' > "$dir/.env.example"
+            printf '%s\n' 'export EXAONE_API_KEY=your-api-key' > "$dir/.envrc.example"
+            mkdir -p "$dir/.direnv"
+            printf '%s\n' 'SYNTHETIC_PACKAGE_SECRET' > "$dir/.direnv/state.ts"
+            printf '%s\n' '!/*' > "$dir/.direnv/.npmignore"
+          done
+          printf '%s\n' '!/.env' '!/.env.local' '!/.envrc' '!/.envrc.local' '!/.netrc' '!/.npmrc' '!/.pypirc' > src/.npmignore
+          printf '%s\n' '!/.env' '!/.env.local' '!/.envrc' '!/.envrc.local' '!/.netrc' '!/.npmrc' '!/.pypirc' > src/nested/.npmignore
+          mkdir -p dist/nested "$RUNNER_TEMP/langchain-exaone-prepack"
+          for dir in dist dist/nested; do
+            for file in .env .env.local .env.js .env.map .envrc .envrc.local .envrc.js .envrc.map; do
+              printf '%s\n' 'SYNTHETIC_PACKAGE_SECRET' > "$dir/$file"
+            done
+            printf '%s\n' '!/.env' '!/.env.*' '!/.envrc' '!/.envrc.*' > "$dir/.npmignore"
+            mkdir -p "$dir/.direnv"
+            printf '%s\n' 'SYNTHETIC_PACKAGE_SECRET' > "$dir/.direnv/state.js"
+            printf '%s\n' '!/*' > "$dir/.direnv/.npmignore"
+          done
+          npm pack --ignore-scripts --pack-destination "$RUNNER_TEMP/langchain-exaone-prepack"
+          python "$GITHUB_WORKSPACE/scripts/check-package-secrets.py" "$RUNNER_TEMP"/langchain-exaone-prepack/*.tgz --expected-public-examples 6
           npm pack --pack-destination "$RUNNER_TEMP"
+          python "$GITHUB_WORKSPACE/scripts/check-package-secrets.py" "$RUNNER_TEMP"/langchain-exaone-*.tgz --expected-public-examples 6
           mkdir -p "$RUNNER_TEMP/langchain-exaone-package-check"
           cd "$RUNNER_TEMP/langchain-exaone-package-check"
           cat > package.json <<'JSON'
@@ -290,9 +495,21 @@ jobs:
           npm install --ignore-scripts "$RUNNER_TEMP"/langchain-exaone-*.tgz
           node --input-type=module -e "import { BaseChatModel } from '@langchain/core/language_models/chat_models'; import { ChatExaone } from 'langchain-exaone'; if (!(new ChatExaone({ apiKey: 'package-check' }) instanceof BaseChatModel)) process.exit(1)"
           node -e "const { ChatExaone } = require('langchain-exaone'); if (new ChatExaone({ apiKey: 'package-check' })._llmType() !== 'exaone') process.exit(1)"
+          node <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const dir = 'node_modules/langchain-exaone/dist';
+          const maps = fs.readdirSync(dir).filter((name) => /\.d\.(m|c)ts\.map$/.test(name));
+          if (maps.length === 0) throw new Error('No declaration maps in the package');
+          for (const name of maps) {
+            for (const source of JSON.parse(fs.readFileSync(path.join(dir, name))).sources) {
+              if (!fs.existsSync(path.resolve(dir, source))) throw new Error(`Missing declaration source: ${source}`);
+            }
+          }
+          NODE
       - name: Verify minimum @langchain/core peer dependency
         if: matrix.node-version == '22.18.0'
-        working-directory: packages/langchain-exaone-ts
+        working-directory: ${{ runner.temp }}/langchain-exaone-source
         run: |
           npm pack --pack-destination "$RUNNER_TEMP"
           mkdir -p "$RUNNER_TEMP/langchain-exaone-minimum-core-check"
@@ -316,7 +533,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        core-version: ['1.2.0', 'latest']
+        core-version: ['1.2.0', '1']
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

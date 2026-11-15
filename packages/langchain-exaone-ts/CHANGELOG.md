@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.3 (unreleased)
+
+- Process CR-only stream event boundaries and completion markers without waiting for more data.
+- Reject non-text assistant content, reasoning, and refusal fields instead of discarding them.
+- Preserve assistant annotations and audio in additional kwargs, and retain incomplete streamed usage in response metadata.
+- Reject unsupported tool-call types and malformed streamed content or tool-call fields rather than dropping data.
+- Forward reasoning, tool-call, and usage stream chunks to LangChain callbacks.
+- Exclude local `.env`, `.envrc`, and `.direnv` state from built distributions while retaining example templates.
+- Include TypeScript sources referenced by declaration maps in the npm package.
+- Preserve LangChain `FunctionMessage` results in legacy function-call histories.
+- Support LangChain JSON Schema and JSON object structured-output methods and explicit tool strictness.
+
 ## 0.1.2 (2026-11-14)
 
 - Support Node.js 20.3 and `@langchain/core` 1.2.0 and newer in the 1.x line.

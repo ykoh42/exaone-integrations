@@ -12,7 +12,7 @@ import { convertChunksToEvents } from "@langchain/core/language_models/compat";
 import type { ChatModelStreamEvent } from "@langchain/core/language_models/event";
 import { RunnableBinding, RunnableLambda } from "@langchain/core/runnables";
 import type { BaseLanguageModelInput, StructuredOutputMethodOptions } from "@langchain/core/language_models/base";
-import { assembleStructuredOutputPipeline, createFunctionCallingParser } from "@langchain/core/language_models/structured_output";
+import { assembleStructuredOutputPipeline, createContentParser, createFunctionCallingParser } from "@langchain/core/language_models/structured_output";
 import { toJsonSchema } from "@langchain/core/utils/json_schema";
 import { getSchemaDescription, isInteropZodSchema } from "@langchain/core/utils/types";
 import type { InteropZodType } from "@langchain/core/utils/types";
@@ -33,6 +33,13 @@ const DEFAULT_MODEL = "k-exaone_v2.5";
 const MAX_CONTEXT_TOKENS = 524_288;
 
 type ExaoneMessageStructure = StandardMessageStructure;
+
+function nativeResponseFormat(method: string, name: string, schema: unknown, strict: boolean | undefined): Record<string, unknown> {
+  if (method === "jsonMode") return { type: "json_object" };
+  return { type: "json_schema", json_schema: {
+    name, schema, ...(strict === undefined ? {} : { strict }),
+  } };
+}
 
 type ChatCompletionResponse = {
   id?: string;
@@ -215,16 +222,27 @@ export class ChatExaone extends BaseChatModel<
     outputSchema: InteropZodType<RunOutput> | SerializableSchema<RunOutput> | Record<string, unknown>,
     config?: StructuredOutputMethodOptions<boolean>
   ): Runnable<BaseLanguageModelInput, RunOutput> | Runnable<BaseLanguageModelInput, { raw: BaseMessage; parsed: RunOutput }> {
-    if (config?.strict) throw new Error('"strict" mode is not supported for this model by default.');
-    if (config?.method !== undefined && config.method !== "functionCalling") {
-      throw new Error('ChatExaone.withStructuredOutput supports only the "functionCalling" method.');
+    const method = config?.method ?? "functionCalling";
+    if (!["functionCalling", "jsonMode", "jsonSchema"].includes(method)) {
+      throw new Error(`Unsupported structured output method: ${method}`);
+    }
+    if (config?.strict && method === "jsonMode") {
+      throw new Error('"strict" is not supported with the "jsonMode" method.');
     }
     const isSchema = isInteropZodSchema(outputSchema) || isSerializableSchema(outputSchema);
     const functionName = !isSchema && typeof outputSchema.name === "string" ? outputSchema.name : (config?.name ?? "extract");
     const parameters = isSchema ? toJsonSchema(outputSchema) : outputSchema;
+    if (method !== "functionCalling") {
+      const responseFormat = nativeResponseFormat(method, functionName, parameters, config?.strict);
+      const model = new RunnableBinding({ bound: this, kwargs: { response_format: responseFormat }, config: {} });
+      return assembleStructuredOutputPipeline(model, createContentParser(outputSchema), config?.includeRaw, config?.includeRaw ? "StructuredOutputRunnable" : "StructuredOutput");
+    }
     const model = this.bindTools([{
       type: "function",
-      function: { name: functionName, description: getSchemaDescription(outputSchema) ?? "A function available to call.", parameters },
+      function: {
+        name: functionName, description: getSchemaDescription(outputSchema) ?? "A function available to call.", parameters,
+        ...(config?.strict === undefined ? {} : { strict: config.strict }),
+      },
     }], { tool_choice: { type: "function", function: { name: functionName } } });
     const functionParser = createFunctionCallingParser(outputSchema, functionName);
     const parser = RunnableLambda.from(async (input: BaseMessage): Promise<RunOutput> => {
@@ -295,16 +313,14 @@ export class ChatExaone extends BaseChatModel<
           ? standardStreamChunk(originalChunk)
           : originalChunk;
         yield generationChunk;
-        if (generationChunk.text) {
-          await runManager?.handleLLMNewToken(
-            generationChunk.text,
-            undefined,
-            undefined,
-            undefined,
-            undefined,
-            { chunk: generationChunk }
-          );
-        }
+        await runManager?.handleLLMNewToken(
+          generationChunk.text,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          { chunk: generationChunk }
+        );
       }
     }
   }
@@ -557,12 +573,11 @@ function chunkWithContentBlocks(
 function createUsageChunk(payload: ChatCompletionChunk, headers: Headers): ChatGenerationChunk | undefined {
   if (!payload.usage) return undefined;
   const usage = mapUsage(payload.usage);
-  if (!usage) return undefined;
   return new ChatGenerationChunk({
     text: "",
     message: new AIMessageChunk<ExaoneMessageStructure>({
       content: "",
-      usage_metadata: usage,
+      ...(usage ? { usage_metadata: usage } : {}),
       response_metadata: { usage: payload.usage, headers: safeHeaders(headers) },
     }),
   });
@@ -584,6 +599,11 @@ function createStreamGenerationChunk(
   headers: Headers
 ): ChatGenerationChunk {
   const delta = choice.delta ?? {};
+  for (const field of ["content", "reasoning_content", "refusal"] as const) {
+    if (delta[field] != null && typeof delta[field] !== "string") {
+      throw new Error(`EXAONE stream delta ${field} must be text.`);
+    }
+  }
   const content = typeof delta.content === "string" ? delta.content : "";
   const refusal = typeof delta.refusal === "string" ? delta.refusal : undefined;
   const visibleContent = content.trim() === "" && refusal ? refusal : content;
@@ -615,6 +635,12 @@ function streamToolCallChunks(delta: Record<string, unknown>): Array<Record<stri
   const rawToolCalls = toolCallEntries(delta.tool_calls, "stream delta");
   return rawToolCalls.map((raw) => {
     const fn = isRecord(raw.function) ? raw.function : {};
+    if ((raw.index != null && (typeof raw.index !== "number" || !Number.isInteger(raw.index))) ||
+        (raw.id != null && typeof raw.id !== "string") ||
+        (fn.name != null && typeof fn.name !== "string") ||
+        (fn.arguments != null && typeof fn.arguments !== "string")) {
+      throw new Error("EXAONE stream tool call fields have invalid types.");
+    }
     return {
       ...(typeof raw.index === "number" ? { index: raw.index } : {}),
       ...(typeof raw.id === "string" ? { id: raw.id } : {}),
@@ -632,15 +658,22 @@ function toolCallEntries(value: unknown, context: "response" | "stream delta"): 
     throw new Error(`EXAONE ${location} tool call entries must be objects.`);
   }
   for (const toolCall of value) {
-    if (context === "response" && !isRecord(toolCall.function)) {
-      throw new Error("EXAONE response tool call function must be an object.");
-    }
-    if (context === "stream delta" && toolCall.function != null && !isRecord(toolCall.function)) {
-      throw new Error("EXAONE stream tool call function must be an object.");
-    }
-    if (context === "response") validateResponseToolCall(toolCall);
+    validateToolCall(toolCall, context);
   }
   return value;
+}
+
+function validateToolCall(toolCall: Record<string, unknown>, context: "response" | "stream delta"): void {
+  if (toolCall.type != null && toolCall.type !== "function") {
+    throw new Error("EXAONE returned an unsupported tool call type.");
+  }
+  if (context === "response" && !isRecord(toolCall.function)) {
+    throw new Error("EXAONE response tool call function must be an object.");
+  }
+  if (context === "stream delta" && toolCall.function != null && !isRecord(toolCall.function)) {
+    throw new Error("EXAONE stream tool call function must be an object.");
+  }
+  if (context === "response") validateResponseToolCall(toolCall);
 }
 
 function validateResponseToolCall(toolCall: Record<string, unknown>): void {
@@ -740,12 +773,21 @@ function validateOptions(options: {
   }
 }
 
+function validateAssistantTextFields(source: Record<string, unknown>): void {
+  for (const field of ["content", "reasoning_content", "refusal"] as const) {
+    if (source[field] != null && typeof source[field] !== "string") {
+      throw new Error(`EXAONE assistant ${field} must be a string.`);
+    }
+  }
+}
+
 function createAssistantMessage(
   source: Record<string, unknown>,
   response: ChatCompletionResponse,
   choice: NonNullable<ChatCompletionResponse["choices"]>[number],
   headers: Headers
 ): AIMessage<ExaoneMessageStructure> {
+  validateAssistantTextFields(source);
   const refusal = typeof source.refusal === "string" ? source.refusal : undefined;
   const content = typeof source.content === "string" ? source.content : "";
   const visibleContent = content.trim() === "" && refusal ? refusal : content;
@@ -753,6 +795,9 @@ function createAssistantMessage(
   if (typeof source.reasoning_content === "string") additional_kwargs.reasoning_content = source.reasoning_content;
   if (refusal !== undefined) additional_kwargs.refusal = refusal;
   if (source.function_call !== undefined) additional_kwargs.function_call = source.function_call;
+  for (const field of ["annotations", "audio"] as const) {
+    if (source[field] != null) additional_kwargs[field] = source[field];
+  }
 
   const rawToolCalls = toolCallEntries(source.tool_calls, "response");
   const [tool_calls, invalid_tool_calls] = parseAssistantToolCalls(rawToolCalls);
@@ -890,6 +935,7 @@ async function* parseSse<T>(body: ReadableStream<Uint8Array>, signal: AbortSigna
   const decoder = new TextDecoder();
   let buffer = "";
   let streamEnded = false;
+  let pendingCR = false;
   const cancelReader = () => {
     void reader.cancel().catch(() => undefined);
   };
@@ -898,9 +944,11 @@ async function* parseSse<T>(body: ReadableStream<Uint8Array>, signal: AbortSigna
     while (true) {
       signal?.throwIfAborted();
       const { done, value } = await readWithSignal(reader, signal);
-      buffer += done ? decoder.decode() : decoder.decode(value, { stream: true });
+      const text = done ? decoder.decode() : decoder.decode(value, { stream: true });
       streamEnded = done;
-      buffer = normalizeLineEndings(buffer);
+      const normalized = normalizeSseChunk(text, pendingCR);
+      pendingCR = normalized.pendingCR;
+      buffer += normalized.text;
       const frames = takeSseFrames(buffer);
       buffer = frames.remaining;
       const parsed = parseSseFrames<T>(frames.complete);
@@ -922,6 +970,13 @@ async function* parseSse<T>(body: ReadableStream<Uint8Array>, signal: AbortSigna
   }
 }
 
+function normalizeSseChunk(text: string, pendingCR: boolean): { text: string; pendingCR: boolean } {
+  if (!text.length) return { text, pendingCR };
+  // A CR ends a line immediately; ignore an LF that follows it in the next chunk.
+  if (pendingCR && text.startsWith("\n")) text = text.slice(1);
+  return { text: text.replace(/\r\n/g, "\n").replace(/\r/g, "\n"), pendingCR: text.endsWith("\r") };
+}
+
 function parseSseFrames<T>(frames: string[]): { events: T[]; done: boolean } {
   const events: T[] = [];
   for (const frame of frames) {
@@ -930,10 +985,6 @@ function parseSseFrames<T>(frames: string[]): { events: T[]; done: boolean } {
     if (payload) events.push(parseResponseJson<T>(payload));
   }
   return { events, done: false };
-}
-
-function normalizeLineEndings(buffer: string): string {
-  return buffer.replace(/\r\n/g, "\n").replace(/\r(?!$)/g, "\n");
 }
 
 function takeSseFrames(buffer: string): { complete: string[]; remaining: string } {

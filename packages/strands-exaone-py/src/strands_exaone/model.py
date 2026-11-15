@@ -433,7 +433,7 @@ class ExaoneModel(Model):
         response_format: dict[str, Any] | None = None,
         timeout: float | None = None,
         params: dict[str, Any] | None = None,
-        context_window_limit: int | None = 524288,
+        context_window_limit: int | None = None,
         model_info: ModelInfo | None = None,
         metadata_callback: MetadataCallback | None = None,
         http_client: httpx.AsyncClient | None = None,
@@ -445,8 +445,8 @@ class ExaoneModel(Model):
 
         Args:
             api_key: API key. Defaults to the ``EXAONE_API_KEY`` environment variable.
-            model_id: EXAONE model identifier.
-            base_url: Base URL for the EXAONE API, including ``/v1``.
+            model_id: EXAONE model identifier. Defaults to ``k-exaone_v2.5``.
+            base_url: API base URL including ``/v1``. Defaults to ``https://api.exaone.ai/v1``.
             stream: Whether to request a streaming Chat Completions response.
             max_tokens: Maximum generated tokens, including reasoning tokens.
             temperature: Sampling temperature.
@@ -463,7 +463,8 @@ class ExaoneModel(Model):
                 pauses between yielded events while the caller consumes a stream. An uncooperative custom
                 transport may delay cleanup beyond the deadline. Defaults to no provider-imposed timeout.
             params: Additional EXAONE Chat Completions parameters.
-            context_window_limit: Model context window in tokens.
+            context_window_limit: Optional context window override in tokens. The known default model uses
+                524,288 tokens; for other models, the SDK resolves the limit unless it is configured.
             model_info: Overrides the model facts exposed to Strands. This follows the SDK merge
                 contract and takes precedence over the context_window_limit shorthand.
             metadata_callback: Callback for response metadata after a successful response.

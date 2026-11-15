@@ -1,5 +1,7 @@
 """Model facts for the EXAONE API: https://docs.exaone.ai/ko/docs/k-exaone-2.5."""
 
+from typing import cast
+
 from langchain_core.language_models.model_profile import ModelProfile
 
 
@@ -7,7 +9,7 @@ def get_model_profile(model: str) -> ModelProfile | None:
     """Return a fresh profile for a known model, or None when its facts are unknown."""
     if model != "k-exaone_v2.5":
         return None
-    return {
+    profile = {
         "max_input_tokens": 524_288,
         "text_inputs": True,
         "text_outputs": True,
@@ -29,3 +31,6 @@ def get_model_profile(model: str) -> ModelProfile | None:
         "tool_call_streaming": True,
         "temperature": True,
     }
+    # ModelProfile gains fields over time; do not advertise keys unknown to the
+    # installed LangChain version, which warns on unrecognized profile fields.
+    return cast(ModelProfile, {key: value for key, value in profile.items() if key in ModelProfile.__annotations__})

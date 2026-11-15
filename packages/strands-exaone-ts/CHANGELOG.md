@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.3 (unreleased)
+
+- Exclude local `.env`, `.envrc`, and `.direnv` state from built distributions while retaining example templates.
+- Avoid applying the K-EXAONE context window to unknown model IDs.
+
 ## 0.1.2 (2026-11-14)
 
 - Support Zod 4.5.4 and newer within the 4.x line, and verify Strands SDK 1.25 and Harness 0.4.

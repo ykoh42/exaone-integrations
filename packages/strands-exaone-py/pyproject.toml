@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling>=1.26"]
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
@@ -39,11 +39,32 @@ Documentation = "https://github.com/ykoh42/exaone-integrations/tree/main/package
 Issues = "https://github.com/ykoh42/exaone-integrations/issues"
 Changelog = "https://github.com/ykoh42/exaone-integrations/blob/main/packages/strands-exaone-py/CHANGELOG.md"
 
-[tool.hatch.build.targets.wheel]
-packages = ["src/strands_exaone"]
+[tool.hatch.build]
+exclude = ["/.complexipy_cache", ".env", ".env.*", "!.env.example", ".envrc", ".envrc.*", "!.envrc.example", ".direnv", ".netrc", ".npmrc", ".pypirc"]
 
 [tool.hatch.build.targets.sdist]
-exclude = ["/.complexipy_cache"]
+include = [
+    "/src/strands_exaone/**/*.py",
+    "/src/strands_exaone/**/py.typed",
+    "/tests/**/*.py",
+    "/examples/**/*.py",
+    "/examples/**/README.md",
+    "/examples/**/requirements.txt",
+    "/examples/**/package.json",
+    "/.env.example",
+    "/.envrc.example",
+    "/src/strands_exaone/**/.env.example",
+    "/src/strands_exaone/**/.envrc.example",
+    "/CHANGELOG.md",
+    "/LICENSE",
+    "/README.md",
+    "/pyproject.toml",
+    "/uv.lock",
+]
+
+[tool.hatch.build.targets.wheel]
+include = ["/src/strands_exaone/**/*.py", "/src/strands_exaone/**/py.typed", "/src/strands_exaone/**/.env.example", "/src/strands_exaone/**/.envrc.example"]
+sources = ["src"]
 
 [tool.ruff]
 line-length = 120

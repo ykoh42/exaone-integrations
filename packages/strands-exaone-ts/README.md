@@ -67,7 +67,7 @@ For Agent and Harness calls, configure `ExaoneRetryStrategy` to honor server del
 | `enableThinking` | Reasoning-generation option for compatible custom models. K-EXAONE 2.5 always reasons. | Service default |
 | `includeUsage` | Set `stream_options.include_usage` on streaming requests. | `true` |
 | `timeoutMs` | Deadline for attempts, retry waits, response reads, and stream consumption. A custom fetch implementation must honor the supplied abort signal. | No provider-imposed timeout |
-| `contextWindowLimit` | Context window reported to Strands. Set a positive token count. | `524288` |
+| `contextWindowLimit` | Override the context window reported to Strands. Set a positive token count. | `524288` for `k-exaone_v2.5`; otherwise resolved by the SDK |
 | `maxRetries`, `baseRetryDelayMs`, `maxRetryDelayMs` | Optional retry policy. | `0` retries; `1000` and `30000` milliseconds |
 | `onMetadata` | Callback for successful request metadata. | None |
 | `fetch` | Custom fetch implementation. | Global `fetch` |
@@ -87,9 +87,9 @@ Strands tool execution uses the Chat Completions `tool_calls` field. Legacy `fun
 
 ## Model information
 
-`ExaoneModel.modelInfo` exposes the known `k-exaone_v2.5` capabilities through Strands' standard `ModelInfo`: stateless Chat Completions, forced tool choice, and native JSON Schema output. The default context window is 524,288 tokens. An independent maximum output size and a prompt-caching mechanism are left unknown.
+`ExaoneModel.modelInfo` exposes the known `k-exaone_v2.5` capabilities through Strands' standard `ModelInfo`: stateless Chat Completions, forced tool choice, native JSON Schema output, and a 524,288-token context window. An independent maximum output size and a prompt-caching mechanism are left unknown.
 
-The SDK owns how these facts are used. Explicit `modelInfo` fields override the provider's defaults; unspecified fields inherit. `modelInfo.limits.contextWindow` takes precedence over `contextWindowLimit`. Capability defaults apply only to the exact known model ID. For another model ID, configure its actual limits and capabilities; the configured `contextWindowLimit` remains in effect.
+The SDK owns how these facts are used. Explicit `modelInfo` fields override the provider's defaults; unspecified fields inherit. `modelInfo.limits.contextWindow` takes precedence over `contextWindowLimit`. Provider defaults apply only to the exact known model ID. For another model ID, the SDK's lookup or fallback applies unless you configure its actual limits and capabilities. Explicit limits remain in effect when changing models.
 
 The context budget covers input plus output, including reasoning. See the [EXAONE API specification](https://docs.exaone.ai/ko/docs/k-exaone-2.5) and [Strands model-info contract](https://github.com/strands-agents/harness-sdk/blob/main/shared/README.md).
 
@@ -133,7 +133,7 @@ JavaScript parses JSON numbers as `Number`, so integers outside the safe integer
 
 The provider preserves whitespace in text; Strands SDK aggregation omits text blocks that consist entirely of whitespace.
 
-The provider accepts text and JSON content. When using Strands Harness, configure the built-in `read` tool to return text descriptions for images and binary documents:
+When using Strands Harness, configure the built-in `read` tool to return text descriptions for images and binary documents:
 
 ```typescript
 import { createHarness } from '@strands-agents/harness'
@@ -196,7 +196,7 @@ Strands' default retry strategy does not inspect EXAONE headers. Keeping it alon
 
 `ExaoneModel`'s optional `maxRetries` setting remains available for direct model calls that do not use an Agent retry strategy. It retries retryable HTTP responses before emitting model events. Fetch failures are not retried because the fetch API does not reliably say whether the request was received. The provider never replays a partially delivered stream.
 
-For direct model calls, this configuration allows one provider retry with a maximum wait of 10 seconds:
+To use provider-level retries with a Harness agent, disable the Agent retry strategy. This configuration allows one provider retry with a maximum wait of 10 seconds:
 
 ```typescript
 import { createHarness } from '@strands-agents/harness'

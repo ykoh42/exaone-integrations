@@ -1,8 +1,10 @@
 """Default model profiles and explicit LangChain overrides."""
 
 import json
+import warnings
 
 import httpx
+from langchain_core.language_models.model_profile import ModelProfile
 
 from langchain_exaone import ChatEXAONE
 
@@ -13,9 +15,13 @@ def test_known_profile_and_unsupported_modalities() -> None:
     assert profile["max_input_tokens"] == 524_288
     assert profile["text_inputs"] and profile["text_outputs"]
     assert profile["reasoning_output"] and profile["tool_calling"]
-    assert profile["tool_choice"] and profile["tool_call_streaming"]
-    assert profile["reasoning_effort_levels"] == ["low", "medium", "high", "max"]
-    assert profile["reasoning_effort_default"] == "max"
+    assert profile["tool_choice"]
+    if "tool_call_streaming" in ModelProfile.__annotations__:
+        assert profile["tool_call_streaming"]
+    if "reasoning_effort_levels" in ModelProfile.__annotations__:
+        assert profile["reasoning_effort_levels"] == ["low", "medium", "high", "max"]
+    if "reasoning_effort_default" in ModelProfile.__annotations__:
+        assert profile["reasoning_effort_default"] == "max"
     assert profile["temperature"] is True
     assert all(
         profile[key] is False
@@ -51,9 +57,25 @@ def test_default_profiles_are_not_shared_between_instances() -> None:
     first = ChatEXAONE(api_key="synthetic")
     second = ChatEXAONE(api_key="synthetic")
     first.profile["max_input_tokens"] = 4096
-    first.profile["reasoning_effort_levels"].append("custom")
     assert second.profile["max_input_tokens"] == 524_288
-    assert second.profile["reasoning_effort_levels"] == ["low", "medium", "high", "max"]
+    if "reasoning_effort_levels" in ModelProfile.__annotations__:
+        first.profile["reasoning_effort_levels"].append("custom")
+        assert second.profile["reasoning_effort_levels"] == ["low", "medium", "high", "max"]
+
+
+def test_default_profile_only_includes_fields_supported_by_installed_langchain(monkeypatch) -> None:
+    supported = {"max_input_tokens", "reasoning_output", "tool_calling"}
+    monkeypatch.setattr(
+        ModelProfile,
+        "__annotations__",
+        {key: value for key, value in ModelProfile.__annotations__.items() if key in supported},
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        profile = ChatEXAONE(api_key="synthetic").profile
+
+    assert profile == {"max_input_tokens": 524_288, "reasoning_output": True, "tool_calling": True}
 
 
 def test_profile_is_not_sent_as_an_api_parameter() -> None:

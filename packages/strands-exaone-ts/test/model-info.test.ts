@@ -44,10 +44,25 @@ describe('EXAONE model info', () => {
   it('recomputes facts when the model changes', () => {
     const model = new ExaoneModel()
     model.updateConfig({ modelId: 'unknown-model' })
+    expect(model.modelInfo.limits?.contextWindow).toBeUndefined()
     expect(model.modelInfo.capabilities?.nativeStructuredOutput).toBeUndefined()
     expect(model.modelInfo.capabilities?.forcedToolChoice).toBeUndefined()
     model.updateConfig({ modelId: 'k-exaone_v2.5' })
+    expect(model.modelInfo.limits?.contextWindow).toBe(524_288)
+    expect(model.estimateUtilization(262_144)).toBe(0.5)
     expect(model.modelInfo.capabilities?.nativeStructuredOutput).toBe(true)
+  })
+
+  it('keeps caller context limits and model info precedence across model changes', () => {
+    const unknown = new ExaoneModel({ modelId: 'unknown-model' })
+    expect(unknown.modelInfo.limits?.contextWindow).toBeUndefined()
+
+    const model = new ExaoneModel({ modelId: 'unknown-model', contextWindowLimit: 4096 })
+    expect(model.modelInfo.limits?.contextWindow).toBe(4096)
+    model.updateConfig({ modelId: 'k-exaone_v2.5' })
+    expect(model.modelInfo.limits?.contextWindow).toBe(4096)
+    model.updateConfig({ modelId: 'unknown-model', modelInfo: { limits: { contextWindow: 8192 } } })
+    expect(model.modelInfo.limits?.contextWindow).toBe(8192)
   })
 
   it('preserves the SDK agent structured-output contract', async () => {

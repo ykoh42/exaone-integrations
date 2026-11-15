@@ -56,7 +56,7 @@ class ExaoneRetryStrategy(ModelRetryStrategy):
     async def _handle_after_model_call(self, event: AfterModelCallEvent) -> None:
         if event.retry:
             return
-        if event.stop_response is not None:
+        if event.stop_response is not None or event.exception is None:
             self._retry_counts.pop(id(event.invocation_state), None)
             return
 
@@ -66,7 +66,7 @@ class ExaoneRetryStrategy(ModelRetryStrategy):
             return
         api_error = error if isinstance(error, (ExaoneError, ExaoneThrottledError)) else None
         headers = api_error.headers if api_error is not None else {}
-        if error is None or not self.is_retryable(error):
+        if not self.is_retryable(error):
             return
 
         invocation_id = id(event.invocation_state)

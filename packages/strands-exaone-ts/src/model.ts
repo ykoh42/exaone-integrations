@@ -220,10 +220,10 @@ function requestParameters(config: ExaoneModelConfig, messages: Message[], optio
     if (streamOptions !== undefined && streamOptions !== null && (typeof streamOptions !== 'object' || Array.isArray(streamOptions))) {
       throw new TypeError('stream_options must be an object or null')
     }
-    const options = { ...(streamOptions as Record<string, unknown> | null | undefined) }
-    if (config.includeUsage !== undefined) options.include_usage = config.includeUsage
-    else if (!('include_usage' in options)) options.include_usage = true
-    result.stream_options = options
+    const resolvedStreamOptions = { ...(streamOptions as Record<string, unknown> | null | undefined) }
+    if (config.includeUsage !== undefined) resolvedStreamOptions.include_usage = config.includeUsage
+    else if (!('include_usage' in resolvedStreamOptions)) resolvedStreamOptions.include_usage = true
+    result.stream_options = resolvedStreamOptions
   } else {
     delete result.stream_options
   }
@@ -636,7 +636,7 @@ export class ExaoneModel extends Model<ExaoneModelConfig> {
   #config: ExaoneModelConfig
   constructor(config: ExaoneModelConfig = {}) {
     super()
-    this.#config = { modelId: 'k-exaone_v2.5', contextWindowLimit: 524288, ...copyConfig(config) }
+    this.#config = { modelId: 'k-exaone_v2.5', ...copyConfig(config) }
     validateModelConfig(this.#config)
   }
   /** Update the model configuration. Invalid options leave the current configuration unchanged. */

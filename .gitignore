@@ -2,6 +2,13 @@
 .env
 .env.*
 !.env.example
+.envrc
+.envrc.*
+!.envrc.example
+.direnv/
+.netrc
+.npmrc
+.pypirc
 .venv/
 __pycache__/
 *.py[cod]

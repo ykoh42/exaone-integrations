@@ -9,17 +9,18 @@ export class ResponseReadError extends Error {
 class SSEParser {
   private readonly fragments: string[] = []
   private data: string[] = []
-  private afterCR = false
+  private pendingCR = false
 
-  private startOffset(text: string): number {
-    if (!this.afterCR || !text.length) return 0
-    this.afterCR = false
+  /** A CR at a chunk boundary may be followed by an LF in the next non-empty chunk. */
+  private offsetAfterSplitCR(text: string): number {
+    if (!this.pendingCR || !text.length) return 0
+    this.pendingCR = false
     return text[0] === '\n' ? 1 : 0
   }
 
   push(text: string): string[] {
     const result: string[] = []
-    let start = this.startOffset(text)
+    let start = this.offsetAfterSplitCR(text)
     for (let index = start; index < text.length; index++) {
       const char = text[index]
       if (char !== '\r' && char !== '\n') continue
@@ -28,7 +29,7 @@ class SSEParser {
       this.fragments.length = 0
       if (char === '\r') {
         if (text[index + 1] === '\n') index++
-        else if (index + 1 === text.length) this.afterCR = true
+        else if (index + 1 === text.length) this.pendingCR = true
       }
       start = index + 1
     }

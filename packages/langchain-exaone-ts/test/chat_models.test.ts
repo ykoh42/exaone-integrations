@@ -1,8 +1,8 @@
 import { inspect } from "node:util";
-import { AIMessage, HumanMessage, ToolMessage } from "@langchain/core/messages";
+import { AIMessage, FunctionMessage, HumanMessage, ToolMessage } from "@langchain/core/messages";
 import { load } from "@langchain/core/load";
 import type { AIMessageChunk } from "@langchain/core/messages";
-import type { ChatGeneration } from "@langchain/core/outputs";
+import type { ChatGeneration, ChatGenerationChunk } from "@langchain/core/outputs";
 import { describe, expect, it, vi, afterEach } from "vitest";
 import { z } from "zod";
 import { ChatExaone } from "../src/chat_models.js";
@@ -70,6 +70,23 @@ describe("ChatExaone", () => {
       reasoning_content: "Need a lookup",
       tool_calls: [{ id: "call-1", type: "function", function: { name: "lookup", arguments: '{"city":"Seoul"}' } }],
     }]);
+  });
+
+  it("supports explicitly removing the v1 reasoning metadata fallback", async () => {
+    const fetcher = mockFetch([
+      completion({ role: "assistant", content: "Answer", reasoning_content: "Original reasoning" }),
+      completion({ role: "assistant", content: "Done" }),
+      completion({ role: "assistant", content: "Done" }),
+    ]);
+    const model = new ChatExaone({ apiKey: "fixture-key", fetch: fetcher, outputVersion: "v1" });
+    const message = await model.invoke("Question");
+    if (!Array.isArray(message.content)) throw new Error("Expected standard v1 content blocks.");
+    message.content = message.content.filter((part) => typeof part === "string" || part.type !== "reasoning");
+    await model.invoke([message]);
+    expect(requestBody(fetcher).messages).toMatchObject([{ reasoning_content: "Original reasoning" }]);
+    delete message.additional_kwargs.reasoning_content;
+    await model.invoke([message]);
+    expect((requestBody(fetcher).messages as Array<Record<string, unknown>>)[0]).not.toHaveProperty("reasoning_content");
   });
 
   it("uses content-only tool calls when EXAONE metadata has no original calls", async () => {
@@ -547,9 +564,13 @@ describe("ChatExaone", () => {
   });
 
   it.each([
+    ["non-string content", { content: ["unsupported"] }, "EXAONE assistant content must be a string."],
+    ["non-string reasoning", { reasoning_content: ["unsupported"] }, "EXAONE assistant reasoning_content must be a string."],
+    ["non-string refusal", { refusal: 42 }, "EXAONE assistant refusal must be a string."],
     ["non-array tool_calls", { tool_calls: { id: "call-1" } }, "EXAONE response tool_calls must be an array."],
     ["non-object tool-call entry", { tool_calls: [null] }, "EXAONE response tool call entries must be objects."],
     ["non-object tool-call function", { tool_calls: [{ function: "lookup" }] }, "EXAONE response tool call function must be an object."],
+    ["unsupported tool-call type", { tool_calls: [{ type: "custom", function: { name: "lookup", arguments: "{}" } }] }, "EXAONE returned an unsupported tool call type."],
   ])("rejects malformed response %s", async (_case, message, expectedError) => {
     const fetcher = mockFetch([completion({ role: "assistant", content: "", ...message })]);
     const model = new ChatExaone({ apiKey: "fixture-key", fetch: fetcher });
@@ -557,10 +578,32 @@ describe("ChatExaone", () => {
     await expect(model.invoke("Use the tool.")).rejects.toThrow(expectedError);
   });
 
+  it.each([null, ""])("accepts nullable or empty assistant text fields (%s)", async (value) => {
+    const fetcher = mockFetch([completion({ content: value, reasoning_content: value, refusal: value })]);
+    const message = await new ChatExaone({ apiKey: "fixture-key", fetch: fetcher }).invoke("Hello.");
+    expect(message.content).toBe("");
+  });
+
+  it("preserves representable assistant annotations and audio metadata", async () => {
+    const annotations = [{ type: "fixture_annotation", value: "synthetic" }];
+    const audio = { id: "audio-fixture" };
+    const fetcher = mockFetch([completion({ content: "", annotations, audio })]);
+    const message = await new ChatExaone({ apiKey: "fixture-key", fetch: fetcher }).invoke("Hello.");
+    expect(message.additional_kwargs).toMatchObject({ annotations, audio });
+  });
+
   it.each([
     ["non-array tool_calls", { tool_calls: { index: 0 } }, "EXAONE stream delta tool_calls must be an array."],
     ["non-object tool-call entry", { tool_calls: [null] }, "EXAONE stream tool call entries must be objects."],
     ["non-object tool-call function", { tool_calls: [{ index: 0, function: "lookup" }] }, "EXAONE stream tool call function must be an object."],
+    ["unsupported tool-call type", { tool_calls: [{ type: "custom", function: { name: "lookup" } }] }, "EXAONE returned an unsupported tool call type."],
+    ["non-string content", { content: { text: "lost" } }, "EXAONE stream delta content must be text."],
+    ["non-string reasoning", { reasoning_content: ["lost"] }, "EXAONE stream delta reasoning_content must be text."],
+    ["non-string refusal", { refusal: 1 }, "EXAONE stream delta refusal must be text."],
+    ["non-integer tool index", { tool_calls: [{ index: 0.5, function: { arguments: "{}" } }] }, "EXAONE stream tool call fields have invalid types."],
+    ["non-string tool id", { tool_calls: [{ id: 42 }] }, "EXAONE stream tool call fields have invalid types."],
+    ["non-string tool name", { tool_calls: [{ function: { name: 42 } }] }, "EXAONE stream tool call fields have invalid types."],
+    ["non-string tool arguments", { tool_calls: [{ function: { arguments: {} } }] }, "EXAONE stream tool call fields have invalid types."],
   ])("rejects malformed streamed %s", async (_case, delta, expectedError) => {
     const fetcher = mockFetch([
       sseResponse([{ choices: [{ index: 0, delta }] }]),
@@ -584,7 +627,7 @@ describe("ChatExaone", () => {
     const first = await model.invoke("Look this up.");
 
     expect(first.additional_kwargs.function_call).toEqual({ name: "lookup", arguments: "{\"key\":\"x\"}" });
-    await model.invoke([new HumanMessage("Look this up."), first]);
+    await model.invoke([new HumanMessage("Look this up."), first, new FunctionMessage({ name: "lookup", content: "value" })]);
 
     expect(requestBody(fetcher).messages).toEqual([
       { role: "user", content: "Look this up." },
@@ -593,6 +636,7 @@ describe("ChatExaone", () => {
         content: "",
         function_call: { name: "lookup", arguments: "{\"key\":\"x\"}" },
       },
+      { role: "function", name: "lookup", content: "value" },
     ]);
   });
 
@@ -635,6 +679,21 @@ describe("ChatExaone", () => {
     expect(result.usage_metadata?.output_token_details).toEqual({ reasoning: 3 });
   });
 
+  it("retains raw usage in streaming metadata when token counts are incomplete", async () => {
+    const usage = { completion_tokens: 7, vendor_detail: { count: 2 } };
+    const fetcher = mockFetch([sseResponse([
+      { choices: [{ index: 0, delta: { content: "Done" } }] },
+      { choices: [], usage },
+    ])]);
+    const model = new ChatExaone({ apiKey: "fixture-key", fetch: fetcher });
+    const chunks = [];
+    for await (const chunk of await model.stream("Hello")) chunks.push(chunk);
+
+    const usageChunk = chunks.find((chunk) => chunk.response_metadata.usage !== undefined);
+    expect(usageChunk?.response_metadata.usage).toEqual(usage);
+    expect(usageChunk?.usage_metadata).toBeUndefined();
+  });
+
   it("supports LangChain structured output", async () => {
     const fetcher = mockFetch([
       completion({
@@ -656,9 +715,61 @@ describe("ChatExaone", () => {
     expect(requestBody(fetcher).tool_choice).toEqual({ type: "function", function: { name: "extract" } });
   });
 
-  it.each(["jsonMode", "jsonSchema"] as const)("rejects unsupported structured-output method %s", (method) => {
-    const model = new ChatExaone({ apiKey: "fixture-key" });
-    expect(() => model.withStructuredOutput(z.object({ answer: z.string() }), { method })).toThrow("functionCalling");
+  it.each(["jsonMode", "jsonSchema"] as const)("supports structured-output method %s", async (method) => {
+    const fetcher = mockFetch([completion({ role: "assistant", content: '{"answer":"42"}' })]);
+    const model = new ChatExaone({ apiKey: "fixture-key", fetch: fetcher });
+    const output = model.withStructuredOutput(z.object({ answer: z.string() }), { method, includeRaw: true });
+    const result = await output.invoke("Return an answer as JSON.");
+    expect(result.parsed).toEqual({ answer: "42" });
+    expect(AIMessage.isInstance(result.raw)).toBe(true);
+    const body = requestBody(fetcher);
+    expect(body.tools).toBeUndefined();
+    expect(body.response_format).toMatchObject(method === "jsonMode"
+      ? { type: "json_object" }
+      : { type: "json_schema", json_schema: { name: "extract", schema: { type: "object" } } });
+  });
+
+  it.each(["jsonMode", "jsonSchema"] as const)("preserves raw response when %s validation fails", async (method) => {
+    const fetcher = mockFetch([completion({ role: "assistant", content: '{"answer":42}' })]);
+    const model = new ChatExaone({ apiKey: "fixture-key", fetch: fetcher });
+    const result = await model.withStructuredOutput(z.object({ answer: z.string() }), { method, includeRaw: true })
+      .invoke("Return an answer as JSON.");
+    expect(result.parsed).toBeNull();
+    expect(AIMessage.isInstance(result.raw)).toBe(true);
+  });
+
+  it("forwards explicit JSON Schema strictness and rejects invalid method/strict combinations", async () => {
+    const fetcher = mockFetch([completion({ role: "assistant", content: '{"answer":"42"}' })]);
+    const model = new ChatExaone({ apiKey: "fixture-key", fetch: fetcher });
+    await model.withStructuredOutput(z.object({ answer: z.string() }), { method: "jsonSchema", strict: true })
+      .invoke("Return an answer as JSON.");
+    expect(requestBody(fetcher).response_format).toMatchObject({ json_schema: { strict: true } });
+    expect(() => model.withStructuredOutput(z.object({ answer: z.string() }), { method: "jsonMode", strict: true })).toThrow("strict");
+    expect(() => model.withStructuredOutput(z.object({ answer: z.string() }), { method: "other" })).toThrow("Unsupported");
+  });
+
+  it("forwards function-calling strictness to the tool schema", async () => {
+    const fetcher = mockFetch([completion({
+      role: "assistant", content: "", tool_calls: [
+        { id: "call-1", type: "function", function: { name: "extract", arguments: '{"answer":"42"}' } },
+      ],
+    })]);
+    const model = new ChatExaone({ apiKey: "fixture-key", fetch: fetcher });
+    await expect(model.withStructuredOutput(z.object({ answer: z.string() }), { strict: true })
+      .invoke("Return an answer.")).resolves.toEqual({ answer: "42" });
+    expect(requestBody(fetcher).tools).toMatchObject([{ function: { strict: true } }]);
+  });
+
+  it.each(["jsonMode", "jsonSchema"] as const)("streams structured JSON with %s", async (method) => {
+    const fetcher = mockFetch([sseResponse([
+      { choices: [{ index: 0, delta: { content: '{"answer":' } }] },
+      { choices: [{ index: 0, delta: { content: '"42"}' }, finish_reason: "stop" }] },
+    ])]);
+    const model = new ChatExaone({ apiKey: "fixture-key", fetch: fetcher });
+    const results = [];
+    for await (const item of await model.withStructuredOutput(z.object({ answer: z.string() }), { method })
+      .stream("Return JSON.")) results.push(item);
+    expect(results.at(-1)).toEqual({ answer: "42" });
   });
 
   it("supports structured output with a Zod schema and the raw message", async () => {
@@ -729,6 +840,126 @@ describe("ChatExaone", () => {
     expect(chunks.map((chunk) => chunk.additional_kwargs.reasoning_content).filter(Boolean)).toEqual(["Think"]);
     expect(final.tool_calls).toEqual([{ id: "call-1", name: "lookup", args: { key: "x" }, type: "tool_call" }]);
     expect(final.usage_metadata).toMatchObject({ input_tokens: 4, output_tokens: 6, total_tokens: 10 });
+  });
+
+  it.each([
+    ["CR-only", ["\r\r"]],
+    ["split CRLF", ["\r", "\n", "\r", "\n"]],
+  ])("emits a %s SSE event while the connection remains open", async (_name, endings) => {
+    const encoder = new TextEncoder();
+    let closeStream = () => {};
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        closeStream = () => controller.close();
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: "fixture" } }] })}`));
+        for (const ending of endings) controller.enqueue(encoder.encode(ending));
+      },
+    });
+    const model = new ChatExaone({ apiKey: "fixture-key", fetch: mockFetch([new Response(body)]) });
+    const aborter = new AbortController();
+    const timeout = setTimeout(() => aborter.abort(new Error("SSE event was not emitted")), 2_000);
+    try {
+      const stream = await model.stream("Question", { signal: aborter.signal });
+      const iterator = stream[Symbol.asyncIterator]();
+      const first = await iterator.next();
+      expect(first.value?.content).toBe("fixture");
+      closeStream();
+      await iterator.return?.();
+    } finally {
+      clearTimeout(timeout);
+      aborter.abort();
+    }
+  });
+
+  it("finishes on a CR-only SSE completion marker without waiting for connection close", async () => {
+    const encoder = new TextEncoder();
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode("data: [DONE]\r\r"));
+      },
+    });
+    const model = new ChatExaone({ apiKey: "fixture-key", fetch: mockFetch([new Response(body)]) });
+    const aborter = new AbortController();
+    const timeout = setTimeout(() => aborter.abort(new Error("SSE stream did not finish")), 2_000);
+    try {
+      const stream = await model.stream("Question", { signal: aborter.signal });
+      const results = [];
+      for await (const chunk of stream) results.push(chunk);
+      expect(results).toEqual([]);
+    } finally {
+      clearTimeout(timeout);
+      aborter.abort();
+    }
+  });
+
+  it("preserves successive SSE events across mixed and split line endings", async () => {
+    const encoder = new TextEncoder();
+    const data = (content: string) => `data: ${JSON.stringify({ choices: [{ index: 0, delta: { content } }] })}`;
+    const parts = [data("first"), "\r", "\n", "\r", "\n", data("second"), "\r\r", data("third"), "\n\n", "data: [DONE]\r\n", "\r", "\n"];
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const part of parts) controller.enqueue(encoder.encode(part));
+      },
+    });
+    const model = new ChatExaone({ apiKey: "fixture-key", fetch: mockFetch([new Response(body)]) });
+    const aborter = new AbortController();
+    const timeout = setTimeout(() => aborter.abort(new Error("SSE stream did not finish")), 2_000);
+    try {
+      const contents = [];
+      for await (const chunk of await model.stream("Question", { signal: aborter.signal })) contents.push(chunk.content);
+      expect(contents).toEqual(["first", "second", "third"]);
+    } finally {
+      clearTimeout(timeout);
+      aborter.abort();
+    }
+  });
+
+  it.each(["v0", "v1"] as const)("delivers every %s stream chunk to callbacks exactly once", async (outputVersion) => {
+    const fetcher = mockFetch([sseResponse([
+      { choices: [{ index: 0, delta: { reasoning_content: "Plan" } }] },
+      { choices: [{ index: 0, delta: { content: "Answer" } }] },
+      { choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: "call-1", function: { name: "lookup", arguments: "{}" } }] }, finish_reason: "tool_calls" }] },
+      { choices: [], usage: { prompt_tokens: 4, completion_tokens: 6, total_tokens: 10 } },
+    ])]);
+    const model = new ChatExaone({ apiKey: "fixture-key", fetch: fetcher, outputVersion });
+    const observed: AIMessageChunk[] = [];
+    const chunks: AIMessageChunk[] = [];
+    const callbacks = [{
+      handleLLMNewToken(_token: string, _idx: unknown, _runId: string, _parentRunId?: string, _tags?: string[], fields?: { chunk?: ChatGenerationChunk }) {
+        if (fields?.chunk) observed.push(fields.chunk.message as AIMessageChunk);
+      },
+    }];
+
+    for await (const chunk of await model.stream("Use lookup.", { callbacks })) chunks.push(chunk as AIMessageChunk);
+
+    expect(observed).toHaveLength(4);
+    expect(chunks).toHaveLength(4);
+    expect(observed.map(({ content, additional_kwargs, tool_call_chunks, usage_metadata }) => ({
+      content, additional_kwargs, tool_call_chunks, usage_metadata,
+    }))).toEqual(chunks.map(({ content, additional_kwargs, tool_call_chunks, usage_metadata }) => ({
+      content, additional_kwargs, tool_call_chunks, usage_metadata,
+    })));
+    expect(observed[0]!.additional_kwargs.reasoning_content).toBe("Plan");
+    expect(observed[2]!.tool_call_chunks).toMatchObject([{ id: "call-1", name: "lookup" }]);
+    expect(observed[3]!.usage_metadata).toMatchObject({ total_tokens: 10 });
+  });
+
+  it("does not retry a stream after the consumer stops early", async () => {
+    const fetcher = mockFetch([sseResponse([
+      { choices: [{ index: 0, delta: { content: "First" } }] },
+      { choices: [{ index: 0, delta: { content: "Second" } }] },
+    ])]);
+    const model = new ChatExaone({ apiKey: "fixture-key", fetch: fetcher, maxRetries: 2 });
+    const received: string[] = [];
+    const tokens: string[] = [];
+    for await (const chunk of await model.stream("Question", { callbacks: [{ handleLLMNewToken: (token: string) => { tokens.push(token); } }] })) {
+      received.push(String(chunk.content));
+      break;
+    }
+
+    expect(received).toEqual(["First"]);
+    expect(tokens).toEqual(["First"]);
+    expect(fetcher).toHaveBeenCalledTimes(1);
   });
 
   it("exposes reasoning through LangChain's typed streamEvents API", async () => {

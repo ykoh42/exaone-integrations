@@ -167,6 +167,7 @@ function roleFor(message: BaseMessage, type: string): string {
     ai: "assistant",
     system: "system",
     tool: "tool",
+    function: "function",
   };
   if (type === "chat") return String((message as BaseMessage & { role?: string }).role ?? "");
   return standardRoles[type] ?? "";

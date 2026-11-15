@@ -11,7 +11,8 @@ from email.utils import parsedate_to_datetime
 RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
 
 
-def _seconds(value: str | None, *, milliseconds: bool = False) -> float | None:
+def _parse_retry_after_seconds(value: str | None, *, milliseconds: bool = False) -> float | None:
+    """Convert a numeric or HTTP-date retry hint to seconds."""
     if value is None:
         return None
     try:
@@ -38,14 +39,14 @@ def _seconds(value: str | None, *, milliseconds: bool = False) -> float | None:
 def retry_delay(headers: Mapping[str, str], attempt: int, base: float, maximum: float) -> float | None:
     """Honor the longer valid server hint; give up rather than retry too early."""
     hints = (
-        _seconds(headers.get("retry-after")),
-        _seconds(headers.get("retry-after-ms"), milliseconds=True),
+        _parse_retry_after_seconds(headers.get("retry-after")),
+        _parse_retry_after_seconds(headers.get("retry-after-ms"), milliseconds=True),
     )
-    present = [value for value in hints if value is not None]
-    if present:
-        value = max(present)
-        return value if value <= maximum else None
-    ceiling = min(maximum, base * 2 ** min(attempt, 60))
-    if ceiling < base:
+    valid_hints = [hint for hint in hints if hint is not None]
+    if valid_hints:
+        longest_hint = max(valid_hints)
+        return longest_hint if longest_hint <= maximum else None
+    delay_ceiling = min(maximum, base * 2 ** min(attempt, 60))
+    if delay_ceiling < base:
         return None
-    return random.uniform(base, ceiling)
+    return random.uniform(base, delay_ceiling)

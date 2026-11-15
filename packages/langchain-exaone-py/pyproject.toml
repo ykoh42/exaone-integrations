@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling>=1.26"]
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
@@ -32,8 +32,32 @@ test = [
 ]
 lint = ["ruff>=0.16,<0.18"]
 
+[tool.hatch.build]
+exclude = [".env", ".env.*", "!.env.example", ".envrc", ".envrc.*", "!.envrc.example", ".direnv", ".netrc", ".npmrc", ".pypirc"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src/langchain_exaone/**/*.py",
+    "/src/langchain_exaone/**/py.typed",
+    "/tests/**/*.py",
+    "/examples/**/*.py",
+    "/examples/**/README.md",
+    "/examples/**/requirements.txt",
+    "/examples/**/package.json",
+    "/.env.example",
+    "/.envrc.example",
+    "/src/langchain_exaone/**/.env.example",
+    "/src/langchain_exaone/**/.envrc.example",
+    "/CHANGELOG.md",
+    "/LICENSE",
+    "/README.md",
+    "/pyproject.toml",
+    "/uv.lock",
+]
+
 [tool.hatch.build.targets.wheel]
-packages = ["src/langchain_exaone"]
+include = ["/src/langchain_exaone/**/*.py", "/src/langchain_exaone/**/py.typed", "/src/langchain_exaone/**/.env.example", "/src/langchain_exaone/**/.envrc.example"]
+sources = ["src"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

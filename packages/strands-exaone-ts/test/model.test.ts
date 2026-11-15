@@ -564,7 +564,10 @@ describe('ExaoneModel', () => {
       const body = JSON.stringify(wire([{ message: { tool_calls: calls }, finish_reason: 'tool_calls' }]))
       const model = new ExaoneModel({ apiKey: 'key', stream: false, fetch: transport(response(body)) })
       const events = []
-      try { for await (const item of model.stream([user()])) events.push(item) } catch (error) { expect(error).toBeInstanceOf(ModelError) }
+      const readStream = async () => {
+        for await (const item of model.stream([user()])) events.push(item)
+      }
+      await expect(readStream()).rejects.toBeInstanceOf(ModelError)
       expect(events.some((item) => item.type === 'modelContentBlockStartEvent')).toBe(false)
     }
   })

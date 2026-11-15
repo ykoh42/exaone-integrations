@@ -61,7 +61,7 @@ For Agent and Harness calls, configure `ExaoneRetryStrategy` to honor server del
 | `include_usage` | Set `stream_options.include_usage` on streaming requests. | `True` |
 | `response_format` | Response format for ordinary agent calls. | Omitted |
 | `timeout` | Deadline for sending the request, retry waits, reading the response, asynchronous metadata callbacks, and time the caller pauses between yielded stream events. A custom transport that stalls during cleanup can finish after the deadline. | No provider-imposed timeout |
-| `context_window_limit` | Context window reported to Strands. Set a positive token count. | `524288` |
+| `context_window_limit` | Override the context window reported to Strands. Set a positive token count. | `524288` for `k-exaone_v2.5`; otherwise resolved by the SDK |
 | `max_retries`, `base_retry_delay`, `max_retry_delay` | Optional retry policy. | `0` retries; `1` and `30` seconds |
 | `metadata_callback` | Callback for successful request metadata. | None |
 | `http_client` | Caller-owned `httpx.AsyncClient` for custom transport or headers. | Provider-managed client |
@@ -77,9 +77,9 @@ First-class generation options are validated before storage or a request. Values
 
 ## Model information
 
-`ExaoneModel.model_info` exposes the known `k-exaone_v2.5` capabilities through Strands' standard `ModelInfo`: stateless Chat Completions, forced tool choice, and native JSON Schema output. The default context window is 524,288 tokens. An independent maximum output size and a prompt-caching mechanism are left unknown.
+`ExaoneModel.model_info` exposes the known `k-exaone_v2.5` capabilities through Strands' standard `ModelInfo`: stateless Chat Completions, forced tool choice, native JSON Schema output, and a 524,288-token context window. An independent maximum output size and a prompt-caching mechanism are left unknown.
 
-The SDK owns how these facts are used. Explicit `model_info` fields override the provider's defaults; unspecified fields inherit. `model_info.limits.context_window` takes precedence over `context_window_limit`. Capability defaults apply only to the exact known model ID. For another model ID, configure its actual limits and capabilities; the configured `context_window_limit` remains in effect.
+The SDK owns how these facts are used. Explicit `model_info` fields override the provider's defaults; unspecified fields inherit. `model_info.limits.context_window` takes precedence over `context_window_limit`. Provider defaults apply only to the exact known model ID. For another model ID, the SDK's lookup or fallback applies unless you configure its actual limits and capabilities. Explicit limits remain in effect when changing models.
 
 The context budget covers input plus output, including reasoning. See the [EXAONE API specification](https://docs.exaone.ai/ko/docs/k-exaone-2.5) and [Strands model-info contract](https://github.com/strands-agents/harness-sdk/blob/main/shared/README.md).
 
@@ -221,7 +221,7 @@ Alternatively, signal cancellation and wait for the stream to finish closing.
 
 Model routers can behave differently from provider retries when they switch after streaming begins. Test the framework's fallback behavior when partial output matters to your application.
 
-For direct model calls, this configuration disables the Agent retry strategy and permits one provider retry with a maximum delay of 10 seconds:
+To use provider-level retries with a Harness agent, disable the Agent retry strategy. This configuration permits one provider retry with a maximum delay of 10 seconds:
 
 ```python
 from strands_harness import create_harness

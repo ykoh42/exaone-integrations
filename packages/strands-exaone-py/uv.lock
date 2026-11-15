@@ -2745,8 +2745,8 @@ requires-dist = [
     { name = "pytest-timeout", marker = "extra == 'dev'", specifier = ">=2.0.0,<3.0.0" },
     { name = "pytest-xdist", marker = "extra == 'dev'", specifier = ">=3.0.0,<4.0.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.16.0,<0.18.0" },
-    { name = "strands-agents", specifier = ">=1.64.0,<1.65.0" },
-    { name = "strands-harness", marker = "extra == 'dev'", specifier = "~=0.3.4" },
+    { name = "strands-agents", specifier = ">=1.63.0,<1.66.0" },
+    { name = "strands-harness", marker = "extra == 'dev'", specifier = ">=0.1.2,<0.5" },
     { name = "truststore", specifier = ">=0.10,<1" },
     { name = "typing-extensions", specifier = ">=4.13.2,<5" },
 ]

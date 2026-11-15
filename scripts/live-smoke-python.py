@@ -13,7 +13,6 @@ import httpx
 import truststore
 from pydantic import BaseModel
 from strands import Agent, tool
-
 from strands_exaone import ExaoneModel
 
 
@@ -37,6 +36,20 @@ class Probe:
             self.last_request = time.monotonic()
         body = json.loads(request.content)
         messages = body.get("messages", [])
+        results_by_id = {
+            m["tool_call_id"]: m.get("content")
+            for m in messages
+            if m.get("role") == "tool" and isinstance(m.get("tool_call_id"), str) and m["tool_call_id"]
+        }
+        expected_results = {"get_test_value": "7", "first_number": "3", "second_number": "4"}
+        verified_tool_results = {
+            name
+            for message in messages
+            if message.get("role") == "assistant"
+            for call in message.get("tool_calls") or []
+            if (name := (call.get("function") or {}).get("name")) in expected_results
+            and results_by_id.get(call.get("id")) == expected_results[name]
+        }
         self.requests.append(
             {
                 "stream": body.get("stream"),
@@ -44,9 +57,8 @@ class Probe:
                 "reasoning_history": any(
                     m.get("role") == "assistant" and bool(m.get("reasoning_content")) for m in messages
                 ),
-                "tool_result": any(m.get("role") == "tool" for m in messages),
-                "tool_result_count": sum(m.get("role") == "tool" for m in messages),
                 "max_tool_calls": max((len(m.get("tool_calls") or []) for m in messages), default=0),
+                "verified_tool_results": verified_tool_results,
             }
         )
 
@@ -91,53 +103,74 @@ async def main() -> None:
     async with httpx.AsyncClient(verify=context, event_hooks={"request": [probe.on_request]}, timeout=120.0) as client:
         model = ExaoneModel(
             reasoning_effort="low", preserve_thinking=True, max_tokens=512, metadata_callback=probe.on_metadata,
-            http_client=client,
+            http_client=client, max_retries=12, base_retry_delay=10, max_retry_delay=120,
         )
         messages = [{"role": "user", "content": [{"text": "Say a short greeting."}]}]
         stream_events = [event async for event in model.stream(messages)]
-        stream_text = any("text" in event.get("contentBlockDelta", {}).get("delta", {}) for event in stream_events)
-        stream_reasoning = any("reasoningContent" in event.get("contentBlockDelta", {}).get("delta", {}) for event in stream_events)
-        if not (stream_text and stream_reasoning and any("messageStop" in event for event in stream_events)):
+        stream_text = any(bool(event.get("contentBlockDelta", {}).get("delta", {}).get("text")) for event in stream_events)
+        stream_reasoning = any(
+            bool(event.get("contentBlockDelta", {}).get("delta", {}).get("reasoningContent", {}).get("text"))
+            for event in stream_events
+        )
+        if not (probe.requests[-1]["stream"] is True and stream_text and stream_reasoning
+                and any("messageStop" in event for event in stream_events)):
             raise AssertionError("Streaming text/reasoning/stop did not all arrive")
         probe.report("stream", text=stream_text, reasoning=stream_reasoning)
 
         model.update_config(stream=False)
         nonstream_events = [event async for event in model.stream(messages)]
-        if not any("messageStop" in event for event in nonstream_events):
-            raise AssertionError("Non-streaming completion did not finish")
-        probe.report("nonstream", finished=True)
+        nonstream_text = any(
+            bool(event.get("contentBlockDelta", {}).get("delta", {}).get("text")) for event in nonstream_events
+        )
+        if not (probe.requests[-1]["stream"] is False and nonstream_text
+                and any("messageStop" in event for event in nonstream_events)):
+            raise AssertionError("Non-streaming text or completion was missing")
+        probe.report("nonstream", text=True, finished=True)
         model.update_config(stream=True)
 
-        conversation = Agent(model=model, callback_handler=None)
+        conversation = Agent(model=model, callback_handler=None, retry_strategy=None)
         await conversation.invoke_async("Remember the code word amber. Reply with one short sentence.")
         await conversation.invoke_async("Repeat the code word I asked you to remember.")
         if not probe.requests[-1]["reasoning_history"] or not probe.requests[-1]["preserve_thinking"]:
             raise AssertionError("Assistant reasoning history was not forwarded")
         probe.report("reasoning_history", forwarded=True)
 
-        tool_agent = Agent(model=model, tools=[get_test_value], callback_handler=None)
+        tool_agent = Agent(model=model, tools=[get_test_value], callback_handler=None, retry_strategy=None)
+        tool_start = len(probe.requests)
         await tool_agent.invoke_async(
             "First call the get_test_value tool, then report the returned value. Do not guess.",
             limits={"turns": 4},
         )
-        if not probe.tool_calls or not any(item["tool_result"] for item in probe.requests):
-            raise AssertionError("Strands tool invocation did not reach a follow-up request")
+        if not probe.tool_calls or not any(
+            "get_test_value" in item["verified_tool_results"] for item in probe.requests[tool_start:]
+        ):
+            raise AssertionError("Strands tool result was not forwarded correctly")
         probe.report("agent_tool_roundtrip", tool_calls=probe.tool_calls, tool_result_forwarded=True)
 
         parallel_model = ExaoneModel(
             reasoning_effort="low", preserve_thinking=True, max_tokens=512,
             params={"parallel_tool_calls": True}, http_client=client,
+            max_retries=12, base_retry_delay=10, max_retry_delay=120,
         )
-        parallel_agent = Agent(model=parallel_model, tools=[first_number, second_number], callback_handler=None)
+        parallel_agent = Agent(
+            model=parallel_model, tools=[first_number, second_number], callback_handler=None, retry_strategy=None,
+        )
+        parallel_start = len(probe.requests)
         await parallel_agent.invoke_async(
             "You must call both first_number and second_number before adding their returned values. Do not guess.",
             limits={"turns": 4},
         )
+        parallel_requests = probe.requests[parallel_start:]
         if set(parallel_calls) != {"first", "second"} or not any(
-            item["max_tool_calls"] >= 2 and item["tool_result_count"] >= 2 for item in probe.requests
+            {"first_number", "second_number"} <= item["verified_tool_results"] for item in parallel_requests
         ):
-            raise AssertionError("Parallel tool calls were not both forwarded")
-        probe.report("parallel_tool_agent", both_tools_called=True, results_forwarded=2)
+            raise AssertionError("Both tool results were not forwarded correctly")
+        # The model may call tools one at a time even when parallel calls are enabled.
+        parallel_observed = any(item["max_tool_calls"] >= 2 for item in parallel_requests)
+        probe.report(
+            "parallel_tool_agent", both_tools_called=True, results_forwarded=2,
+            parallel_calls_observed=parallel_observed,
+        )
 
         events = [event async for event in model.structured_output(
             CountResult, [{"role": "user", "content": [{"text": "Return the value count as 3."}]}]

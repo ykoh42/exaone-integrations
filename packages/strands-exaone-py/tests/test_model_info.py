@@ -29,6 +29,26 @@ def test_unset_context_inherits_known_limit() -> None:
     assert model.model_info.limits.context_window == 524_288
 
 
+def test_custom_model_does_not_inherit_exaone_context_and_tracks_model_changes() -> None:
+    model = ExaoneModel(api_key="synthetic", model_id="unknown-model")
+    assert model.model_info.limits.context_window is None
+
+    model.update_config(model_id="k-exaone_v2.5")
+    assert model.context_window_limit == 524_288
+    assert model.estimate_utilization(262_144) == 0.5
+    model.update_config(model_id="unknown-model")
+    assert model.model_info.limits.context_window is None
+
+
+def test_custom_model_keeps_explicit_context_and_model_info_precedence() -> None:
+    model = ExaoneModel(api_key="synthetic", model_id="unknown-model", context_window_limit=4096)
+    assert model.context_window_limit == 4096
+    model.update_config(model_id="k-exaone_v2.5")
+    assert model.context_window_limit == 4096
+    model.update_config(model_id="unknown-model", model_info=ModelInfo(limits=ModelLimits(context_window=8192)))
+    assert model.context_window_limit == 8192
+
+
 def test_caller_overrides_win_without_replacing_other_facts() -> None:
     model = ExaoneModel(
         api_key="synthetic",

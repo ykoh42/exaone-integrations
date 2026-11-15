@@ -4,7 +4,10 @@ import type { BaseModelConfig } from '@strands-agents/sdk'
 export interface ExaoneModelConfig extends BaseModelConfig {
   /** EXAONE API key; defaults to EXAONE_API_KEY. Never returned by getConfig(). */
   apiKey?: string
-  /** API base URL, including /v1. Remote endpoints require HTTPS; loopback HTTP is allowed for tests. */
+  /**
+   * API base URL, including /v1; defaults to https://api.exaone.ai/v1.
+   * Remote endpoints require HTTPS; loopback HTTP is allowed for tests.
+   */
   baseURL?: string
   /** Deadline for attempts, retry waits, response reads, and stream consumption; custom fetch must honor abort. */
   timeoutMs?: number

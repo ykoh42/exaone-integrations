@@ -105,6 +105,8 @@ The provider forwards reasoning found in the history it receives. It cannot rest
 
 LangChain's `outputVersion: "v1"` exposes reasoning and tool calls as standard content blocks. Keep the returned message, or a completed aggregation of stream chunks, to include those blocks in a later conversation.
 
+If you remove every reasoning block from a v1 message before reusing it, remove `additional_kwargs.reasoning_content` too. When no nonempty reasoning block remains, the provider uses that field as a fallback.
+
 Like LangChain's OpenAI integration, a normal `invoke()` returns an `AIMessage`; streaming yields `AIMessageChunk` objects. The current `BaseChatModel` TypeScript signature types `invoke()` as returning a chunk, so use chunk-specific methods such as `concat()` on streamed chunks only.
 
 ## Tools
@@ -113,13 +115,13 @@ Like LangChain's OpenAI integration, a normal `invoke()` returns an `AIMessage`;
 
 When a returned EXAONE message is reused in history, edits to its LangChain `tool_calls` determine the next request. Provider-specific fields from matching original calls are retained.
 
-`withStructuredOutput()` uses the `functionCalling` method: it requests its named tool and uses LangChain's parser. Zod schemas are validated, and `{ includeRaw: true }` includes the original message when parsing fails. The `jsonMode` and `jsonSchema` methods are not supported by this wrapper. Invalid tool arguments remain available in `invalid_tool_calls`, and the original calls are retained in response metadata for conversation history.
+`withStructuredOutput()` defaults to `functionCalling`: it requests its named tool and uses LangChain's parser. Set `{ method: "jsonSchema" }` for native JSON Schema output or `{ method: "jsonMode" }` for a JSON object. With JSON mode, ask for JSON in the prompt. Zod schemas are validated; a plain JSON Schema object is parsed as JSON without additional schema validation, following LangChain's parser. `{ includeRaw: true }` retains the original message when parsing fails. Invalid tool arguments remain available in `invalid_tool_calls`, and the original calls are retained in response metadata for conversation history.
 
-The integration also preserves legacy `function_call` fields in assistant history. It does not execute tools by itself.
+The integration also preserves legacy `function_call` fields and LangChain `FunctionMessage` results in conversation history for compatible endpoints. A synthetic history containing both fields and a `function` role returned HTTP 400 from the default EXAONE endpoint; use the tool-calling protocol for EXAONE. The integration does not execute tools by itself.
 
 ## API compatibility
 
-This package sends requests directly to the EXAONE Chat Completions endpoint. It supports text messages, assistant reasoning history, function tools, sampling settings, JSON response-format passthrough, streaming, usage, response metadata, and HTTP errors. The service decides which forwarded tool definitions and optional generation fields it accepts.
+This package sends requests directly to the EXAONE Chat Completions endpoint. It supports text messages, assistant reasoning history, function tools, sampling settings, JSON response-format passthrough, streaming, usage, response metadata, and HTTP errors. Other response tool-call types cannot be represented as function tools and are rejected. The service decides which forwarded tool definitions and optional generation fields it accepts.
 
 The integration accepts text and reasoning input blocks. It rejects image, audio, video, and other multimodal content. Non-streaming `generate()` returns every candidate when `modelKwargs.n` requests multiple choices; `invoke()` returns the first candidate. Each candidate carries the same request-level usage, so use `generate()`'s `llmOutput` for totals rather than adding candidate usage together. Streaming raises an error if the endpoint returns multiple choices, since LangChain's stream represents one message. When returned, `logprobs` and other response-specific fields are kept in metadata; the integration does not expose token-level log probabilities as a separate abstraction.
 

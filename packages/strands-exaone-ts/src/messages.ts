@@ -67,7 +67,7 @@ function systemMessages(system: StreamOptions['systemPrompt']): WireMessage[] {
   return text.length ? [{ role: 'system', content: text.join('') }] : []
 }
 
-/** Convert Strands blocks to the text-only EXAONE message protocol. */
+/** Convert Strands text, reasoning, and tool blocks to EXAONE messages. */
 export function formatMessages(messages: Message[], options?: StreamOptions): WireMessage[] {
   const result: WireMessage[] = systemMessages(options?.systemPrompt)
   for (const message of messages) {

@@ -103,16 +103,31 @@ interface SecretReplacement {
   pattern?: RegExp
 }
 
+/** Match either casing of percent-encoded bytes without changing other characters. */
+function percentEncodingPattern(literal: string): RegExp | undefined {
+  if (!/%[0-9A-F]{2}/i.test(literal)) return undefined
+  const pattern = escapeRegExp(literal).replace(/%[0-9A-F]{2}/gi,
+    (encoded) => encoded.replace(/[A-F]/gi, (hex) => `[${hex.toUpperCase()}${hex.toLowerCase()}]`))
+  return new RegExp(pattern, 'g')
+}
+
 function createSecretRedactor(secret: string): (value: string) => string {
   if (!secret) return (value) => value
   const variants = new Set([secret])
-  try { variants.add(encodeURIComponent(secret)) } catch { /* keep the literal variant */ }
-  try { variants.add(new URLSearchParams({ value: secret }).toString().slice('value='.length)) } catch { /* keep available variants */ }
+  try {
+    variants.add(encodeURIComponent(secret))
+  } catch {
+    // The literal variant is still available when URI encoding fails.
+  }
+  try {
+    variants.add(new URLSearchParams({ value: secret }).toString().slice('value='.length))
+  } catch {
+    // Keep the variants collected so far if form encoding fails.
+  }
+  // Replace the longest variant first so a shorter one cannot expose its suffix.
   const replacements: SecretReplacement[] = [...variants].sort((left, right) => right.length - left.length).map((literal) => {
-    if (!/%[0-9A-F]{2}/i.test(literal)) return { literal }
-    const pattern = escapeRegExp(literal).replace(/%[0-9A-F]{2}/gi,
-      (encoded) => encoded.replace(/[A-F]/gi, (hex) => `[${hex.toUpperCase()}${hex.toLowerCase()}]`))
-    return { literal, pattern: new RegExp(pattern, 'g') }
+    const pattern = percentEncodingPattern(literal)
+    return pattern ? { literal, pattern } : { literal }
   })
   return (value) => {
     for (const replacement of replacements) {

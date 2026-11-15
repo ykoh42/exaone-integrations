@@ -59,6 +59,32 @@ def _completion(*, content: str = "4", reasoning: str = "Let me calculate.") -> 
     }
 
 
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.asyncio
+async def test_stream_stops_reading_at_done_marker(asynchronous: bool) -> None:
+    frame = b'data: {"choices":[{"index":0,"delta":{"content":"A"}}]}\n\ndata: [DONE]\n\n'
+
+    class Stream(httpx.SyncByteStream, httpx.AsyncByteStream):
+        def __iter__(self):
+            yield frame
+            raise AssertionError("The response was read after its completion marker")
+
+        async def __aiter__(self):
+            yield frame
+            raise AssertionError("The response was read after its completion marker")
+
+    transport = httpx.MockTransport(lambda _: httpx.Response(200, stream=Stream()))
+    with httpx.Client(transport=transport) as client:
+        async with httpx.AsyncClient(transport=transport) as async_client:
+            model = ChatEXAONE(api_key="synthetic-key", http_client=client, http_async_client=async_client)
+            if asynchronous:
+                chunks = [chunk async for chunk in model.astream("Question")]
+            else:
+                chunks = list(model.stream("Question"))
+
+    assert "".join(chunk.text for chunk in chunks) == "A"
+
+
 def test_invoke_maps_reasoning_usage_and_recommended_defaults() -> None:
     requests: list[dict] = []
 
@@ -188,6 +214,55 @@ def test_bind_tools_normalizes_langchain_tool_choice(choice: bool | str, expecte
     assert requests[0].get("tool_choice") == expected
     if expected is None:
         assert "tool_choice" not in requests[0]
+
+
+@pytest.mark.parametrize("method", ["invoke", "ainvoke", "stream", "astream"])
+@pytest.mark.parametrize("stop", [["call-stop"], []])
+@pytest.mark.asyncio
+async def test_call_stop_overrides_model_kwargs(method: str, stop: list[str]) -> None:
+    requests: list[dict[str, Any]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        requests.append(body)
+        if body["stream"]:
+            return httpx.Response(200, content=b'data: {"choices":[{"index":0,"delta":{"content":"OK"}}]}\n\n')
+        return httpx.Response(200, json=_completion())
+
+    transport = httpx.MockTransport(respond)
+    with httpx.Client(transport=transport) as client:
+        async with httpx.AsyncClient(transport=transport) as async_client:
+            model = ChatEXAONE(
+                api_key="synthetic-key",
+                http_client=client,
+                http_async_client=async_client,
+                model_kwargs={"stop": ["default-stop"]},
+            )
+            if method == "invoke":
+                model.invoke("Question", stop=stop)
+            elif method == "ainvoke":
+                await model.ainvoke("Question", stop=stop)
+            elif method == "stream":
+                list(model.stream("Question", stop=stop))
+            else:
+                _ = [chunk async for chunk in model.astream("Question", stop=stop)]
+
+    assert requests[0]["stop"] == stop
+
+
+def test_model_kwargs_stop_is_used_when_call_does_not_specify_one() -> None:
+    requests: list[dict[str, Any]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json=_completion())
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        ChatEXAONE(api_key="synthetic-key", http_client=client, model_kwargs={"stop": ["default-stop"]}).invoke(
+            "Question"
+        )
+
+    assert requests[0]["stop"] == ["default-stop"]
 
 
 def test_reasoning_effort_medium_is_sent_on_the_wire() -> None:
@@ -437,6 +512,26 @@ def test_v1_output_can_be_reused_as_conversation_history() -> None:
     }
 
 
+def test_v1_reasoning_metadata_fallback_can_be_removed_explicitly() -> None:
+    requests: list[dict[str, Any]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json=_completion(content="Answer", reasoning="Original reasoning"))
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        model = ChatEXAONE(api_key="synthetic-key", http_client=client, output_version="v1")
+        message = model.invoke("Question")
+        assert isinstance(message.content, list)
+        message.content = [block for block in message.content if block.get("type") != "reasoning"]
+        model.invoke([message])
+        message.additional_kwargs.pop("reasoning_content")
+        model.invoke([message])
+
+    assert requests[1]["messages"][0]["reasoning_content"] == "Original reasoning"
+    assert "reasoning_content" not in requests[2]["messages"][0]
+
+
 def test_v1_content_blocks_alone_can_supply_assistant_tool_calls() -> None:
     requests: list[dict[str, Any]] = []
 
@@ -561,6 +656,7 @@ def test_tool_calls_are_returned_as_langchain_tool_calls() -> None:
         ({"call-1": {}}, "tool_calls must be an array"),
         ([None], "tool call entries must be objects"),
         ([{"function": "weather"}], "tool call function must be an object"),
+        ([{"type": "custom", "function": {"name": "weather", "arguments": "{}"}}], "unsupported tool call type"),
     ],
 )
 def test_invoke_rejects_malformed_tool_call_shapes(tool_calls: Any, error_message: str) -> None:
@@ -574,6 +670,35 @@ def test_invoke_rejects_malformed_tool_call_shapes(tool_calls: Any, error_messag
         client.close()
 
 
+@pytest.mark.parametrize("operation", ["invoke", "ainvoke"])
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("content", ["unsupported"]), ("reasoning_content", ["unsupported"]), ("refusal", 42)],
+)
+@pytest.mark.asyncio
+async def test_invoke_rejects_nontext_assistant_fields(operation: str, field: str, value: Any) -> None:
+    payload = _completion()
+    payload["choices"][0]["message"][field] = value
+    transport = httpx.MockTransport(lambda _: httpx.Response(200, json=payload))
+    with httpx.Client(transport=transport) as client:
+        async with httpx.AsyncClient(transport=transport) as async_client:
+            model = ChatEXAONE(api_key="synthetic-key", http_client=client, http_async_client=async_client)
+            with pytest.raises(ValueError, match=f"assistant {field} must be a string"):
+                if operation == "invoke":
+                    model.invoke("hello")
+                else:
+                    await model.ainvoke("hello")
+
+
+@pytest.mark.parametrize("value", [None, ""])
+def test_invoke_accepts_nullable_and_empty_assistant_fields(value: str | None) -> None:
+    payload = _completion()
+    payload["choices"][0]["message"].update(content=value, reasoning_content=value, refusal=value)
+    with httpx.Client(transport=httpx.MockTransport(lambda _: httpx.Response(200, json=payload))) as client:
+        message = ChatEXAONE(api_key="synthetic-key", http_client=client).invoke("hello")
+    assert message.content == ""
+
+
 @pytest.mark.parametrize("operation", ["stream", "astream"])
 @pytest.mark.parametrize(
     ("tool_calls", "error_message"),
@@ -581,6 +706,7 @@ def test_invoke_rejects_malformed_tool_call_shapes(tool_calls: Any, error_messag
         ({"call-1": {}}, "stream delta tool_calls must be an array"),
         ([None], "stream tool call entries must be objects"),
         ([{"function": "weather"}], "stream tool call function must be an object"),
+        ([{"type": "custom", "function": {"name": "weather"}}], "unsupported tool call type"),
     ],
 )
 @pytest.mark.asyncio
@@ -683,6 +809,71 @@ def test_streamed_tool_call_fragments_form_a_langchain_tool_call() -> None:
     assert "tool_choice" not in requests[0]
 
 
+@pytest.mark.parametrize("method", ["json_mode", "json_schema"])
+def test_native_structured_output_uses_content_and_preserves_raw(method: str) -> None:
+    class Answer(BaseModel):
+        answer: str
+
+    requests: list[dict] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json=_completion(content='{"answer":"42"}'))
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        structured = ChatEXAONE(api_key="synthetic-key", http_client=client).with_structured_output(
+            Answer, method=method, include_raw=True
+        )
+        result = structured.invoke("Return JSON")
+    assert result["parsed"] == Answer(answer="42")
+    assert isinstance(result["raw"], AIMessage)
+    assert result["parsing_error"] is None
+    assert "tools" not in requests[0]
+    assert requests[0]["response_format"]["type"] == ("json_object" if method == "json_mode" else "json_schema")
+    if method == "json_schema":
+        assert requests[0]["response_format"]["json_schema"]["schema"]["properties"]["answer"]["type"] == "string"
+
+
+@pytest.mark.parametrize("method", ["json_mode", "json_schema"])
+def test_native_structured_output_retains_raw_when_validation_fails(method: str) -> None:
+    class Answer(BaseModel):
+        answer: str
+
+    with httpx.Client(
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, json=_completion(content="{}")))
+    ) as client:
+        structured = ChatEXAONE(api_key="synthetic-key", http_client=client).with_structured_output(
+            Answer, method=method, include_raw=True
+        )
+        result = structured.invoke("Return JSON")
+    assert isinstance(result["raw"], AIMessage)
+    assert result["parsed"] is None
+    assert result["parsing_error"] is not None
+
+
+def test_native_structured_output_forwards_strict_and_accepts_untitled_json_schema() -> None:
+    requests: list[dict] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json=_completion(content='{"answer":"42"}'))
+
+    schema = {"type": "object", "properties": {"answer": {"type": "string"}}}
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        model = ChatEXAONE(api_key="synthetic-key", http_client=client)
+        assert model.with_structured_output(schema, method="json_schema", strict=True).invoke("Return JSON") == {
+            "answer": "42"
+        }
+        with pytest.raises(ValueError, match="strict"):
+            model.with_structured_output(schema, method="json_mode", strict=True)
+        with pytest.raises(ValueError, match="Unsupported structured output"):
+            model.with_structured_output(schema, method="other")
+    assert requests[0]["response_format"] == {
+        "type": "json_schema",
+        "json_schema": {"name": "extract", "schema": schema, "strict": True},
+    }
+
+
 def test_structured_output_uses_langchain_tool_contract() -> None:
     class Answer(BaseModel):
         result: str
@@ -714,6 +905,48 @@ def test_structured_output_uses_langchain_tool_contract() -> None:
         client.close()
     assert response == Answer(result="four")
     assert requests[0]["tools"][0]["function"]["name"] == "Answer"
+
+
+def test_structured_function_calling_forwards_strict() -> None:
+    class Answer(BaseModel):
+        result: str
+
+    payload = _completion()
+    payload["choices"][0]["message"] = {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [
+            {"id": "call-1", "type": "function", "function": {"name": "Answer", "arguments": '{"result":"four"}'}}
+        ],
+    }
+    requests: list[dict] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json=payload)
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        model = ChatEXAONE(api_key="synthetic-key", http_client=client)
+        result = model.with_structured_output(Answer, method="function_calling", strict=True).invoke("Return JSON")
+    assert result == Answer(result="four")
+    assert requests[0]["tools"][0]["function"]["strict"] is True
+    assert "strict" not in requests[0]
+
+
+@pytest.mark.parametrize("method", ["json_mode", "json_schema"])
+def test_native_structured_output_supports_streaming(method: str) -> None:
+    class Answer(BaseModel):
+        answer: str
+
+    frames = [
+        {"choices": [{"index": 0, "delta": {"content": '{"answer":'}}]},
+        {"choices": [{"index": 0, "delta": {"content": '"42"}'}, "finish_reason": "stop"}]},
+    ]
+    body = "".join(f"data: {json.dumps(frame)}\n\n" for frame in frames) + "data: [DONE]\n\n"
+    with httpx.Client(transport=httpx.MockTransport(lambda _: httpx.Response(200, text=body))) as client:
+        model = ChatEXAONE(api_key="synthetic-key", http_client=client)
+        chunks = list(model.with_structured_output(Answer, method=method).stream("Return JSON"))
+    assert chunks[-1] == Answer(answer="42")
 
 
 def test_stream_preserves_reasoning_text_and_usage_chunks() -> None:

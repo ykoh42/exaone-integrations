@@ -14,6 +14,7 @@ export function validateRetryConfig(config: ExaoneModelConfig): void {
   }
 }
 
+/** Parse Retry-After seconds or an HTTP date as a delay in milliseconds. */
 function parseRetryAfter(value: string | null): number | undefined {
   if (value === null) return undefined
   const trimmed = value.trim()
@@ -24,11 +25,11 @@ function parseRetryAfter(value: string | null): number | undefined {
 }
 
 function retryAfterDelay(headers: Headers): number | undefined {
-  const raw = headers.get('retry-after-ms')?.trim()
-  const millis = raw && /^\d+(\.\d+)?$/.test(raw) ? Number(raw) : undefined
-  const seconds = parseRetryAfter(headers.get('retry-after'))
-  const delays = [millis, seconds].filter((value): value is number => value !== undefined && !Number.isNaN(value))
-  return delays.length ? Math.max(...delays) : undefined
+  const rawMilliseconds = headers.get('retry-after-ms')?.trim()
+  const millisecondsHint = rawMilliseconds && /^\d+(\.\d+)?$/.test(rawMilliseconds) ? Number(rawMilliseconds) : undefined
+  const standardHint = parseRetryAfter(headers.get('retry-after'))
+  const hints = [millisecondsHint, standardHint].filter((value): value is number => value !== undefined && !Number.isNaN(value))
+  return hints.length ? Math.max(...hints) : undefined
 }
 
 /** Return a bounded retry delay, or undefined when the server hint exceeds the cap. */

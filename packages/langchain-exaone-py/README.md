@@ -56,9 +56,9 @@ LangChain's deserializer allows only registered integration classes by default. 
 
 `ChatEXAONE().profile` provides LangChain's standard model profile for `k-exaone_v2.5`: a 524,288-token context budget, text input and output, reasoning, tool calling and choice. Image, audio, video, and PDF inputs and non-text outputs are unsupported. The combined input and output, including reasoning, must fit within the context budget; no independent `max_output_tokens` profile value is inferred.
 
-The profile reports reasoning levels (`low`, `medium`, `high`, `max`), the API default (`max`), streamed tool-call support, and temperature support. The endpoint reference currently lists `low`, `high`, and `max`; the [Agent guide](https://docs.exaone.ai/ko/docs/agent-start) also uses `medium`.
+Where supported by the installed LangChain version, the profile reports reasoning levels (`low`, `medium`, `high`, `max`), the API default (`max`), streamed tool-call support, and temperature support. The endpoint reference currently lists `low`, `high`, and `max`; the [Agent guide](https://docs.exaone.ai/ko/docs/agent-start) also uses `medium`.
 
-Older `langchain-core` versions can warn that some newer profile fields are unrecognized. The profile still retains those fields; upgrading `langchain-core` removes the warning when the newer fields are supported.
+The default profile includes only fields recognized by the installed `langchain-core` version. Upgrading LangChain makes additional profile fields available without changing the model's API behavior.
 
 LangChain and Deep Agents can use this profile for context management and structured-output strategy selection. An unknown model ID has no inferred profile. Pass `profile={...}` to replace the defaults using LangChain's public constructor option; `profile={}` leaves capabilities unspecified. Profiles are application metadata and are not sent as API parameters.
 
@@ -90,6 +90,8 @@ Each candidate in a non-streaming response carries the same request-level usage.
 
 LangChain's `output_version="v1"` standard content blocks can also be retained in conversation history, including reasoning and tool calls.
 
+If you remove every reasoning block from a v1 message before reusing it, remove `additional_kwargs["reasoning_content"]` too. When no nonempty reasoning block remains, the provider uses that field as a fallback.
+
 ## Tools and structured output
 
 ```python
@@ -107,9 +109,13 @@ model = ChatEXAONE().bind_tools([get_weather], tool_choice="auto")
 response = model.invoke("서울 날씨를 알려줘.")
 ```
 
-`with_structured_output()` uses LangChain's standard tool-based strategy. You can pass additional Chat Completions fields with `model_kwargs` or per-call keyword arguments. Their acceptance depends on the EXAONE endpoint.
+`with_structured_output()` uses LangChain's tool-based strategy by default. Pass `method="json_schema"` for native JSON Schema output or `method="json_mode"` for a JSON object. With JSON mode, ask for JSON in the prompt. Pydantic schemas validate the result; a plain JSON Schema dictionary is parsed as JSON without additional schema validation, following LangChain's parser. `include_raw=True` retains the original message and parsing error.
 
-When a returned EXAONE message is reused in history, edits to its LangChain `tool_calls` determine the next request. Provider-specific fields from matching original calls are retained.
+You can pass additional Chat Completions fields with `model_kwargs` or per-call keyword arguments. Their acceptance depends on the EXAONE endpoint.
+
+When a returned EXAONE message is reused in history, edits to its LangChain `tool_calls` determine the next request. Provider-specific fields from matching original calls are retained. Response tool-call types other than function calls cannot be represented by this integration and are rejected.
+
+Legacy `function_call` fields and LangChain `FunctionMessage` results are also preserved in conversation history for compatible endpoints. A synthetic history containing both fields and a `function` role returned HTTP 400 from the default EXAONE endpoint; use the tool-calling protocol for EXAONE.
 
 ## Configuration
 

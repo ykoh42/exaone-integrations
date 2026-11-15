@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from functools import wraps
 from inspect import isasyncgenfunction, iscoroutinefunction, isgeneratorfunction
+from operator import itemgetter
 from typing import Any, Literal
 from urllib.parse import quote, quote_plus, urlsplit
 
@@ -33,8 +34,16 @@ from langchain_core.messages import (
     ToolMessage,
 )
 from langchain_core.messages.ai import add_usage
+from langchain_core.output_parsers import (
+    JsonOutputKeyToolsParser,
+    JsonOutputParser,
+    PydanticOutputParser,
+    PydanticToolsParser,
+)
 from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
+from langchain_core.runnables import RunnableMap, RunnablePassthrough
 from langchain_core.utils.function_calling import convert_to_openai_tool
+from langchain_core.utils.pydantic import is_basemodel_subclass
 from pydantic import ConfigDict, Field, SecretStr, field_validator
 
 from langchain_exaone._profiles import get_model_profile
@@ -406,6 +415,8 @@ def _tool_calls(raw_calls: Any) -> tuple[list[dict[str, Any]], list[dict[str, An
     for raw in raw_calls:
         if not isinstance(raw, Mapping):
             raise ValueError("EXAONE response tool call entries must be objects")
+        if raw.get("type") is not None and raw["type"] != "function":
+            raise ValueError("EXAONE returned an unsupported tool call type")
         if not isinstance(raw.get("function"), Mapping):
             raise ValueError("EXAONE response tool call function must be an object")
         function = raw["function"]
@@ -435,6 +446,11 @@ def _assistant_message(choice: Mapping[str, Any], response: Mapping[str, Any], a
     content, refusal = raw.get("content"), raw.get("refusal")
     if content is not None and not isinstance(content, str):
         raise ValueError("EXAONE assistant content must be a string")
+    reasoning = raw.get("reasoning_content")
+    if reasoning is not None and not isinstance(reasoning, str):
+        raise ValueError("EXAONE assistant reasoning_content must be a string")
+    if refusal is not None and not isinstance(refusal, str):
+        raise ValueError("EXAONE assistant refusal must be a string")
     if (
         (content is None or isinstance(content, str) and not content.strip())
         and isinstance(refusal, str)
@@ -442,7 +458,6 @@ def _assistant_message(choice: Mapping[str, Any], response: Mapping[str, Any], a
     ):
         content = refusal
     additional: dict[str, Any] = {}
-    reasoning = raw.get("reasoning_content")
     if isinstance(reasoning, str) and reasoning:
         additional["reasoning_content"] = reasoning
     if isinstance(refusal, str):
@@ -488,11 +503,12 @@ def _decode_sse(lines: Iterator[str]) -> Iterator[dict[str, Any]]:
             if pending:
                 payload = "\n".join(pending)
                 pending.clear()
-                if payload != "[DONE]":
-                    data = _load_response_json(payload, "event stream")
-                    if not isinstance(data, dict):
-                        raise ValueError("EXAONE stream event must be a JSON object")
-                    yield data
+                if payload == "[DONE]":
+                    return
+                data = _load_response_json(payload, "event stream")
+                if not isinstance(data, dict):
+                    raise ValueError("EXAONE stream event must be a JSON object")
+                yield data
         elif line.startswith("data:"):
             pending.append(line[5:].lstrip())
     if pending:
@@ -511,11 +527,12 @@ async def _decode_sse_async(lines: Any) -> AsyncIterator[dict[str, Any]]:
             if pending:
                 payload = "\n".join(pending)
                 pending.clear()
-                if payload != "[DONE]":
-                    data = _load_response_json(payload, "event stream")
-                    if not isinstance(data, dict):
-                        raise ValueError("EXAONE stream event must be a JSON object")
-                    yield data
+                if payload == "[DONE]":
+                    return
+                data = _load_response_json(payload, "event stream")
+                if not isinstance(data, dict):
+                    raise ValueError("EXAONE stream event must be a JSON object")
+                yield data
         elif line.startswith("data:"):
             pending.append(line[5:].lstrip())
     if pending:
@@ -701,12 +718,12 @@ class ChatEXAONE(BaseChatModel):
             value = getattr(self, name)
             if value is not None:
                 body[name] = value
-        if stop is not None:
-            body["stop"] = stop
         if stream:
             body["stream_options"] = {"include_usage": True}
         body.update({name: value for name, value in self.model_kwargs.items() if value is not None})
         body.update({name: value for name, value in kwargs.items() if value is not None})
+        if stop is not None:
+            body["stop"] = stop
         template_kwargs = dict(self.chat_template_kwargs)
         for source in (self.model_kwargs, kwargs):
             custom_template_kwargs = source.get("chat_template_kwargs")
@@ -882,6 +899,66 @@ class ChatEXAONE(BaseChatModel):
             tool_choice = {"type": "function", "function": {"name": tool_choice}}
         return self.bind(tools=formatted, tool_choice=tool_choice, **kwargs)
 
+    def with_structured_output(self, schema: dict[str, Any] | type, *, include_raw: bool = False, **kwargs: Any) -> Any:
+        """Return schema-constrained output using a LangChain structured-output method."""
+        method = kwargs.pop("method", None)
+        if method is None:
+            method = "function_calling"
+        strict = kwargs.pop("strict", None)
+        if kwargs:
+            raise ValueError(f"Received unsupported arguments {kwargs}")
+        if strict is not None and not isinstance(strict, bool):
+            raise TypeError("strict must be a boolean or None")
+        if method not in ("function_calling", "json_mode", "json_schema"):
+            raise ValueError(f"Unsupported structured output method: {method}")
+        if strict and method == "json_mode":
+            raise ValueError("strict is not supported with the json_mode method")
+        if method == "function_calling":
+            if strict is None:
+                return super().with_structured_output(schema, include_raw=include_raw)
+            tool = convert_to_openai_tool(schema, strict=strict)
+            llm = self.bind_tools(
+                [tool],
+                tool_choice="any",
+                ls_structured_output_format={"kwargs": {"method": "function_calling"}, "schema": schema},
+            )
+            parser = (
+                PydanticToolsParser(tools=[schema], first_tool_only=True)
+                if isinstance(schema, type) and is_basemodel_subclass(schema)
+                else JsonOutputKeyToolsParser(key_name=tool["function"]["name"], first_tool_only=True)
+            )
+        elif method == "json_mode":
+            response_format: dict[str, Any] = {"type": "json_object"}
+        else:
+            if (
+                isinstance(schema, dict)
+                and schema.get("type") != "function"
+                and not ("name" in schema and "parameters" in schema)
+            ):
+                name = schema.get("title", "extract")
+                parameters = schema
+            else:
+                function = convert_to_openai_tool(schema)["function"]
+                name = function["name"]
+                parameters = function["parameters"]
+            json_schema: dict[str, Any] = {"name": name, "schema": parameters}
+            if strict is not None:
+                json_schema["strict"] = strict
+            response_format = {"type": "json_schema", "json_schema": json_schema}
+
+        if method != "function_calling":
+            llm = self.bind(response_format=response_format)
+            parser = (
+                PydanticOutputParser(pydantic_object=schema)
+                if isinstance(schema, type) and is_basemodel_subclass(schema)
+                else JsonOutputParser()
+            )
+        if not include_raw:
+            return llm | parser
+        parser_assign = RunnablePassthrough.assign(parsed=itemgetter("raw") | parser, parsing_error=lambda _: None)
+        parser_none = RunnablePassthrough.assign(parsed=lambda _: None)
+        return RunnableMap(raw=llm) | parser_assign.with_fallbacks([parser_none], exception_key="parsing_error")
+
     @_safe_transport_errors
     def _stream(
         self,
@@ -991,6 +1068,8 @@ class ChatEXAONE(BaseChatModel):
             for tool in raw_tool_calls or []:
                 if not isinstance(tool, Mapping):
                     raise ValueError("EXAONE stream tool call entries must be objects")
+                if tool.get("type") is not None and tool["type"] != "function":
+                    raise ValueError("EXAONE returned an unsupported tool call type")
                 function = tool.get("function")
                 if function is None:
                     function = {}
