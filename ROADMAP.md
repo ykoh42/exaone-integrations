@@ -17,7 +17,7 @@ Next, [support EXAONE 4.5 on self-hosted endpoints](https://github.com/ykoh42/ex
 
 ## Server and parser coverage
 
-For each model, evaluate vLLM and SGLang independently, including applicable upstream releases and model-card forks. Record the exact server version or revision and the configured reasoning and tool-call parsers. The model cards currently show these server examples:
+For each model, start with the server distribution and parser configuration recommended by the publisher's official model card. Evaluate vLLM and SGLang independently, then check upstream releases with confirmed model support and other relevant versions or forks where there is an identified need. Record the exact server version or revision and the configured reasoning and tool-call parsers. The model cards currently show these server examples:
 
 | Model | Server | Reasoning parser | Tool-call parser |
 | --- | --- | --- | --- |
