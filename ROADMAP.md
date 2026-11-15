@@ -2,9 +2,11 @@
 
 This roadmap tracks planned improvements to the community-maintained EXAONE integrations for Strands and LangChain in Python and TypeScript. Work can be merged independently as each issue is ready; the linked GitHub issues are the source of truth for status and acceptance criteria.
 
+The integrations connect to a model already served at an endpoint supplied by the caller. The server operator chooses and runs the model, serving engine, chat template, and server-side parsers; the provider does not manage them. Provider options should respect the selected endpoint's contract without guessing server settings or silently translating between thinking controls. Keep the hosted EXAONE 2.5 API-key-only defaults unchanged.
+
 ## 1. K-EXAONE 2.0
 
-First, make [K-EXAONE 2.0 available on self-hosted endpoints](https://github.com/ykoh42/exaone-integrations/issues/6). The related implementation work can be merged one issue at a time:
+First, support [connecting to K-EXAONE 2.0 on compatible self-hosted endpoints](https://github.com/ykoh42/exaone-integrations/issues/6). The related implementation work can be merged one issue at a time:
 
 - [Preserve reasoning from OpenAI-compatible server response fields](https://github.com/ykoh42/exaone-integrations/issues/2)
 - [Preserve fragmented tool calls and framework execution semantics](https://github.com/ykoh42/exaone-integrations/issues/5)
@@ -17,7 +19,7 @@ Next, [support EXAONE 4.5 on self-hosted endpoints](https://github.com/ykoh42/ex
 
 ## Server and parser coverage
 
-For each model, start with the server distribution and parser configuration recommended by the publisher's official model card. Evaluate vLLM and SGLang independently, then check upstream releases with confirmed model support and other relevant versions or forks where there is an identified need. Record the exact server version or revision and the configured reasoning and tool-call parsers. The model cards currently show these server examples:
+For compatibility work, use the publisher's official model-card server examples as initial test references, not as requirements imposed on users. Evaluate vLLM and SGLang independently, then check upstream releases with confirmed model support and other relevant versions or forks where there is an identified need. Record the exact server version or revision and the configured reasoning and tool-call parsers for each verified combination. The model cards currently show these server examples:
 
 | Model | Server | Reasoning parser | Tool-call parser |
 | --- | --- | --- | --- |
