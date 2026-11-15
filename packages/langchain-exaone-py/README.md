@@ -168,10 +168,12 @@ from langchain_core.messages import HumanMessage
 from langchain_exaone import ChatEXAONE
 
 model = ChatEXAONE(base_url="http://127.0.0.1:8000/v1", api_key="EMPTY", model="EXAONE-4.5-33B")
-message = HumanMessage(content=[
-    {"type": "text", "text": "Describe this image."},
-    {"type": "image", "url": "https://example.com/image.png"},
-])
+message = HumanMessage(
+    content=[
+        {"type": "text", "text": "Describe this image."},
+        {"type": "image", "url": "https://example.com/image.png"},
+    ]
+)
 response = model.invoke([message])
 ```
 
