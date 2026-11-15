@@ -1,4 +1,4 @@
-import type { Message, StreamOptions, ToolResultBlock } from '@strands-agents/sdk'
+import type { ImageBlock, Message, StreamOptions, ToolResultBlock } from '@strands-agents/sdk'
 
 type WireMessage = Record<string, unknown>
 
@@ -37,18 +37,34 @@ function assistantMessage(message: Message): WireMessage {
   return result
 }
 
+function imagePart(block: ImageBlock): WireMessage {
+  let url: string
+  if (block.source.type === 'imageSourceBytes') {
+    const serialized = block.toJSON().image.source
+    if (!('bytes' in serialized) || typeof serialized.bytes !== 'string') throw new TypeError('Unable to encode image bytes')
+    url = `data:image/${block.format};base64,${serialized.bytes}`
+  } else if (block.source.type === 'imageSourceUrl') {
+    url = block.source.url
+  } else throw new TypeError('EXAONE image input requires bytes or a URL')
+  return { type: 'image_url', image_url: { url } }
+}
+
 function userMessages(message: Message): WireMessage[] {
   const results: WireMessage[] = []
-  const text: string[] = []
+  const content: WireMessage[] = []
   for (const block of message.content) {
     switch (block.type) {
-      case 'textBlock': text.push(block.text); break
+      case 'textBlock': content.push({ type: 'text', text: block.text }); break
+      case 'imageBlock': content.push(imagePart(block)); break
       case 'toolResultBlock': results.push(toolResult(block)); break
       default: throw new TypeError(`Unsupported EXAONE user content: ${block.type}`)
     }
   }
-  if (!results.length && !text.length) throw new TypeError('EXAONE user messages cannot be empty')
-  if (text.length) results.push({ role: 'user', content: text.join('') })
+  if (!results.length && !content.length) throw new TypeError('EXAONE user messages cannot be empty')
+  if (content.length) {
+    const value = content.some((part) => part.type === 'image_url') ? content : content.map((part) => part.text).join('')
+    results.push({ role: 'user', content: value })
+  }
   return results
 }
 

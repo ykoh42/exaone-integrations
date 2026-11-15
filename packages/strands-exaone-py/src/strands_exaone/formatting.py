@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 from typing import Any, cast
 
@@ -45,15 +46,29 @@ def _reasoning_text(block: ContentBlock) -> str:
     return value.get("text", "")
 
 
-def _message_parts(message: Message) -> tuple[list[str], list[str], list[dict[str, Any]], list[dict[str, Any]]]:
-    text: list[str] = []
+def _image_part(image: dict[str, Any]) -> dict[str, Any]:
+    source = image.get("source", {})
+    data = source.get("bytes")
+    image_format = image.get("format")
+    if not isinstance(data, bytes) or image_format not in {"png", "jpeg", "gif", "webp"}:
+        raise ValueError("EXAONE image input requires bytes and a supported image format")
+    encoded = base64.b64encode(data).decode("ascii")
+    return {"type": "image_url", "image_url": {"url": f"data:image/{image_format};base64,{encoded}"}}
+
+
+def _message_parts(
+    message: Message,
+) -> tuple[list[dict[str, Any]], list[str], list[dict[str, Any]], list[dict[str, Any]]]:
+    content: list[dict[str, Any]] = []
     reasoning: list[str] = []
     calls: list[dict[str, Any]] = []
     results: list[dict[str, Any]] = []
     role = message["role"]
     for block in message["content"]:
         if "text" in block:
-            text.append(block["text"])
+            content.append({"type": "text", "text": block["text"]})
+        elif "image" in block and role == "user":
+            content.append(_image_part(block["image"]))
         elif "reasoningContent" in block and role == "assistant":
             reasoning.append(_reasoning_text(block))
         elif "toolUse" in block and role == "assistant":
@@ -63,7 +78,7 @@ def _message_parts(message: Message) -> tuple[list[str], list[str], list[dict[st
             results.append({"role": "tool", "tool_call_id": result["toolUseId"], "content": _text_of_result(result)})
         else:
             raise ValueError(f"Unsupported EXAONE content block for {role}: {', '.join(block)}")
-    return text, reasoning, calls, results
+    return content, reasoning, calls, results
 
 
 def _system_messages(
@@ -74,20 +89,26 @@ def _system_messages(
     return [{"role": "system", "content": system_prompt}] if system_prompt else []
 
 
+def _user_content(content: list[dict[str, Any]]) -> str | list[dict[str, Any]]:
+    if any(part["type"] == "image_url" for part in content):
+        return content
+    return "".join(part["text"] for part in content)
+
+
 def _format_message(message: Message) -> list[dict[str, Any]]:
     role = message["role"]
     if role not in {"user", "assistant"}:
         raise ValueError(f"Unsupported Strands message role: {role}")
-    text, reasoning, calls, results = _message_parts(message)
+    content, reasoning, calls, results = _message_parts(message)
     if role == "assistant":
-        assistant: dict[str, Any] = {"role": "assistant", "content": "".join(text)}
+        assistant: dict[str, Any] = {"role": "assistant", "content": "".join(part["text"] for part in content)}
         if reasoning:
             assistant["reasoning_content"] = "".join(reasoning)
         if calls:
             assistant["tool_calls"] = calls
         return [assistant]
-    if text:
-        return [*results, {"role": "user", "content": "".join(text)}]
+    if content:
+        return [*results, {"role": "user", "content": _user_content(content)}]
     if not results:
         raise ValueError("User message must contain text or a tool result")
     return results

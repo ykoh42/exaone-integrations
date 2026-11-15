@@ -161,7 +161,31 @@ The default model's documented context window is 524,288 tokens. The selected en
 
 The provider retries HTTP 408, 429, 500, 502, 503, and 504 errors up to two times by default; set `max_retries=0` to disable retries. It honors the longer valid `Retry-After` or `Retry-After-Ms` delay. If neither header is present, the first retry waits at least one second to respect the API's per-second rate limit; a `max_retry_delay` below one second disables that retry. It does not retry after streaming output has started.
 
-The EXAONE API is text-only. Image, audio, and other non-text input blocks are rejected explicitly.
+The default hosted K-EXAONE 2.5 API is text-only. For an already-running compatible EXAONE 4.5 endpoint, set `base_url`, `model`, and `api_key` to its connection details and use LangChain image content blocks:
+
+```python
+from langchain_core.messages import HumanMessage
+from langchain_exaone import ChatEXAONE
+
+model = ChatEXAONE(base_url="http://127.0.0.1:8000/v1", api_key="EMPTY", model="EXAONE-4.5-33B")
+message = HumanMessage(content=[
+    {"type": "text", "text": "Describe this image."},
+    {"type": "image", "url": "https://example.com/image.png"},
+])
+response = model.invoke([message])
+```
+
+User images support URLs and base64 data with an image MIME type; the provider sends text and image blocks in their original order. File IDs, image tool messages, audio, and other unsupported blocks are rejected. The [EXAONE 4.5 model card](https://huggingface.co/LGAI-EXAONE/EXAONE-4.5-33B) shows vLLM and an SGLang fork with `qwen3` reasoning and `hermes` tool parsers. Configure these on the server. Image requests have been tested with synthetic protocol fixtures; actual EXAONE 4.5 inference has not been verified.
+
+### Server-specific observations
+
+The provider preserves text/image order in the **request sent to the endpoint**. The provider does not pre-check whether the endpoint supports images; the server may reject them. What reaches the model depends on the server's message normalization, chat template, and configuration. The observations below come from synthetic inputs and isolated server code; no running inference server or EXAONE 4.5 model was tested.
+
+- **vLLM:** With the official 4.5 template and vLLM 0.27.0's automatic content-format detection, an isolated message-normalization test converted `text → image → text` to `image → text → text` with the default `interleave_mm_strings=False`. Setting [`--interleave-mm-strings`](https://docs.vllm.ai/en/v0.27.0/cli/serve/#interleave-mm-strings) preserved the order in that test. Verify the setting and behavior on your server; this is not a real-image inference result.
+- **SGLang image/tool history:** In an isolated test using the model-card fork's message normalization and the 4.5 template at revision `570aa4b15a4f45ba1133072b45f50198f6e3b4fd`, an image-containing first user message followed by an assistant tool call and tool result caused earlier assistant reasoning to be omitted from the rendered prompt, even though the request contained it. A preceding string-valued user message changed the result. Other templates or server settings may behave differently.
+- **SGLang streaming tools:** With automatic tool choice, an isolated execution of the [model-card fork at `6757c9f`](https://github.com/lkm2835/sglang/tree/6757c9f904cdb8ae9028a394a2108d079b9e088c)'s streaming handler and `hermes` parser emitted a tool name without its arguments when an entire synthetic tool call and the stop arrived in the same final event. The parser-level condition also reproduced on SGLang 0.5.23; this does not verify that release's EXAONE 4.5 model support. Depending on the framework and tool schema, missing arguments can cause validation to fail or a tool to run with default values. See [SGLang issue #31915](https://github.com/sgl-project/sglang/issues/31915) and [proposed fix #32167](https://github.com/sgl-project/sglang/pull/32167). Actual server chunking and inference were not tested.
+
+These server behaviors are not repaired by the provider. Check the exact server version, template, and settings you deploy.
 
 See the [K-EXAONE 2.5 API reference](https://docs.exaone.ai/ko/docs/k-exaone-2.5) for the model's request parameters and limits.
 

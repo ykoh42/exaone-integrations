@@ -276,9 +276,28 @@ def _load_response_json(payload: bytes | str, description: str) -> Any:
     return result
 
 
-def _content_parts(message: BaseMessage) -> tuple[str, str | None, list[dict[str, Any]]]:
+def _image_part(block: Mapping[str, Any]) -> dict[str, Any]:
+    if block.get("type") == "image_url":
+        image_url = block.get("image_url")
+        if isinstance(image_url, str):
+            return {"type": "image_url", "image_url": {"url": image_url}}
+        if isinstance(image_url, Mapping) and isinstance(image_url.get("url"), str):
+            return {"type": "image_url", "image_url": dict(image_url)}
+    elif isinstance(block.get("url"), str):
+        return {"type": "image_url", "image_url": {"url": block["url"]}}
+    else:
+        data = block.get("base64", block.get("data"))
+        mime = block.get("mime_type")
+        if isinstance(data, str) and isinstance(mime, str) and mime.startswith("image/"):
+            return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{data}"}}
+    raise TypeError("EXAONE image blocks require a URL or base64 data with an image MIME type")
+
+
+def _content_parts(message: BaseMessage) -> tuple[str | list[dict[str, Any]], str | None, list[dict[str, Any]]]:
     content = message.content
     text: list[str] = []
+    content_parts: list[dict[str, Any]] = []
+    has_image = False
     reasoning: list[str] = []
     refusals: list[str] = []
     tool_calls: list[dict[str, Any]] = []
@@ -288,9 +307,14 @@ def _content_parts(message: BaseMessage) -> tuple[str, str | None, list[dict[str
         for block in content:
             if isinstance(block, str):
                 text.append(block)
+                content_parts.append({"type": "text", "text": block})
             elif isinstance(block, Mapping):
                 if block.get("type") == "text" and isinstance(block.get("text"), str):
                     text.append(block["text"])
+                    content_parts.append({"type": "text", "text": block["text"]})
+                elif isinstance(message, HumanMessage) and block.get("type") in {"image", "image_url"}:
+                    content_parts.append(_image_part(block))
+                    has_image = True
                 elif (
                     isinstance(message, AIMessage)
                     and block.get("type") == "reasoning"
@@ -335,7 +359,7 @@ def _content_parts(message: BaseMessage) -> tuple[str, str | None, list[dict[str
             and prior
         ):
             reasoning.append(prior)
-    return "".join(text), "".join(reasoning) or None, tool_calls
+    return content_parts if has_image else "".join(text), "".join(reasoning) or None, tool_calls
 
 
 def _message_to_api(message: BaseMessage) -> dict[str, Any]:
@@ -373,7 +397,7 @@ def _message_to_api(message: BaseMessage) -> dict[str, Any]:
     raise TypeError(f"EXAONE does not support LangChain message type {message.type!r}")
 
 
-def _named_message(message: BaseMessage, role: str, content: str) -> dict[str, Any]:
+def _named_message(message: BaseMessage, role: str, content: str | list[dict[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {"role": role, "content": content}
     if message.name is not None:
         result["name"] = message.name

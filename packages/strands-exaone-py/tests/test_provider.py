@@ -54,6 +54,91 @@ async def test_remote_http_sends_request_to_supplied_endpoint() -> None:
     assert requests[0].headers["authorization"] == "Bearer synthetic"
 
 
+@pytest.mark.parametrize("stream", [True, False])
+async def test_user_image_and_text_preserve_order(stream: bool) -> None:
+    requests: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        if stream:
+            return httpx.Response(200, content=sse(chunk({"content": "ok"}), chunk(finish="stop")))
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        model = ExaoneModel(
+            api_key="fixture",
+            base_url="http://localhost:8000/v1",
+            model_id="EXAONE-4.5-33B",
+            http_client=client,
+            stream=stream,
+        )
+        message = {
+            "role": "user",
+            "content": [
+                {"text": "Before"},
+                {"image": {"format": "png", "source": {"bytes": b"\x01\x02\x03"}}},
+                {"text": "After"},
+            ],
+        }
+        _ = [event async for event in model.stream([message])]
+    assert requests[0]["messages"][0]["content"] == [
+        {"type": "text", "text": "Before"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AQID"}},
+        {"type": "text", "text": "After"},
+    ]
+
+
+async def test_rejects_unsupported_image_source_before_request() -> None:
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: pytest.fail("Unexpected request"))) as client:
+        model = ExaoneModel(api_key="fixture", http_client=client)
+        message: Any = {
+            "role": "user",
+            "content": [
+                {"image": {"format": "png", "source": {"location": {"type": "s3", "uri": "s3://example/image.png"}}}}
+            ],
+        }
+        with pytest.raises(ValueError, match="requires bytes"):
+            _ = [event async for event in model.stream([message])]
+
+
+async def test_image_and_tool_history_through_strands_agent() -> None:
+    requests: list[dict[str, Any]] = []
+
+    @tool
+    def lookup() -> str:
+        """Return a synthetic value."""
+        return "7"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        if len(requests) == 1:
+            call = {
+                "index": 0,
+                "id": "image-tool-1",
+                "type": "function",
+                "function": {"name": "lookup", "arguments": "{}"},
+            }
+            return httpx.Response(
+                200,
+                content=sse(
+                    chunk({"reasoning_content": "Plan"}), chunk({"tool_calls": [call]}), chunk(finish="tool_calls")
+                ),
+            )
+        return httpx.Response(200, content=sse(chunk({"content": "Done"}), chunk(finish="stop")))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        model = ExaoneModel(
+            api_key="fixture", base_url="http://localhost:8000/v1", model_id="EXAONE-4.5-33B", http_client=client
+        )
+        agent = Agent(model=model, tools=[lookup], callback_handler=None)
+        await agent.invoke_async([{"text": "Look"}, {"image": {"format": "png", "source": {"bytes": b"\x01\x02\x03"}}}])
+    first = requests[0]["messages"][-1]
+    history = requests[1]["messages"]
+    assert first in history
+    assert any(item.get("reasoning_content") == "Plan" for item in history)
+    assert any(item.get("tool_call_id") == "image-tool-1" and "7" in item["content"] for item in history)
+
+
 class Chunks(httpx.AsyncByteStream):
     def __init__(self, chunks: list[bytes]) -> None:
         self.chunks = chunks
@@ -1434,7 +1519,7 @@ async def test_unsupported_media_fails_before_http_request() -> None:
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         model = ExaoneModel(api_key="key", http_client=client)
-        with pytest.raises(ValueError, match="Unsupported"):
+        with pytest.raises(ValueError, match="image input requires"):
             _ = [event async for event in model.stream([{"role": "user", "content": [{"image": {}}]}])]
     assert requests == []
 

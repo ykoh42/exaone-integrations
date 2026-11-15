@@ -109,6 +109,37 @@ Some servers accept `reasoning_effort` and may use it to select thinking on or o
 
 The configured API key is sent to the selected endpoint; if omitted, it comes from `EXAONE_API_KEY`. For a server that does not require authentication, pass a placeholder such as `apiKey: 'EMPTY'` rather than the hosted API key. HTTP does not encrypt credentials or conversation data; use HTTPS or a trusted transport. Protocol fixtures have been tested, but K-EXAONE 2.0 model inference has not been verified by this project.
 
+## Self-hosted EXAONE 4.5 image input
+
+For an already-running compatible endpoint, set `baseURL`, `apiKey` and `modelId` as above, using the server's actual EXAONE 4.5 model name. Supply standard Strands image blocks with bytes or a URL:
+
+```typescript
+import { readFile } from 'node:fs/promises'
+import { Agent, ImageBlock, TextBlock } from '@strands-agents/sdk'
+import { ExaoneModel } from 'strands-exaone'
+
+const model = new ExaoneModel({ baseURL: 'http://127.0.0.1:8000/v1', apiKey: 'EMPTY', modelId: 'EXAONE-4.5-33B' })
+const agent = new Agent({ model })
+const response = await agent.invoke([
+  new TextBlock('Describe this image.'),
+  new ImageBlock({ format: 'png', source: { bytes: await readFile('image.png') } }),
+])
+```
+
+The provider sends text and image blocks in their original order. Strands S3 image locations are not converted to URLs; supply bytes or a URL. Image tool results remain unsupported. The default hosted K-EXAONE 2.5 model is text-only.
+
+The [EXAONE 4.5 model card](https://huggingface.co/LGAI-EXAONE/EXAONE-4.5-33B) shows vLLM and an SGLang fork with `qwen3` reasoning and `hermes` tool parsers. Select and configure these on the server, not in the provider. Image requests have been tested with synthetic protocol fixtures; actual EXAONE 4.5 model inference has not been verified.
+
+### Server-specific observations
+
+The provider preserves text/image order in the **request sent to the endpoint**. The provider does not pre-check whether the endpoint supports images; the server may reject them. What reaches the model depends on the server's message normalization, chat template, and configuration. The observations below come from synthetic inputs and isolated server code; no running inference server or EXAONE 4.5 model was tested.
+
+- **vLLM:** With the official 4.5 template and vLLM 0.27.0's automatic content-format detection, an isolated message-normalization test converted `text → image → text` to `image → text → text` with the default `interleave_mm_strings=False`. Setting [`--interleave-mm-strings`](https://docs.vllm.ai/en/v0.27.0/cli/serve/#interleave-mm-strings) preserved the order in that test. Verify the setting and behavior on your server; this is not a real-image inference result.
+- **SGLang image/tool history:** In an isolated test using the model-card fork's message normalization and the 4.5 template at revision `570aa4b15a4f45ba1133072b45f50198f6e3b4fd`, an image-containing first user message followed by an assistant tool call and tool result caused earlier assistant reasoning to be omitted from the rendered prompt, even though the request contained it. A preceding string-valued user message changed the result. Other templates or server settings may behave differently.
+- **SGLang streaming tools:** With automatic tool choice, an isolated execution of the [model-card fork at `6757c9f`](https://github.com/lkm2835/sglang/tree/6757c9f904cdb8ae9028a394a2108d079b9e088c)'s streaming handler and `hermes` parser emitted a tool name without its arguments when an entire synthetic tool call and the stop arrived in the same final event. The parser-level condition also reproduced on SGLang 0.5.23; this does not verify that release's EXAONE 4.5 model support. Depending on the framework and tool schema, missing arguments can cause validation to fail or a tool to run with default values. See [SGLang issue #31915](https://github.com/sgl-project/sglang/issues/31915) and [proposed fix #32167](https://github.com/sgl-project/sglang/pull/32167). Actual server chunking and inference were not tested.
+
+These server behaviors are not repaired by the provider. Check the exact server version, template, and settings you deploy.
+
 ## Model information
 
 `ExaoneModel.modelInfo` exposes the known `k-exaone_v2.5` capabilities through Strands' standard `ModelInfo`: stateless Chat Completions, forced tool choice, native JSON Schema output, and a 524,288-token context window. An independent maximum output size and a prompt-caching mechanism are left unknown.

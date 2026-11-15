@@ -143,7 +143,33 @@ The integration also preserves legacy `function_call` fields and LangChain `Func
 
 This package sends requests directly to the EXAONE Chat Completions endpoint. It supports text messages, assistant reasoning history, function tools, sampling settings, JSON response-format passthrough, streaming, usage, response metadata, and HTTP errors. Other response tool-call types cannot be represented as function tools and are rejected. The service decides which forwarded tool definitions and optional generation fields it accepts.
 
-The integration accepts text and reasoning input blocks. It rejects image, audio, video, and other multimodal content. Non-streaming `generate()` returns every candidate when `modelKwargs.n` requests multiple choices; `invoke()` returns the first candidate. Each candidate carries the same request-level usage, so use `generate()`'s `llmOutput` for totals rather than adding candidate usage together. Streaming raises an error if the endpoint returns multiple choices, since LangChain's stream represents one message. When returned, `logprobs` and other response-specific fields are kept in metadata; the integration does not expose token-level log probabilities as a separate abstraction.
+The integration accepts text and reasoning blocks and, for compatible self-hosted endpoints, user image blocks. Audio, video, image tool messages, and other unsupported content are rejected. Non-streaming `generate()` returns every candidate when `modelKwargs.n` requests multiple choices; `invoke()` returns the first candidate. Each candidate carries the same request-level usage, so use `generate()`'s `llmOutput` for totals rather than adding candidate usage together. Streaming raises an error if the endpoint returns multiple choices, since LangChain's stream represents one message. When returned, `logprobs` and other response-specific fields are kept in metadata; the integration does not expose token-level log probabilities as a separate abstraction.
+
+For an already-running EXAONE 4.5 endpoint, set `baseUrl`, `model`, and `apiKey` to its connection details and use LangChain's image blocks:
+
+```typescript
+import { HumanMessage } from '@langchain/core/messages'
+import { ChatExaone } from 'langchain-exaone'
+
+const model = new ChatExaone({ baseUrl: 'http://127.0.0.1:8000/v1', apiKey: 'EMPTY', model: 'EXAONE-4.5-33B' })
+const message = new HumanMessage({ content: [
+  { type: 'text', text: 'Describe this image.' },
+  { type: 'image', url: 'https://example.com/image.png' },
+] })
+const response = await model.invoke([message])
+```
+
+User images support URLs and base64 data with an image MIME type; the provider sends text and image blocks in their original order. File IDs are unsupported. The default hosted K-EXAONE 2.5 model is text-only. The [EXAONE 4.5 model card](https://huggingface.co/LGAI-EXAONE/EXAONE-4.5-33B) shows vLLM and an SGLang fork with `qwen3` reasoning and `hermes` tool parsers. Configure these on the server. Image requests have been tested with synthetic protocol fixtures; actual EXAONE 4.5 inference has not been verified.
+
+### Server-specific observations
+
+The provider preserves text/image order in the **request sent to the endpoint**. The provider does not pre-check whether the endpoint supports images; the server may reject them. What reaches the model depends on the server's message normalization, chat template, and configuration. The observations below come from synthetic inputs and isolated server code; no running inference server or EXAONE 4.5 model was tested.
+
+- **vLLM:** With the official 4.5 template and vLLM 0.27.0's automatic content-format detection, an isolated message-normalization test converted `text → image → text` to `image → text → text` with the default `interleave_mm_strings=False`. Setting [`--interleave-mm-strings`](https://docs.vllm.ai/en/v0.27.0/cli/serve/#interleave-mm-strings) preserved the order in that test. Verify the setting and behavior on your server; this is not a real-image inference result.
+- **SGLang image/tool history:** In an isolated test using the model-card fork's message normalization and the 4.5 template at revision `570aa4b15a4f45ba1133072b45f50198f6e3b4fd`, an image-containing first user message followed by an assistant tool call and tool result caused earlier assistant reasoning to be omitted from the rendered prompt, even though the request contained it. A preceding string-valued user message changed the result. Other templates or server settings may behave differently.
+- **SGLang streaming tools:** With automatic tool choice, an isolated execution of the [model-card fork at `6757c9f`](https://github.com/lkm2835/sglang/tree/6757c9f904cdb8ae9028a394a2108d079b9e088c)'s streaming handler and `hermes` parser emitted a tool name without its arguments when an entire synthetic tool call and the stop arrived in the same final event. The parser-level condition also reproduced on SGLang 0.5.23; this does not verify that release's EXAONE 4.5 model support. Depending on the framework and tool schema, missing arguments can cause validation to fail or a tool to run with default values. See [SGLang issue #31915](https://github.com/sgl-project/sglang/issues/31915) and [proposed fix #32167](https://github.com/sgl-project/sglang/pull/32167). Actual server chunking and inference were not tested.
+
+These server behaviors are not repaired by the provider. Check the exact server version, template, and settings you deploy.
 
 ## Development
 

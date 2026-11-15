@@ -144,12 +144,32 @@ describe('tool choice and content boundaries', () => {
     }
   })
 
-  it('rejects an unsupported user image before sending a request', async () => {
-    const fetcher = vi.fn(async () => response([chunk({ content: 'unexpected' }, 'stop')]))
-    const model = new ExaoneModel({ apiKey: 'test-key', fetch: fetcher })
-    const agent = await createHarness({ ...options, model })
-    await expect(agent.invoke([new ImageBlock({ format: 'png', source: { bytes: Uint8Array.of(1, 2, 3) } })])).rejects.toThrow('Unsupported EXAONE user content: imageBlock')
-    expect(fetcher).not.toHaveBeenCalled()
+  it('forwards user images and text in order through the harness', async () => {
+    const requests: Record<string, unknown>[] = []
+    const lookup = tool({ name: 'lookup', description: 'Synthetic lookup', inputSchema: z.object({}), callback: () => '7' })
+    const fetcher: typeof fetch = async (_url, init) => {
+      requests.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
+      if (requests.length === 1) return response([
+        chunk({ reasoning_content: 'Plan' }),
+        chunk({ tool_calls: [{ index: 0, id: 'image-tool-1', type: 'function', function: { name: 'lookup', arguments: '{}' } }] }),
+        chunk({}, 'tool_calls'),
+      ])
+      return response([chunk({ content: 'Done' }, 'stop')])
+    }
+    const model = new ExaoneModel({ apiKey: 'test-key', baseURL: 'http://localhost:8000/v1', modelId: 'EXAONE-4.5-33B', fetch: fetcher })
+    const agent = await createHarness({ ...options, model, tools: [lookup] })
+    await agent.invoke([new TextBlock('First'), new ImageBlock({ format: 'png', source: { bytes: Uint8Array.of(1, 2, 3) } }), new TextBlock('Second'), new ImageBlock({ format: 'jpeg', source: { url: 'https://example.test/image.jpg' } })])
+    expect(requests[0]!.messages).toEqual(expect.arrayContaining([expect.objectContaining({ role: 'user', content: [
+      { type: 'text', text: 'First' },
+      { type: 'image_url', image_url: { url: 'data:image/png;base64,AQID' } },
+      { type: 'text', text: 'Second' },
+      { type: 'image_url', image_url: { url: 'https://example.test/image.jpg' } },
+    ] })]))
+    expect(requests[1]!.messages).toEqual(expect.arrayContaining([
+      expect.objectContaining({ role: 'assistant', reasoning_content: 'Plan' }),
+      expect.objectContaining({ role: 'tool', tool_call_id: 'image-tool-1', content: '7' }),
+      expect.objectContaining({ role: 'user', content: (requests[0]!.messages as Record<string, unknown>[]).find((m) => m.role === 'user')!.content }),
+    ]))
   })
 
   it('rejects an image tool result before sending the next request', async () => {

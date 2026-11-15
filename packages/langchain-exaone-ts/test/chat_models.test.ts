@@ -1405,9 +1405,72 @@ describe("ChatExaone", () => {
 
   it("rejects unsupported multimodal input instead of silently dropping it", async () => {
     const model = new ChatExaone({ apiKey: "fixture-key", fetch: mockFetch([]) });
-    const multimodal = new HumanMessage({ content: [{ type: "image_url", image_url: "https://example.test/image.png" }] });
+    const multimodal = new HumanMessage({ content: [{ type: "audio", url: "https://example.test/audio.wav" }] });
 
     await expect(model.invoke([multimodal])).rejects.toThrow("accepts text content only");
+  });
+
+  it.each([false, true])("forwards image and text blocks in order to a self-hosted server (stream=%s)", async (streaming) => {
+    const fetcher = mockFetch([streaming
+      ? sseResponse([{ choices: [{ index: 0, delta: { content: "ok" }, finish_reason: "stop" }] }])
+      : completion({ role: "assistant", content: "ok" })]);
+    const model = new ChatExaone({ apiKey: "fixture-key", baseUrl: "http://localhost:8000/v1", model: "EXAONE-4.5-33B", fetch: fetcher });
+    const message = new HumanMessage({ content: [
+      { type: "text", text: "Before" },
+      { type: "image", data: "AQID", mimeType: "image/png" },
+      { type: "text", text: "Between" },
+      { type: "image_url", image_url: { url: "https://example.test/image.jpg", detail: "high" } },
+    ] });
+    if (streaming) for await (const _ of await model.stream([message])) { /* consume */ }
+    else await model.invoke([message]);
+    expect(requestBody(fetcher).messages).toEqual([{
+      role: "user", content: [
+        { type: "text", text: "Before" },
+        { type: "image_url", image_url: { url: "data:image/png;base64,AQID" } },
+        { type: "text", text: "Between" },
+        { type: "image_url", image_url: { url: "https://example.test/image.jpg", detail: "high" } },
+      ],
+    }]);
+  });
+
+  it.each([
+    [{ type: "image", url: "https://example.test/image.png" }, "https://example.test/image.png"],
+    [{ type: "image", source_type: "base64", data: "AQID", mime_type: "image/png" }, "data:image/png;base64,AQID"],
+    [{ type: "image", data: Uint8Array.of(1, 2, 3), mimeType: "image/png" }, "data:image/png;base64,AQID"],
+    [{ type: "image_url", image_url: "https://example.test/image.png" }, "https://example.test/image.png"],
+  ])("forwards framework image input %#", async (block, url) => {
+    const fetcher = mockFetch([completion({ role: "assistant", content: "ok" })]);
+    const model = new ChatExaone({ apiKey: "fixture-key", fetch: fetcher });
+    await model.invoke([new HumanMessage({ content: [block] })]);
+    expect(requestBody(fetcher).messages).toEqual([{ role: "user", content: [{ type: "image_url", image_url: { url } }] }]);
+  });
+
+  it("preserves image, reasoning and tool history across a later turn", async () => {
+    const toolCall = { id: "call-1", type: "function", function: { name: "lookup", arguments: '{"value":7}' } };
+    const fetcher = mockFetch([
+      completion({ role: "assistant", content: "", reasoning_content: "Plan", tool_calls: [toolCall] }),
+      completion({ role: "assistant", content: "done" }),
+    ]);
+    const model = new ChatExaone({ apiKey: "fixture-key", baseUrl: "http://localhost:8000/v1", model: "EXAONE-4.5-33B", fetch: fetcher });
+    const image = new HumanMessage({ content: [{ type: "text", text: "Look" }, { type: "image", url: "https://example.test/x.png" }] });
+    const first = await model.invoke([image]);
+    await model.invoke([image, first, new ToolMessage({ content: "7", tool_call_id: "call-1" })]);
+    expect(requestBody(fetcher).messages).toEqual([
+      { role: "user", content: [{ type: "text", text: "Look" }, { type: "image_url", image_url: { url: "https://example.test/x.png" } }] },
+      expect.objectContaining({ role: "assistant", reasoning_content: "Plan", tool_calls: [toolCall] }),
+      expect.objectContaining({ role: "tool", tool_call_id: "call-1", content: "7" }),
+    ]);
+  });
+
+  it.each([
+    { type: "image", fileId: "unsupported" },
+    { type: "image", data: "AQID" },
+    { type: "image_url", image_url: {} },
+  ])("rejects unsupported image input %# before sending", async (block) => {
+    const fetcher = mockFetch([]);
+    const model = new ChatExaone({ apiKey: "fixture-key", fetch: fetcher });
+    await expect(model.invoke([new HumanMessage({ content: [block] })])).rejects.toThrow("image blocks require");
+    expect(fetcher).not.toHaveBeenCalled();
   });
 
   it("does not set a timeout unless requested", () => {

@@ -1963,8 +1963,116 @@ def test_non_text_message_blocks_are_rejected_before_request() -> None:
     try:
         with pytest.raises(TypeError, match="does not support message block type"):
             ChatEXAONE(api_key="synthetic-key", http_client=client).invoke(
-                [HumanMessage(content=[{"type": "image", "url": "https://example.test/image.png"}])]
+                [HumanMessage(content=[{"type": "audio", "url": "https://example.test/audio.wav"}])]
             )
     finally:
         client.close()
     assert calls == 0
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+def test_images_preserve_text_order_for_self_hosted_endpoints(streaming: bool) -> None:
+    requests: list[dict[str, Any]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        if streaming:
+            data = 'data: {"choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'
+            return httpx.Response(200, content=data.encode(), headers={"content-type": "text/event-stream"})
+        return httpx.Response(200, json=_completion())
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        model = ChatEXAONE(
+            api_key="fixture", base_url="http://localhost:8000/v1", model="EXAONE-4.5-33B", http_client=client
+        )
+        message = HumanMessage(
+            content=[
+                {"type": "text", "text": "Before"},
+                {"type": "image", "base64": "AQID", "mime_type": "image/png"},
+                {"type": "text", "text": "Between"},
+                {"type": "image_url", "image_url": {"url": "https://example.test/image.jpg", "detail": "high"}},
+            ]
+        )
+        if streaming:
+            list(model.stream([message]))
+        else:
+            model.invoke([message])
+    assert requests[0]["messages"][0]["content"] == [
+        {"type": "text", "text": "Before"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AQID"}},
+        {"type": "text", "text": "Between"},
+        {"type": "image_url", "image_url": {"url": "https://example.test/image.jpg", "detail": "high"}},
+    ]
+
+
+@pytest.mark.parametrize(
+    ("block", "url"),
+    [
+        ({"type": "image", "url": "https://example.test/image.png"}, "https://example.test/image.png"),
+        (
+            {"type": "image", "source_type": "url", "url": "https://example.test/image.png"},
+            "https://example.test/image.png",
+        ),
+        (
+            {"type": "image", "source_type": "base64", "data": "AQID", "mime_type": "image/png"},
+            "data:image/png;base64,AQID",
+        ),
+        ({"type": "image_url", "image_url": "https://example.test/image.png"}, "https://example.test/image.png"),
+    ],
+)
+def test_framework_image_variants(block: dict[str, Any], url: str) -> None:
+    requests: list[dict[str, Any]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json=_completion())
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        ChatEXAONE(api_key="fixture", http_client=client).invoke([HumanMessage(content=[block])])
+    assert requests[0]["messages"][0]["content"] == [{"type": "image_url", "image_url": {"url": url}}]
+
+
+def test_image_and_tool_history_survives_a_later_turn() -> None:
+    requests: list[dict[str, Any]] = []
+    tool_call = {"id": "call-1", "type": "function", "function": {"name": "lookup", "arguments": '{"value":7}'}}
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        if len(requests) == 1:
+            response = _completion(content="", reasoning="Plan")
+            response["choices"][0]["message"]["tool_calls"] = [tool_call]
+            response["choices"][0]["finish_reason"] = "tool_calls"
+            return httpx.Response(200, json=response)
+        return httpx.Response(200, json=_completion())
+
+    image = HumanMessage(
+        content=[{"type": "text", "text": "Look"}, {"type": "image", "url": "https://example.test/x.png"}]
+    )
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        model = ChatEXAONE(
+            api_key="fixture", base_url="http://localhost:8000/v1", model="EXAONE-4.5-33B", http_client=client
+        )
+        first = model.invoke([image])
+        model.invoke([image, first, ToolMessage(content="7", tool_call_id="call-1")])
+    history = requests[1]["messages"]
+    assert history[0]["content"] == [
+        {"type": "text", "text": "Look"},
+        {"type": "image_url", "image_url": {"url": "https://example.test/x.png"}},
+    ]
+    assert history[1]["reasoning_content"] == "Plan"
+    assert history[1]["tool_calls"] == [tool_call]
+    assert history[2]["tool_call_id"] == "call-1"
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        {"type": "image", "file_id": "unsupported"},
+        {"type": "image", "base64": "AQID"},
+        {"type": "image_url", "image_url": {}},
+    ],
+)
+def test_rejects_unsupported_image_sources_before_sending(block: dict[str, Any]) -> None:
+    with httpx.Client(transport=httpx.MockTransport(lambda _: pytest.fail("Unexpected request"))) as client:
+        with pytest.raises((TypeError, ValueError), match="image blocks require|mime_type"):
+            ChatEXAONE(api_key="fixture", http_client=client).invoke([HumanMessage(content=[block])])

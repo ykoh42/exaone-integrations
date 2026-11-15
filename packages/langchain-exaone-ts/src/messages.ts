@@ -2,7 +2,7 @@ import type { BaseMessage } from "@langchain/core/messages";
 
 export interface ExaoneRequestMessage {
   role: string;
-  content?: string;
+  content?: string | Array<Record<string, unknown>>;
   name?: string;
   tool_call_id?: string;
   tool_calls?: Array<{
@@ -12,6 +12,33 @@ export interface ExaoneRequestMessage {
   }>;
   reasoning_content?: string;
   [key: string]: unknown;
+}
+
+function imagePart(part: Record<string, unknown>): Record<string, unknown> {
+  if (part.type === "image_url") {
+    if (typeof part.image_url === "string") return { type: "image_url", image_url: { url: part.image_url } };
+    if (isRecord(part.image_url) && typeof part.image_url.url === "string") return { type: "image_url", image_url: { ...part.image_url } };
+  } else if (typeof part.url === "string") {
+    return { type: "image_url", image_url: { url: part.url } };
+  } else {
+    const mime = part.mimeType ?? part.mime_type;
+    const data = part.data ?? part.base64;
+    if (typeof mime === "string" && mime.startsWith("image/") && (typeof data === "string" || data instanceof Uint8Array)) {
+      const encoded = typeof data === "string" ? data : Buffer.from(data).toString("base64");
+      return { type: "image_url", image_url: { url: `data:${mime};base64,${encoded}` } };
+    }
+  }
+  throw new TypeError("EXAONE image blocks require a URL or base64 data with an image MIME type.");
+}
+
+function userContent(message: BaseMessage): string | Array<Record<string, unknown>> | undefined {
+  if (!Array.isArray(message.content) || !message.content.some((part) => typeof part === "object" && (part.type === "image" || part.type === "image_url"))) return undefined;
+  return message.content.map((part) => {
+    if (typeof part === "string") return { type: "text", text: part };
+    if (part.type === "text" && typeof part.text === "string") return { type: "text", text: part.text };
+    if (part.type === "image" || part.type === "image_url") return imagePart(part);
+    throw new TypeError(`EXAONE does not support message block type '${part.type}'.`);
+  });
 }
 
 function textFromContent(message: BaseMessage, allowReasoning: boolean): {
@@ -156,17 +183,18 @@ function formatToolArguments(args: Record<string, unknown>, original: unknown): 
   return JSON.stringify(args);
 }
 
-/** Convert LangChain messages to the text-only EXAONE Chat Completions wire format. */
+/** Convert LangChain messages to the EXAONE Chat Completions wire format. */
 export function convertMessagesToExaone(messages: BaseMessage[]): ExaoneRequestMessage[] {
   return messages.map(formatMessage);
 }
 
 function formatMessage(message: BaseMessage): ExaoneRequestMessage {
   const type = message.getType();
-  const { text, reasoning } = textFromContent(message, type === "ai");
+  const multimodal = type === "human" ? userContent(message) : undefined;
+  const { text, reasoning } = multimodal === undefined ? textFromContent(message, type === "ai") : { text: "", reasoning: "" };
   const result: ExaoneRequestMessage = {
     role: roleFor(message, type),
-    content: text,
+    content: multimodal ?? text,
   };
   if (!result.role) throw new TypeError(`Unsupported LangChain message type '${type}'.`);
   if (message.name !== undefined) result.name = message.name;
@@ -204,7 +232,7 @@ function addAssistantMessageFields(message: BaseMessage, result: ExaoneRequestMe
   else if (message.response_metadata?.output_version !== "v1" && typeof rawReasoning === "string") result.reasoning_content = rawReasoning;
 
   const refusal = assistantMessage.additional_kwargs?.refusal;
-  if (message.response_metadata?.output_version !== "v1" && !result.content?.trim() && typeof refusal === "string") {
+  if (message.response_metadata?.output_version !== "v1" && typeof result.content === "string" && !result.content.trim() && typeof refusal === "string") {
     result.content = refusal;
   }
 

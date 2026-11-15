@@ -2,6 +2,7 @@
 
 ## 0.1.3 (unreleased)
 
+- Forward LangChain user image URLs and base64 data to compatible self-hosted endpoints.
 - Keep refusal metadata and v1 refusal blocks separate from answer text during streaming and ordinary responses.
 - Respect removal of reasoning blocks from LangChain v1 message history.
 - Preserve `reasoning` from compatible server responses and accept HTTP endpoints supplied by the user.
