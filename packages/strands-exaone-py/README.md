@@ -110,10 +110,12 @@ from strands_exaone import ExaoneModel
 
 model = ExaoneModel(base_url="http://127.0.0.1:8000/v1", api_key="EMPTY", model_id="EXAONE-4.5-33B")
 agent = Agent(model=model)
-response = agent([
-    {"text": "Describe this image."},
-    {"image": {"format": "png", "source": {"bytes": Path("image.png").read_bytes()}}},
-])
+response = agent(
+    [
+        {"text": "Describe this image."},
+        {"image": {"format": "png", "source": {"bytes": Path("image.png").read_bytes()}}},
+    ]
+)
 ```
 
 The provider sends text and image blocks in their original order. Strands Python image locations such as S3 are not converted to URLs; supply bytes. Image tool results remain unsupported. The default hosted K-EXAONE 2.5 model is text-only.
