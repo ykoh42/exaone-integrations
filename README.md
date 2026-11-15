@@ -13,6 +13,8 @@ Review and follow the terms that apply to your use of the EXAONE API.
 
 Each package README covers installation, examples, configuration, supported framework features, and API limitations.
 
+See the [roadmap](ROADMAP.md) for planned work and links to individual issues.
+
 ## Why use a dedicated provider?
 
 EXAONE provides an [OpenAI-compatible API](https://docs.exaone.ai/ko/docs/k-exaone-2.5). An OpenAI provider configured with EXAONE's base URL, model ID, and API key can handle basic chat. Some adapters also support EXAONE-specific fields through configuration or extensions, depending on the adapter and version.
