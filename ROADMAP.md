@@ -8,7 +8,7 @@ The integrations connect to a model already served at an endpoint supplied by th
 
 First, support [connecting to K-EXAONE 2.0 on compatible self-hosted endpoints](https://github.com/ykoh42/exaone-integrations/issues/6). The related implementation work can be merged one issue at a time:
 
-- [Preserve reasoning from OpenAI-compatible server response fields](https://github.com/ykoh42/exaone-integrations/issues/2)
+- [Preserve reasoning from OpenAI-compatible server response fields](https://github.com/ykoh42/exaone-integrations/issues/2) — completed
 - [Preserve fragmented tool calls and framework execution semantics](https://github.com/ykoh42/exaone-integrations/issues/5)
 
 These changes must preserve the existing hosted EXAONE 2.5 behavior. Protocol compatibility can be tested locally; real-model inference remains unverified until a suitable server is available.
@@ -37,7 +37,7 @@ Address these improvements as they are needed while bringing up each model, with
 - [Recover misplaced reasoning without changing normal assistant text](https://github.com/ykoh42/exaone-integrations/issues/3)
 - [Use tool schemas to guide malformed argument recovery](https://github.com/ykoh42/exaone-integrations/issues/4)
 - [Verify K-EXAONE 2.0 and EXAONE 4.5 on real inference servers](https://github.com/ykoh42/exaone-integrations/issues/8)
-- [Document supported EXAONE models, endpoints, and verification levels](https://github.com/ykoh42/exaone-integrations/issues/9)
+- [Document supported EXAONE models, endpoints, and verification levels](https://github.com/ykoh42/exaone-integrations/issues/9) — completed
 
 Real-model verification for K-EXAONE 2.0 and EXAONE 4.5 is pending a suitable inference environment. Protocol fixtures and hosted EXAONE API checks can support development, but they do not establish that a self-hosted model has been tested.
 

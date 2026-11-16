@@ -48,11 +48,7 @@ Python distribution files are selected explicitly in each package's `pyproject.t
 
 Each example directory has its own setup instructions and framework dependencies. CI lints the Python examples and independently installs and type-checks the five TypeScript example projects. To check a TypeScript example locally, follow its README and run `npm run check` from that directory. Running an example uses the configured EXAONE account; type-checking does not make API requests.
 
-For TypeScript watch mode, run `npm run test:watch`. The Harness example tests run a separate process that imports the built package, so source changes require a fresh build. Either restart watch mode after each change, or run the following in another terminal and wait for compilation to finish before pressing `a` in Vitest to rerun all tests:
-
-```bash
-npx tsc -p packages/strands-exaone-ts/tsconfig.json --watch
-```
+For TypeScript watch mode, run `npm run test:watch`.
 
 ## Live tests
 

@@ -594,4 +594,4 @@ jobs:
           printf '%s\n' '{"private":true,"type":"module"}' > package.json
           npm install --ignore-scripts --engine-strict "$RUNNER_TEMP"/strands-exaone-*.tgz '@strands-agents/sdk@${{ matrix.sdk }}' '@strands-agents/harness@${{ matrix.harness }}' 'zod@${{ matrix.zod }}' vitest@2.1.9
           node --input-type=module -e "import { ExaoneModel } from 'strands-exaone'; import { Model } from '@strands-agents/sdk'; if (!(new ExaoneModel({ apiKey: 'package-check' }) instanceof Model)) process.exit(1)"
-          ./node_modules/.bin/vitest run --exclude 'test/harness-example.test.ts'
+          ./node_modules/.bin/vitest run
