@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.3 (unreleased)
+## 0.1.3 (2026-11-16)
 
 - Expose reported cache read and write counts in Strands usage metadata.
 - Forward Strands user image bytes and text in order to compatible self-hosted endpoints.

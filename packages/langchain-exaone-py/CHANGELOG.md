@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.3 (unreleased)
+## 0.1.3 (2026-11-16)
 
 - Preserve reported cache token details in LangChain usage, including aggregated usage.
 - Retain usage sent alongside stream choices and avoid duplicating response-level stream metadata.
