@@ -2,7 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createHarness } from '@strands-agents/harness'
-import { DefaultModelRetryStrategy, ModelError, ModelNetworkError, tool } from '@strands-agents/sdk'
+import { Agent, DefaultModelRetryStrategy, ModelError, ModelNetworkError, tool } from '@strands-agents/sdk'
 import { describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 import { ExaoneModel } from '../src/index.js'
@@ -24,6 +24,27 @@ const streamed = (data: string, splitBytes = false) => {
 
 /** Synthetic wire data through a real SDK agent and harness. */
 describe('Strands harness transport and persistence', () => {
+  it.each(['agent', 'harness'] as const)('accumulates cache usage through a %s tool round trip', async (kind) => {
+    let calls = 0
+    const lookup = tool({ name: 'lookup', description: 'Return a synthetic number', inputSchema: z.object({}), callback: () => '7' })
+    const fetcher: typeof fetch = async () => {
+      calls++
+      const usage = { prompt_tokens: 20, completion_tokens: 4, total_tokens: 24, prompt_tokens_details: { cached_tokens: calls * 2, cache_write_tokens: calls } }
+      const delta = calls === 1 ? { tool_calls: [{ index: 0, id: 'call-1', type: 'function', function: { name: 'lookup', arguments: '{}' } }] } : { content: 'done' }
+      return streamed(sse([chunk(delta, calls === 1 ? 'tool_calls' : 'stop'), { choices: [], usage }]))
+    }
+    const model = new ExaoneModel({ apiKey: 'fixture', fetch: fetcher })
+    const agent = kind === 'agent'
+      ? new Agent({ model, tools: [lookup], printer: false, retryStrategy: null })
+      : await createHarness({ model, tools: [lookup], builtinTools: [], builtinPlugins: [], session: false, memory: false, skills: false, caching: false, retryStrategy: null, printer: false })
+    try {
+      const result = await agent.invoke('Use the tool')
+      expect(calls).toBe(2)
+      expect(result.metrics?.accumulatedUsage).toMatchObject({ inputTokens: 40, outputTokens: 8, totalTokens: 48, cacheReadInputTokens: 6, cacheWriteInputTokens: 3 })
+    } finally {
+      await agent.shutdown()
+    }
+  })
   it.each(['pending', 'reject', 'throw'] as const)('finishes after DONE when transport cancellation is %s', async (mode) => {
     const cancelled = vi.fn(() => {
       if (mode === 'throw') throw new Error('synthetic cleanup failure')

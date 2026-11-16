@@ -740,6 +740,53 @@ describe("ChatExaone", () => {
     ]);
   });
 
+  it.each(["invoke", "stream"] as const)("exposes standard cache usage details in %s", async (operation) => {
+    const usage = { prompt_tokens: 10, completion_tokens: 4, total_tokens: 14, prompt_tokens_details: { cached_tokens: 5, cache_write_tokens: 2 }, completion_tokens_details: { reasoning_tokens: 3 } };
+    const fetcher = mockFetch([operation === "invoke"
+      ? completion({ role: "assistant", content: "ok" }, usage)
+      : sseResponse([{ choices: [{ index: 0, delta: { content: "ok" }, finish_reason: "stop" }], usage }])]);
+    const model = new ChatExaone({ apiKey: "fixture", fetch: fetcher });
+    let result;
+    if (operation === "invoke") result = await model.invoke("hello");
+    else {
+      const chunks = [];
+      for await (const chunk of await model.stream("hello")) chunks.push(chunk);
+      result = chunks.reduce((left, right) => left.concat(right));
+    }
+    expect(result.usage_metadata).toEqual({ input_tokens: 10, output_tokens: 4, total_tokens: 14, input_token_details: { cache_read: 5, cache_creation: 2 }, output_token_details: { reasoning: 3 } });
+    expect(result.response_metadata.usage).toEqual(usage);
+  });
+
+  it("aggregates repeated response metadata once across streaming chunks", async () => {
+    const frames = ["a", "b"].map((content) => ({ id: "response-id", model: "custom-model", created: 123, object: "chat.completion.chunk", choices: [{ index: 0, delta: { content } }] }));
+    const model = new ChatExaone({ apiKey: "fixture", fetch: mockFetch([sseResponse(frames)]) });
+    const chunks = [];
+    for await (const chunk of await model.stream("hello")) chunks.push(chunk);
+    const result = chunks.reduce((left, right) => left.concat(right));
+    expect(result.content).toBe("ab");
+    expect(result.response_metadata).toMatchObject({ model_name: "custom-model", model: "custom-model", id: "response-id", created: 123, object: "chat.completion.chunk" });
+  });
+
+  it("preserves repeated and new weight metadata across streaming chunks", async () => {
+    const frames = [
+      { choices: [{ index: 0, delta: { content: "a" } }], metadata: { weight_version: "v1" } },
+      { choices: [{ index: 0, delta: { content: "b" } }], metadata: { weight_version: "v1", weight_versions: [{ version: "v1", start: 0, end: 2 }] } },
+    ];
+    const model = new ChatExaone({ apiKey: "fixture", fetch: mockFetch([sseResponse(frames)]) });
+    const chunks = [];
+    for await (const chunk of await model.stream("hello")) chunks.push(chunk);
+    const result = chunks.reduce((left, right) => left.concat(right));
+    expect(result.response_metadata.metadata).toEqual({ weight_version: "v1", weight_versions: [{ version: "v1", start: 0, end: 2 }] });
+  });
+
+  it("keeps valid zero usage details and ignores invalid details", async () => {
+    const usage = { prompt_tokens: 2, completion_tokens: 1, total_tokens: 3, prompt_tokens_details: { cached_tokens: 0, cache_write_tokens: -1, vendor_detail: true }, completion_tokens_details: { reasoning_tokens: 0, vendor_detail: 1.5 } };
+    const model = new ChatExaone({ apiKey: "fixture", fetch: mockFetch([completion({ role: "assistant", content: "ok" }, usage)]) });
+    const result = await model.invoke("hello");
+    expect(result.usage_metadata).toEqual({ input_tokens: 2, output_tokens: 1, total_tokens: 3, input_token_details: { cache_read: 0 }, output_token_details: { reasoning: 0 } });
+    expect(result.response_metadata.usage).toEqual(usage);
+  });
+
   it("binds LangChain tools and returns usage metadata", async () => {
     const fetcher = mockFetch([
       completion(

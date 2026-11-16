@@ -27,6 +27,26 @@ async function collect(model: ExaoneModel, messages: Message[] = [user()]) {
 }
 
 describe('ExaoneModel', () => {
+  it.each([true, false])('exposes cached token usage in SDK metadata (stream=%s)', async (streaming) => {
+    const detailed = { prompt_tokens: 10, completion_tokens: 3, total_tokens: 13, prompt_tokens_details: { cached_tokens: 5, cache_write_tokens: 2 } }
+    const payload = streaming
+      ? sse([event({ content: 'ok' }, 'stop'), wire([], { usage: detailed })])
+      : JSON.stringify(wire([{ index: 0, message: { content: 'ok' }, finish_reason: 'stop' }], { usage: detailed }))
+    const result = await aggregate(new ExaoneModel({ apiKey: 'fixture', stream: streaming, fetch: transport(response(payload)) }))
+    expect(result.metadata?.usage).toMatchObject({ inputTokens: 10, outputTokens: 3, totalTokens: 13, cacheReadInputTokens: 5, cacheWriteInputTokens: 2 })
+    expect(result.metadata?.trace).toMatchObject({ exaone: { usage: detailed } })
+  })
+  it.each([
+    [{ cached_tokens: 0, cache_write_tokens: 0 }, { cacheReadInputTokens: 0, cacheWriteInputTokens: 0 }],
+    [{ cached_tokens: -1, cache_write_tokens: true }, {}],
+    [null, {}],
+  ])('only maps valid cache token counts %#', async (details, expected) => {
+    const detailed = { prompt_tokens: 10, completion_tokens: 3, total_tokens: 13, prompt_tokens_details: details }
+    const payload = sse([event({ content: 'ok' }, 'stop'), wire([], { usage: detailed })])
+    const result = await aggregate(new ExaoneModel({ apiKey: 'fixture', fetch: transport(response(payload)) }))
+    expect(result.metadata?.usage).toEqual({ inputTokens: 10, outputTokens: 3, totalTokens: 13, ...expected })
+    expect(result.metadata?.trace).toMatchObject({ exaone: { usage: detailed } })
+  })
   it('keeps the API key out of object inspection and redacts encoded metadata values', () => {
     const apiKey = 'synthetic+private/key with spaces'
     const model = new ExaoneModel({ apiKey })

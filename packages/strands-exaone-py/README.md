@@ -42,9 +42,7 @@ For SDK tool use, streaming, structured output, Harness, and CLI walkthroughs, s
 
 ## Why use this provider?
 
-A standard OpenAI provider configured for EXAONE's endpoint can handle basic chat. `ExaoneModel` also carries EXAONE reasoning through conversation history and defaults to `preserve_thinking=True`. It maps model information, streaming, tools, usage, and API errors to Strands' interfaces. For the hosted 2.5 endpoint, it also completes a limited set of malformed tool argument syntax.
-
-For Agent and Harness calls, configure `ExaoneRetryStrategy` to honor server delay hints. The model's own HTTP retries are disabled by default. Other adapters may provide similar behavior through configuration or extensions; this package keeps the EXAONE mapping in one tested integration. See the [project comparison](https://github.com/ykoh42/exaone-integrations#why-use-a-dedicated-provider) for scope and trade-offs.
+The provider preserves EXAONE reasoning across Strands turns, maps model information, streaming, tools, usage and errors, and performs limited tool-argument syntax completion for hosted 2.5. Configure `ExaoneRetryStrategy` for Agent and Harness calls to honor server delay hints; the model's own HTTP retries are disabled by default.
 
 ## Configuration
 
@@ -124,13 +122,13 @@ The [EXAONE 4.5 model card](https://huggingface.co/LGAI-EXAONE/EXAONE-4.5-33B) s
 
 ### Server-specific observations
 
-The provider preserves text/image order in the **request sent to the endpoint**. The provider does not pre-check whether the endpoint supports images; the server may reject them. What reaches the model depends on the server's message normalization, chat template, and configuration. The observations below come from synthetic inputs and isolated server code; no running inference server or EXAONE 4.5 model was tested.
+These observations use synthetic inputs and isolated server code, not running servers or EXAONE 4.5 inference. The provider preserves image/text order in its request; server processing determines what reaches the model.
 
-- **vLLM:** With the official 4.5 template and vLLM 0.27.0's automatic content-format detection, an isolated message-normalization test converted `text → image → text` to `image → text → text` with the default `interleave_mm_strings=False`. Setting [`--interleave-mm-strings`](https://docs.vllm.ai/en/v0.27.0/cli/serve/#interleave-mm-strings) preserved the order in that test. Verify the setting and behavior on your server; this is not a real-image inference result.
-- **SGLang image/tool history:** In an isolated test using the model-card fork's message normalization and the 4.5 template at revision `570aa4b15a4f45ba1133072b45f50198f6e3b4fd`, an image-containing first user message followed by an assistant tool call and tool result caused earlier assistant reasoning to be omitted from the rendered prompt, even though the request contained it. A preceding string-valued user message changed the result. Other templates or server settings may behave differently.
-- **SGLang streaming tools:** With automatic tool choice, an isolated execution of the [model-card fork at `6757c9f`](https://github.com/lkm2835/sglang/tree/6757c9f904cdb8ae9028a394a2108d079b9e088c)'s streaming handler and `hermes` parser emitted a tool name without its arguments when an entire synthetic tool call and the stop arrived in the same final event. The parser-level condition also reproduced on SGLang 0.5.23; this does not verify that release's EXAONE 4.5 model support. Depending on the framework and tool schema, missing arguments can cause validation to fail or a tool to run with default values. See [SGLang issue #31915](https://github.com/sgl-project/sglang/issues/31915) and [proposed fix #32167](https://github.com/sgl-project/sglang/pull/32167). Actual server chunking and inference were not tested.
+- **vLLM 0.27.0:** With the official 4.5 template and automatic content-format detection, default normalization moved an image before surrounding text. [`--interleave-mm-strings`](https://docs.vllm.ai/en/v0.27.0/cli/serve/#interleave-mm-strings) preserved the order in the isolated test.
+- **SGLang image/tool history:** With the model-card fork `6757c9f` and 4.5 template `570aa4b`, a first user message containing an image followed by a tool call and result could omit earlier assistant reasoning from the rendered prompt. A prior string-valued user message changed the result.
+- **SGLang streaming tools:** With automatic tool choice, the same fork could emit a tool name without arguments when the complete synthetic call and stop arrived in one final event. Missing arguments can fail validation or invoke a tool with defaults. The parser condition also occurred in SGLang 0.5.23 in isolation; this does not establish 4.5 model support. See [issue #31915](https://github.com/sgl-project/sglang/issues/31915) and [proposed fix #32167](https://github.com/sgl-project/sglang/pull/32167).
 
-These server behaviors are not repaired by the provider. Check the exact server version, template, and settings you deploy.
+The provider does not repair these server behaviors. Check your server version, template and settings; see the [compatibility matrix](https://github.com/ykoh42/exaone-integrations/blob/main/COMPATIBILITY.md#known-server-side-observations) for details.
 
 ## Model information
 
@@ -145,8 +143,6 @@ The context budget covers input plus output, including reasoning. See the [EXAON
 The provider stores reasoning separately from the final answer and sends it back as reasoning_content when it appears in the Strands conversation. By default, requests use EXAONE's recommended agent settings: temperature=1.0, top_p=0.95, and preserve_thinking=True. K-EXAONE 2.5 always reasons; `enable_thinking` can be forwarded for compatible custom models.
 
 Strands can summarize older conversation history during automatic context management. The provider forwards the reasoning that remains in the history it receives; it cannot restore content that was summarized or removed. Token counts used for proactive context management are estimates, not exact EXAONE token counts.
-
-Long-running agents should monitor memory and trace growth; behavior depends on the SDK version and workload.
 
 The provider requests streaming usage by default (include_usage=True) so Strands can use token counts for context management. EXAONE may omit usage, and downstream context management is controlled by the framework.
 
@@ -204,17 +200,7 @@ agent = create_harness(
 
 This setting keeps unsupported media blocks out of requests. It does not give the model image or document understanding. The `read` tool can access files allowed by the agent's sandbox, and it sends the results to the model endpoint. Use an isolated sandbox or an approval mechanism to limit access to files you intend to share.
 
-Tools that use their own network transport may have TLS trust settings separate from the EXAONE provider's client.
-
-Before repeating an interrupted task that may have side effects, inspect the external state.
-
-Give concurrent agents separate session IDs, or serialize access to shared file sessions.
-
-Cancellation may leave work running. Set suitable tool timeouts and check for external effects before retrying.
-
-For side-effecting tools, make sure cancellation also invalidates any pending approval.
-
-Configure callbacks for child agents and the parent when generated reasoning or tool output must not be printed.
+Cancellation may leave work running; for side-effecting tools, also invalidate pending approvals and check external state before retrying.
 
 The provider forwards text without trimming leading or trailing whitespace. During a tool turn, Strands may remove a block that contains only whitespace, so those blocks may not round-trip exactly.
 
@@ -306,6 +292,8 @@ model = ExaoneModel(include_usage=True, metadata_callback=on_metadata)
 ```
 
 After a successful response, the callback receives `status_code`, `request_id`, selected response `headers`, `usage`, and `response`. Raw usage can include `reasoning_tokens`. Available response metadata includes top-level IDs, model, service and weight metadata, `result_code`, and `description`; choice-level `finish_reason`, `matched_stop`, and `logprobs`; and selected message fields. Streaming logprob and annotation arrays are accumulated in order; refusal fragments are joined, while audio and legacy function-call fragments remain in `message_deltas`. Fields are present only when supplied by the service. The callback is not called if the response fails or is interrupted before completion.
+
+When the endpoint reports cached or cache-write input tokens, the Strands usage event also exposes them as `cacheReadInputTokens` and `cacheWriteInputTokens`. These are input-token details; they are not added again to the input total.
 
 Asynchronous callbacks are awaited and receive task cancellation when the invocation's cancellation signal is set. When a signal is supplied, an asynchronous callback runs in a separate task; changes it makes to `ContextVar` values do not propagate back to the caller. A callback that suppresses cancellation may delay termination; a synchronous callback cannot be interrupted while it is running. Callback errors propagate to the caller. A callback's Strands throttling or context-overflow exception is wrapped in `ExaoneError`, with the original as its cause, so it is not mistaken for a model error after the response.
 

@@ -8,7 +8,7 @@ from typing import Any
 import httpx
 import pytest
 from harness_support import chunk, events, make_harness, response, tool_delta
-from strands import tool
+from strands import Agent, tool
 from strands_harness import create_harness
 
 from strands_exaone import ExaoneModel
@@ -33,6 +33,46 @@ async def test_harness_receives_synthetic_stream_usage() -> None:
     assert requests[0]["stream_options"] == {"include_usage": True}
     assert result.context_size == 123
     assert result.metrics.accumulated_usage == {"inputTokens": 123, "outputTokens": 4, "totalTokens": 127}
+
+
+@pytest.mark.parametrize("harness", [False, True])
+async def test_agent_accumulates_cache_usage_over_tool_round_trip(harness: bool) -> None:
+    calls = 0
+
+    @tool
+    def get_number() -> str:
+        """Return a synthetic number."""
+        return "7"
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        usage = {
+            "prompt_tokens": 20,
+            "completion_tokens": 4,
+            "total_tokens": 24,
+            "prompt_tokens_details": {"cached_tokens": calls * 2, "cache_write_tokens": calls},
+        }
+        delta = tool_delta("call-1", "get_number") if calls == 1 else {"content": "done"}
+        finish = "tool_calls" if calls == 1 else "stop"
+        return response(events(chunk(delta), chunk(finish=finish), {"choices": [], "usage": usage}))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        model = ExaoneModel(api_key="fixture", http_client=client)
+        agent = (
+            make_harness(model, [get_number])
+            if harness
+            else Agent(model=model, tools=[get_number], callback_handler=None)
+        )
+        result = await agent.invoke_async("Use the tool.")
+    assert calls == 2
+    assert result.metrics.accumulated_usage == {
+        "inputTokens": 40,
+        "outputTokens": 8,
+        "totalTokens": 48,
+        "cacheReadInputTokens": 6,
+        "cacheWriteInputTokens": 3,
+    }
 
 
 async def test_harness_structured_output_after_tool_and_reasoning() -> None:

@@ -406,6 +406,26 @@ async def test_generate_aggregates_usage_once_per_prompt(asynchronous: bool) -> 
 
 
 @pytest.mark.parametrize("asynchronous", [False, True])
+async def test_generate_aggregates_standard_usage_details(asynchronous: bool) -> None:
+    payload = _completion()
+    payload["usage"]["prompt_tokens_details"] = {"cached_tokens": 2, "cache_write_tokens": 1}
+    payload["usage"]["completion_tokens_details"] = {"reasoning_tokens": 3}
+    transport = httpx.MockTransport(lambda _: httpx.Response(200, json=payload))
+    with httpx.Client(transport=transport) as client:
+        async with httpx.AsyncClient(transport=transport) as async_client:
+            model = ChatEXAONE(api_key="fixture", http_client=client, http_async_client=async_client)
+            messages = [[HumanMessage(content="First")], [HumanMessage(content="Second")]]
+            result = await model.agenerate(messages) if asynchronous else model.generate(messages)
+    assert result.llm_output["token_usage"] == {
+        "prompt_tokens": 8,
+        "completion_tokens": 10,
+        "total_tokens": 18,
+        "reasoning_tokens": 6,
+        "prompt_tokens_details": {"cached_tokens": 4, "cache_write_tokens": 2},
+    }
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
 async def test_generate_rejects_malformed_candidate(asynchronous: bool) -> None:
     payload = _completion()
     payload["choices"].append(None)
@@ -1186,6 +1206,79 @@ def test_native_structured_output_supports_streaming(method: str) -> None:
     assert chunks[-1] == Answer(answer="42")
 
 
+@pytest.mark.parametrize(
+    ("operation", "usage_in_choice"),
+    [("invoke", False), ("stream", False), ("stream", True), ("astream", False), ("astream", True)],
+)
+async def test_standard_usage_details_survive_framework_calls(operation: str, usage_in_choice: bool) -> None:
+    usage = {
+        "prompt_tokens": 10,
+        "completion_tokens": 4,
+        "total_tokens": 14,
+        "prompt_tokens_details": {"cached_tokens": 5, "cache_write_tokens": 2},
+        "completion_tokens_details": {"reasoning_tokens": 3},
+    }
+    completion = _completion(content="ok")
+    completion["usage"] = usage
+    frame = {"choices": [{"index": 0, "delta": {"content": "ok"}, "finish_reason": "stop"}]}
+    if usage_in_choice:
+        frame["usage"] = usage
+    frames = [frame] if usage_in_choice else [frame, {"choices": [], "usage": usage}]
+    body = "".join(f"data: {json.dumps(item)}\n\n" for item in frames) + "data: [DONE]\n\n"
+    transport = httpx.MockTransport(
+        lambda _: httpx.Response(200, json=completion) if operation == "invoke" else httpx.Response(200, text=body)
+    )
+    with httpx.Client(transport=transport) as client:
+        async with httpx.AsyncClient(transport=transport) as async_client:
+            model = ChatEXAONE(api_key="fixture", http_client=client, http_async_client=async_client)
+            if operation == "invoke":
+                result = model.invoke("hello")
+            else:
+                chunks = (
+                    list(model.stream("hello")) if operation == "stream" else [c async for c in model.astream("hello")]
+                )
+                result = chunks[0]
+                for item in chunks[1:]:
+                    result += item
+    assert result.usage_metadata == {
+        "input_tokens": 10,
+        "output_tokens": 4,
+        "total_tokens": 14,
+        "input_token_details": {"cache_read": 5, "cache_creation": 2},
+        "output_token_details": {"reasoning": 3},
+    }
+
+
+def test_valid_zero_usage_details_are_preserved_and_invalid_values_ignored() -> None:
+    payload = _completion()
+    payload["usage"] = {
+        "prompt_tokens": 2,
+        "completion_tokens": 1,
+        "total_tokens": 3,
+        "prompt_tokens_details": {"cached_tokens": 0, "cache_write_tokens": -1, "vendor_detail": True},
+        "completion_tokens_details": {"reasoning_tokens": 0, "vendor_detail": 1.5},
+    }
+    with httpx.Client(transport=httpx.MockTransport(lambda _: httpx.Response(200, json=payload))) as client:
+        result = ChatEXAONE(api_key="fixture", http_client=client).invoke("hello")
+    assert result.usage_metadata == {
+        "input_tokens": 2,
+        "output_tokens": 1,
+        "total_tokens": 3,
+        "input_token_details": {"cache_read": 0},
+        "output_token_details": {"reasoning": 0},
+    }
+    assert result.response_metadata["usage"] == payload["usage"]
+
+
+def test_response_exposes_service_result_metadata() -> None:
+    payload = _completion()
+    payload.update(result_code="SUCCESS", description="synthetic description")
+    with httpx.Client(transport=httpx.MockTransport(lambda _: httpx.Response(200, json=payload))) as client:
+        result = ChatEXAONE(api_key="fixture", http_client=client).invoke("hello")
+    assert result.response_metadata["result_code"] == "SUCCESS"
+    assert result.response_metadata["description"] == "synthetic description"
+
+
 def test_stream_preserves_reasoning_text_and_usage_chunks() -> None:
     events = [
         {
@@ -1219,6 +1312,62 @@ def test_stream_preserves_reasoning_text_and_usage_chunks() -> None:
     assert any(chunk.additional_kwargs.get("reasoning_content") == "reason " for chunk in chunks)
     assert any(chunk.content == "answer" for chunk in chunks)
     assert any(chunk.usage_metadata == {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3} for chunk in chunks)
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_stream_aggregates_repeated_model_metadata_once(asynchronous: bool) -> None:
+    frames = [
+        {
+            "id": "response-id",
+            "model": "custom-model",
+            "created": 123,
+            "metadata": {"weight_version": "v1"},
+            "result_code": "SUCCESS",
+            "description": "synthetic",
+            "choices": [{"index": 0, "delta": {"content": text}}],
+        }
+        for text in ("a", "b")
+    ]
+    body = "".join(f"data: {json.dumps(item)}\n\n" for item in frames) + "data: [DONE]\n\n"
+    transport = httpx.MockTransport(lambda _: httpx.Response(200, text=body))
+    with httpx.Client(transport=transport) as client:
+        async with httpx.AsyncClient(transport=transport) as async_client:
+            model = ChatEXAONE(api_key="fixture", http_client=client, http_async_client=async_client)
+            chunks = [c async for c in model.astream("hello")] if asynchronous else list(model.stream("hello"))
+    combined = chunks[0]
+    for item in chunks[1:]:
+        combined += item
+    assert combined.content == "ab"
+    assert combined.response_metadata["model_name"] == "custom-model"
+    assert combined.response_metadata["id"] == "response-id"
+    assert combined.response_metadata["created"] == 123
+    assert combined.response_metadata["metadata"] == {"weight_version": "v1"}
+    assert combined.response_metadata["result_code"] == "SUCCESS"
+    assert combined.response_metadata["description"] == "synthetic"
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_stream_preserves_repeated_and_new_weight_metadata(asynchronous: bool) -> None:
+    frames = [
+        {"choices": [{"index": 0, "delta": {"content": "a"}}], "metadata": {"weight_version": "v1"}},
+        {
+            "choices": [{"index": 0, "delta": {"content": "b"}}],
+            "metadata": {"weight_version": "v1", "weight_versions": [{"version": "v1", "start": 0, "end": 2}]},
+        },
+    ]
+    body = "".join(f"data: {json.dumps(item)}\n\n" for item in frames) + "data: [DONE]\n\n"
+    transport = httpx.MockTransport(lambda _: httpx.Response(200, text=body))
+    with httpx.Client(transport=transport) as client:
+        async with httpx.AsyncClient(transport=transport) as async_client:
+            model = ChatEXAONE(api_key="fixture", http_client=client, http_async_client=async_client)
+            chunks = [c async for c in model.astream("hello")] if asynchronous else list(model.stream("hello"))
+    combined = chunks[0]
+    for item in chunks[1:]:
+        combined += item
+    assert combined.response_metadata["metadata"] == {
+        "weight_version": "v1",
+        "weight_versions": [{"version": "v1", "start": 0, "end": 2}],
+    }
 
 
 @pytest.mark.parametrize("output_version", ["v0", "v1"])

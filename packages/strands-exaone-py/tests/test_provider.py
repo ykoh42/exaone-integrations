@@ -344,6 +344,38 @@ async def test_stream_sse_utf8_and_usage_callback() -> None:
 
 
 @pytest.mark.parametrize("stream", [True, False])
+@pytest.mark.parametrize("read,write,expected", [(5, 2, (5, 2)), (0, 0, (0, 0)), (True, -1, (None, None))])
+async def test_cache_usage_is_exposed_in_strands_metadata(
+    stream: bool, read: Any, write: Any, expected: tuple[int | None, int | None]
+) -> None:
+    usage = {
+        "prompt_tokens": 10,
+        "completion_tokens": 3,
+        "total_tokens": 13,
+        "prompt_tokens_details": {"cached_tokens": read, "cache_write_tokens": write},
+    }
+    payload = {"choices": [{"index": 0, "message": {"content": "ok"}, "finish_reason": "stop"}], "usage": usage}
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        if stream:
+            return httpx.Response(
+                200, content=sse(chunk({"content": "ok"}, finish="stop"), {"choices": [], "usage": usage})
+            )
+        return httpx.Response(200, json=payload)
+
+    captured = []
+    model, client = model_for(handler, stream=stream, metadata_callback=captured.append)
+    try:
+        result = await collect(model)
+    finally:
+        await client.aclose()
+    standard = next(event["metadata"]["usage"] for event in result if "metadata" in event)
+    assert standard.get("cacheReadInputTokens") == expected[0]
+    assert standard.get("cacheWriteInputTokens") == expected[1]
+    assert captured[0]["usage"] == usage
+
+
+@pytest.mark.parametrize("stream", [True, False])
 @pytest.mark.parametrize(
     "fields",
     [

@@ -539,6 +539,12 @@ function metadataEvent(mapper: EventMapper, response: Response, key: string): { 
   const event: ModelStreamEvent = { type: 'modelMetadataEvent', trace: { exaone: safeMetadata } }
   if (validTokenCount(prompt) && validTokenCount(completion) && validTokenCount(total)) {
     event.usage = { inputTokens: prompt, outputTokens: completion, totalTokens: total }
+    const details = usage?.prompt_tokens_details
+    if (details && typeof details === 'object' && !Array.isArray(details)) {
+      const { cached_tokens: read, cache_write_tokens: write } = details as Record<string, unknown>
+      if (validTokenCount(read)) event.usage.cacheReadInputTokens = read
+      if (validTokenCount(write)) event.usage.cacheWriteInputTokens = write
+    }
   }
   return { event, metadata: safeMetadata }
 }

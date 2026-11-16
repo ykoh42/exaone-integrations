@@ -367,11 +367,20 @@ def _standard_usage(usage: dict[str, Any] | None) -> Usage | None:
     names = {"prompt_tokens": "inputTokens", "completion_tokens": "outputTokens", "total_tokens": "totalTokens"}
     if any(type(usage.get(name)) is not int or not 0 <= usage[name] <= 2**53 - 1 for name in names):
         return None
-    return {
+    result: Usage = {
         "inputTokens": usage["prompt_tokens"],
         "outputTokens": usage["completion_tokens"],
         "totalTokens": usage["total_tokens"],
     }
+    details = usage.get("prompt_tokens_details")
+    if isinstance(details, dict):
+        read = details.get("cached_tokens")
+        write = details.get("cache_write_tokens")
+        if type(read) is int and 0 <= read <= 2**53 - 1:
+            result["cacheReadInputTokens"] = read
+        if type(write) is int and 0 <= write <= 2**53 - 1:
+            result["cacheWriteInputTokens"] = write
+    return result
 
 
 def _parse_response(payload: bytes | str, *, stream: bool = False) -> dict[str, Any]:

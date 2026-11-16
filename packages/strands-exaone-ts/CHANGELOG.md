@@ -2,6 +2,7 @@
 
 ## 0.1.3 (unreleased)
 
+- Expose reported cache read and write counts in Strands usage metadata.
 - Forward Strands user image bytes or URLs and text in order to compatible self-hosted endpoints.
 - Limit tool-argument syntax completion to the hosted 2.5 endpoint and pass blank arguments through to Strands.
 - Preserve `reasoning` responses from compatible self-hosted servers as Strands reasoning.

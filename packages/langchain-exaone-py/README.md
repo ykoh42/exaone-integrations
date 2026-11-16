@@ -38,15 +38,11 @@ message = model.invoke("안녕하세요. K-EXAONE을 소개해 주세요.")
 print(message.text)
 ```
 
-LangChain provider catalogs use vendor names, while chat-model listings identify classes. `ChatEXAONE` follows the common class-name pattern for a `BaseChatModel`; `Chat` is not part of the package or model ID.
-
 The package does not load `.env` files. Use your application's secret-management setup to place the API key in the process environment, or pass `api_key` directly.
 
 ## Why use this integration?
 
-A standard OpenAI chat model configured for EXAONE's endpoint can handle basic chat. `ChatEXAONE` also carries `reasoning_content` on assistant messages and sends it on later turns. It defaults to `preserve_thinking=True` and exposes known model facts through LangChain's standard profile. Usage and response metadata appear on LangChain messages, and raised API errors include diagnostic fields.
-
-Retries are bounded, follow server delay hints, and stop before replaying a stream that has started. Structured-output binding and tool execution follow LangChain's contracts. Other adapters may provide similar behavior through configuration or extensions; this package keeps the EXAONE mapping in one tested integration. See the [project comparison](https://github.com/ykoh42/exaone-integrations#why-use-a-dedicated-provider) for scope and trade-offs.
+The integration preserves EXAONE reasoning across LangChain turns, exposes model profiles and response metadata, and supports tools and structured output. Retries honor server delay hints before streaming output begins.
 
 ## Serialization
 
@@ -68,7 +64,7 @@ See [LangChain model profiles](https://docs.langchain.com/oss/python/langchain/m
 
 ## Reasoning history
 
-EXAONE returns reasoning separately from final content. The provider exposes it on `AIMessage.additional_kwargs["reasoning_content"]` and includes it when an assistant message is sent back in later turns. Keep the original `AIMessage` in conversation history so reasoning and tool calls remain attached to their assistant turn.
+The hosted K-EXAONE 2.5 API always reasons and returns reasoning separately from final content. The provider exposes it on `AIMessage.additional_kwargs["reasoning_content"]` and includes it when an assistant message is sent back in later turns. Keep the original `AIMessage` in conversation history so reasoning and tool calls remain attached to their assistant turn.
 
 ```python
 from langchain_core.messages import HumanMessage
@@ -87,6 +83,8 @@ Use `model.astream(...)` for asynchronous streaming. Streaming chunks retain rea
 LangChain's streaming interface represents one completion per run. If the API returns multiple choices, such as when `n` is greater than `1` in `model_kwargs`, `stream()` and `astream()` raise `ValueError` rather than merging separate candidates. Use `generate()` when you need multiple candidates.
 
 Each candidate in a non-streaming response carries the same request-level usage. `generate()` and `agenerate()` expose totals once per prompt in `llm_output["token_usage"]`, including reasoning tokens when present.
+
+When the endpoint reports cache reads or writes, `usage_metadata.input_token_details` exposes them as `cache_read` and `cache_creation`. Reasoning counts are exposed under `output_token_details` when reported.
 
 LangChain's `output_version="v1"` standard content blocks can also be retained in conversation history, including reasoning and tool calls.
 
@@ -137,8 +135,6 @@ Legacy `function_call` fields and LangChain `FunctionMessage` results are also p
 | `max_retries` | `2` | Retries for transient API errors before output is returned; set to `0` to disable |
 | `timeout` | `None` | No provider-imposed HTTP timeout; pass a positive number to set one |
 
-The API always enables reasoning. The provider stores returned `reasoning_content` on assistant messages and sends it with later turns. By default, `preserve_thinking=True` also sets EXAONE's recommended `chat_template_kwargs.preserve_thinking` option. Keep assistant messages intact when continuing a conversation.
-
 For an already-running K-EXAONE 2.0 endpoint, set `base_url` and `model` to the server's URL and served model name. If supported by the server, `chat_template_kwargs={"enable_thinking": False}` requests non-reasoning mode. The provider accepts `reasoning` and `reasoning_content` response fields and preserves them as `reasoning_content` for later turns. Identical values are emitted once; conflicting nonempty values are rejected. Protocol fixtures have been tested; actual K-EXAONE 2.0 inference has not been verified by this project.
 
 For serving instructions and parser settings, see the [model card](https://huggingface.co/LGAI-EXAONE/K-EXAONE-2.0-750B-A37B). Its examples use forked servers; [vLLM 0.27.0](https://github.com/vllm-project/vllm/releases/tag/v0.27.0) also includes K-EXAONE 2.0 model support. Verify the specific server version and configuration you deploy.
@@ -181,13 +177,13 @@ User images support URLs and base64 data with an image MIME type; the provider s
 
 ### Server-specific observations
 
-The provider preserves text/image order in the **request sent to the endpoint**. The provider does not pre-check whether the endpoint supports images; the server may reject them. What reaches the model depends on the server's message normalization, chat template, and configuration. The observations below come from synthetic inputs and isolated server code; no running inference server or EXAONE 4.5 model was tested.
+These observations use synthetic inputs and isolated server code, not running servers or EXAONE 4.5 inference. The provider preserves image/text order in its request; server processing determines what reaches the model.
 
-- **vLLM:** With the official 4.5 template and vLLM 0.27.0's automatic content-format detection, an isolated message-normalization test converted `text → image → text` to `image → text → text` with the default `interleave_mm_strings=False`. Setting [`--interleave-mm-strings`](https://docs.vllm.ai/en/v0.27.0/cli/serve/#interleave-mm-strings) preserved the order in that test. Verify the setting and behavior on your server; this is not a real-image inference result.
-- **SGLang image/tool history:** In an isolated test using the model-card fork's message normalization and the 4.5 template at revision `570aa4b15a4f45ba1133072b45f50198f6e3b4fd`, an image-containing first user message followed by an assistant tool call and tool result caused earlier assistant reasoning to be omitted from the rendered prompt, even though the request contained it. A preceding string-valued user message changed the result. Other templates or server settings may behave differently.
-- **SGLang streaming tools:** With automatic tool choice, an isolated execution of the [model-card fork at `6757c9f`](https://github.com/lkm2835/sglang/tree/6757c9f904cdb8ae9028a394a2108d079b9e088c)'s streaming handler and `hermes` parser emitted a tool name without its arguments when an entire synthetic tool call and the stop arrived in the same final event. The parser-level condition also reproduced on SGLang 0.5.23; this does not verify that release's EXAONE 4.5 model support. Depending on the framework and tool schema, missing arguments can cause validation to fail or a tool to run with default values. See [SGLang issue #31915](https://github.com/sgl-project/sglang/issues/31915) and [proposed fix #32167](https://github.com/sgl-project/sglang/pull/32167). Actual server chunking and inference were not tested.
+- **vLLM 0.27.0:** With the official 4.5 template and automatic content-format detection, default normalization moved an image before surrounding text. [`--interleave-mm-strings`](https://docs.vllm.ai/en/v0.27.0/cli/serve/#interleave-mm-strings) preserved the order in the isolated test.
+- **SGLang image/tool history:** With the model-card fork `6757c9f` and 4.5 template `570aa4b`, a first user message containing an image followed by a tool call and result could omit earlier assistant reasoning from the rendered prompt. A prior string-valued user message changed the result.
+- **SGLang streaming tools:** With automatic tool choice, the same fork could emit a tool name without arguments when the complete synthetic call and stop arrived in one final event. Missing arguments can fail validation or invoke a tool with defaults. The parser condition also occurred in SGLang 0.5.23 in isolation; this does not establish 4.5 model support. See [issue #31915](https://github.com/sgl-project/sglang/issues/31915) and [proposed fix #32167](https://github.com/sgl-project/sglang/pull/32167).
 
-These server behaviors are not repaired by the provider. Check the exact server version, template, and settings you deploy.
+The provider does not repair these server behaviors. Check your server version, template and settings; see the [compatibility matrix](https://github.com/ykoh42/exaone-integrations/blob/main/COMPATIBILITY.md#known-server-side-observations) for details.
 
 See the [K-EXAONE 2.5 API reference](https://docs.exaone.ai/ko/docs/k-exaone-2.5) for the model's request parameters and limits.
 

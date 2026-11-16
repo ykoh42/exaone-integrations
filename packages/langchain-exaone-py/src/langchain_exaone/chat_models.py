@@ -11,6 +11,7 @@ import re
 import time
 from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
 from contextlib import asynccontextmanager, contextmanager
+from copy import deepcopy
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from functools import wraps
@@ -51,6 +52,21 @@ from langchain_exaone._profiles import get_model_profile
 _RETRYABLE_STATUSES = {408, 429, 500, 502, 503, 504}
 _SAFE_HEADERS = {"content-type", "retry-after", "retry-after-ms", "x-request-id"}
 _HTTPX_ERRORS = (httpx.HTTPError, httpx.InvalidURL, httpx.CookieConflict, httpx.StreamError)
+
+
+def _new_metadata_fields(value: Mapping[str, Any], seen: dict[str, Any]) -> dict[str, Any]:
+    """Retain new metadata fields without repeating unchanged snapshot values."""
+    result: dict[str, Any] = {}
+    for key, item in value.items():
+        previous = seen.get(key)
+        if isinstance(item, Mapping) and isinstance(previous, dict):
+            nested = _new_metadata_fields(item, previous)
+            if nested:
+                result[key] = nested
+        elif key not in seen or previous != item:
+            result[key] = item
+            seen[key] = deepcopy(item)
+    return result
 
 
 def _is_hosted_default(data: Mapping[str, Any]) -> bool:
@@ -442,6 +458,18 @@ def _usage_metadata(usage: Mapping[str, Any] | None) -> dict[str, Any] | None:
     if any(type(value) is not int or value < 0 for value in values):
         return None
     result: dict[str, Any] = {"input_tokens": values[0], "output_tokens": values[1], "total_tokens": values[2]}
+    input_details = usage.get("prompt_tokens_details")
+    if isinstance(input_details, Mapping):
+        mapped_input = {
+            target: value
+            for source, target in (
+                ("cached_tokens", "cache_read"),
+                ("cache_write_tokens", "cache_creation"),
+            )
+            if type(value := input_details.get(source)) is int and value >= 0
+        }
+        if mapped_input:
+            result["input_token_details"] = mapped_input
     details = usage.get("completion_tokens_details")
     reasoning_tokens = details.get("reasoning_tokens") if isinstance(details, Mapping) else None
     if reasoning_tokens is None:
@@ -534,6 +562,8 @@ def _assistant_message(choice: Mapping[str, Any], response: Mapping[str, Any], a
         "moderation": response.get("moderation"),
         "service_tier": response.get("service_tier"),
         "system_fingerprint": response.get("system_fingerprint"),
+        "result_code": _redact_secret(response.get("result_code"), api_key),
+        "description": _redact_secret(response.get("description"), api_key),
     }
     return AIMessage(
         content=content or "",
@@ -855,6 +885,17 @@ class ChatEXAONE(BaseChatModel):
             reasoning = total.get("output_token_details", {}).get("reasoning")
             if reasoning is not None:
                 token_usage["reasoning_tokens"] = reasoning
+            prompt_details = total.get("input_token_details", {})
+            mapped_prompt = {
+                target: prompt_details[source]
+                for source, target in (
+                    ("cache_read", "cached_tokens"),
+                    ("cache_creation", "cache_write_tokens"),
+                )
+                if source in prompt_details
+            }
+            if mapped_prompt:
+                token_usage["prompt_tokens_details"] = mapped_prompt
             result["token_usage"] = token_usage
         return result
 
@@ -1052,8 +1093,11 @@ class ChatEXAONE(BaseChatModel):
                                 time.sleep(delay)
                                 continue
                         raise error
+                    seen_metadata: dict[str, Any] = {}
                     for payload in _decode_sse(response.iter_lines()):
-                        yield from self._stream_payload(payload, run_manager, key)
+                        for chunk in self._stream_payload(payload, run_manager, key):
+                            self._deduplicate_stream_metadata(chunk, seen_metadata)
+                            yield chunk
                     return
         raise RuntimeError("EXAONE retry loop exited without a response")
 
@@ -1082,13 +1126,45 @@ class ChatEXAONE(BaseChatModel):
                                 await asyncio.sleep(delay)
                                 continue
                         raise error
+                    seen_metadata: dict[str, Any] = {}
                     async for payload in _decode_sse_async(response.aiter_lines()):
                         for chunk in self._stream_payload(payload, None, key):
+                            self._deduplicate_stream_metadata(chunk, seen_metadata)
                             yield chunk
                             if run_manager is not None:
                                 await run_manager.on_llm_new_token(chunk.text, chunk=chunk)
                     return
         raise RuntimeError("EXAONE retry loop exited without a response")
+
+    @staticmethod
+    def _deduplicate_stream_metadata(chunk: ChatGenerationChunk, seen: dict[str, Any]) -> None:
+        """Avoid merging identical response-level fields repeatedly across chunks."""
+        metadata = chunk.message.response_metadata
+        for name in (
+            "model_name",
+            "id",
+            "created",
+            "object",
+            "metadata",
+            "moderation",
+            "service_tier",
+            "system_fingerprint",
+            "result_code",
+            "description",
+        ):
+            value = metadata.get(name)
+            if value is None:
+                continue
+            if name == "metadata" and isinstance(value, Mapping) and isinstance(seen.get(name), dict):
+                remaining = _new_metadata_fields(value, seen[name])
+                if remaining:
+                    metadata[name] = remaining
+                else:
+                    metadata.pop(name)
+            elif name in seen and seen[name] == value:
+                metadata.pop(name)
+            else:
+                seen[name] = deepcopy(value)
 
     def _stream_payload(
         self, payload: Mapping[str, Any], run_manager: CallbackManagerForLLMRun | None, api_key: str
@@ -1096,12 +1172,27 @@ class ChatEXAONE(BaseChatModel):
         choices = payload.get("choices")
         if not isinstance(choices, list):
             raise ValueError("EXAONE stream event choices must be a list")
-        if not choices:
-            usage = payload.get("usage")
+        response_fields = {
+            key: _redact_secret(payload[key], api_key)
+            for key in (
+                "created",
+                "object",
+                "metadata",
+                "moderation",
+                "service_tier",
+                "system_fingerprint",
+                "result_code",
+                "description",
+            )
+            if payload.get(key) is not None
+        }
+        usage = payload.get("usage")
+        if isinstance(usage, Mapping):
             chunk = AIMessageChunk(
-                content="", response_metadata={"usage": usage}, usage_metadata=_usage_metadata(usage)
+                content="", response_metadata={**response_fields, "usage": usage}, usage_metadata=_usage_metadata(usage)
             )
             yield ChatGenerationChunk(message=chunk, text="")
+        if not choices:
             return
         if len(choices) > 1:
             raise ValueError("EXAONE returned multiple streamed choices; LangChain supports one choice per run")
@@ -1166,6 +1257,7 @@ class ChatEXAONE(BaseChatModel):
                 "id": payload.get("id"),
                 "finish_reason": choice.get("finish_reason"),
                 "matched_stop": choice.get("matched_stop"),
+                **response_fields,
             }
             chunk_content: str | list[dict[str, Any]] = text
             if self.output_version == "v1":

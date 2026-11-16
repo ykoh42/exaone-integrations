@@ -307,8 +307,10 @@ export class ChatExaone extends BaseChatModel<
     const response = await this.request(body, options.signal, options.maxRetries ?? this.retryCount);
     if (!response.body) throw new Error("EXAONE returned an empty streaming response.");
 
+    const seenMetadata = new Map<string, unknown>();
     for await (const payload of parseSse<ChatCompletionChunk>(response.body, options.signal, this.#apiKey)) {
       for (const originalChunk of streamResponseChunks(payload, response, this.#apiKey)) {
+        deduplicateStreamMetadata(originalChunk.message.response_metadata, seenMetadata);
         const generationChunk = (options.outputVersion ?? this.outputVersion) === "v1"
           ? standardStreamChunk(originalChunk)
           : originalChunk;
@@ -469,7 +471,40 @@ function* streamResponseChunks(
   if (usageChunk) yield usageChunk;
 
   const choice = getStreamChoice(payload.choices);
-  if (choice) yield createStreamGenerationChunk(payload, choice, response.headers);
+  if (choice) {
+    const chunk = createStreamGenerationChunk(payload, choice, response.headers);
+    if (usageChunk) delete chunk.message.response_metadata.usage;
+    yield chunk;
+  }
+}
+
+function newMetadataFields(value: Record<string, unknown>, seen: Record<string, unknown>): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value)) {
+    const previous = seen[key];
+    if (isRecord(item) && isRecord(previous)) {
+      const nested = newMetadataFields(item, previous);
+      if (Object.keys(nested).length) result[key] = nested;
+    } else if (!(key in seen) || JSON.stringify(previous) !== JSON.stringify(item)) {
+      result[key] = item;
+      seen[key] = structuredClone(item);
+    }
+  }
+  return result;
+}
+
+function deduplicateStreamMetadata(metadata: Record<string, unknown>, seen: Map<string, unknown>): void {
+  for (const key of ["model_name", "model", "created", "object", "metadata", "moderation", "service_tier", "system_fingerprint", "result_code", "description", "headers"]) {
+    const value = metadata[key];
+    if (value === undefined || value === null) continue;
+    const previous = seen.get(key);
+    if (key === "metadata" && isRecord(value) && isRecord(previous)) {
+      const remaining = newMetadataFields(value, previous);
+      if (Object.keys(remaining).length) metadata[key] = remaining;
+      else delete metadata[key];
+    } else if (seen.has(key) && JSON.stringify(previous) === JSON.stringify(value)) delete metadata[key];
+    else seen.set(key, structuredClone(value));
+  }
 }
 
 function setStandardContent(message: AIMessage<ExaoneMessageStructure> | AIMessageChunk<ExaoneMessageStructure>): void {
@@ -902,25 +937,43 @@ function safeHeaders(headers: Headers): Record<string, string> {
   }));
 }
 
+function validUsageCount(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function inputUsageDetails(value: unknown): UsageMetadata["input_token_details"] {
+  if (!isRecord(value)) return undefined;
+  const result: NonNullable<UsageMetadata["input_token_details"]> = {};
+  if (validUsageCount(value.cached_tokens)) result.cache_read = value.cached_tokens;
+  if (validUsageCount(value.cache_write_tokens)) result.cache_creation = value.cache_write_tokens;
+  return Object.keys(result).length ? result : undefined;
+}
+
+function outputUsageDetails(usage: Record<string, unknown>): UsageMetadata["output_token_details"] {
+  const details = isRecord(usage.completion_tokens_details) ? usage.completion_tokens_details : {};
+  const reasoning = details.reasoning_tokens ?? usage.reasoning_tokens;
+  const result: NonNullable<UsageMetadata["output_token_details"]> = {};
+  if (validUsageCount(reasoning)) result.reasoning = reasoning;
+  return Object.keys(result).length ? result : undefined;
+}
+
 function mapUsage(usage: Record<string, unknown> | undefined): UsageMetadata | undefined {
   if (!usage) return undefined;
   const input = usage.prompt_tokens;
   const output = usage.completion_tokens;
   const total = usage.total_tokens;
-  if (![input, output, total].every((value) => typeof value === "number" && Number.isSafeInteger(value) && value >= 0)) {
+  if (!validUsageCount(input) || !validUsageCount(output) || !validUsageCount(total)) {
     return undefined;
   }
   const result: UsageMetadata = {
-    input_tokens: input as number,
-    output_tokens: output as number,
-    total_tokens: total as number,
+    input_tokens: input,
+    output_tokens: output,
+    total_tokens: total,
   };
-  const reasoning = (isRecord(usage.completion_tokens_details)
-    ? usage.completion_tokens_details.reasoning_tokens
-    : undefined) ?? usage.reasoning_tokens;
-  if (typeof reasoning === "number" && Number.isSafeInteger(reasoning) && reasoning >= 0) {
-    result.output_token_details = { reasoning };
-  }
+  const inputDetails = inputUsageDetails(usage.prompt_tokens_details);
+  const outputDetails = outputUsageDetails(usage);
+  if (inputDetails) result.input_token_details = inputDetails;
+  if (outputDetails) result.output_token_details = outputDetails;
   return result;
 }
 
