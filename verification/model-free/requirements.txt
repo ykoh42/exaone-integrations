@@ -9,3 +9,4 @@ tqdm==4.70.1
 orjson==3.13.0
 partial-json-parser==0.2.1.1.post7
 regex==2026.11.9
+transformers==4.57.6

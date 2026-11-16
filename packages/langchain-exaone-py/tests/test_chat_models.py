@@ -132,6 +132,39 @@ def _completion(*, content: str = "4", reasoning: str = "Let me calculate.") -> 
     }
 
 
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("output_version", ["v0", "v1"])
+@pytest.mark.parametrize("has_reasoning", [False, True])
+@pytest.mark.parametrize(
+    "parts", [["Text <thi", "nk>example</thi", "nk> end"], ["```html\n<thi", "nk>example</thi", "nk>\n```"]]
+)
+def test_preserves_literal_thinking_markers(
+    streaming: bool, output_version: str, has_reasoning: bool, parts: list[str]
+) -> None:
+    frames = [{"choices": [{"index": 0, "delta": {"reasoning": "Plan"}}]}] if has_reasoning else []
+    frames += [{"choices": [{"index": 0, "delta": {"content": part}}]} for part in parts]
+    frames.append({"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]})
+    data = "".join(f"data: {json.dumps(frame)}\n\n" for frame in frames) + "data: [DONE]\n\n"
+    completion = _completion(content="".join(parts), reasoning="Plan")
+    if not has_reasoning:
+        completion["choices"][0]["message"].pop("reasoning_content")
+    transport = httpx.MockTransport(
+        lambda _: httpx.Response(200, text=data) if streaming else httpx.Response(200, json=completion)
+    )
+    with httpx.Client(transport=transport) as client:
+        model = ChatEXAONE(api_key="synthetic", http_client=client, output_version=output_version)
+        if streaming:
+            chunks = list(model.stream("question"))
+            text = "".join(chunk.text for chunk in chunks)
+            reasoning = "".join(chunk.additional_kwargs.get("reasoning_content", "") for chunk in chunks)
+        else:
+            result = model.invoke("question")
+            text = result.text
+            reasoning = result.additional_kwargs.get("reasoning_content", "")
+    assert text == "".join(parts)
+    assert reasoning == ("Plan" if has_reasoning else "")
+
+
 @pytest.mark.parametrize("asynchronous", [False, True])
 @pytest.mark.parametrize("output_version", ["v0", "v1"])
 @pytest.mark.asyncio

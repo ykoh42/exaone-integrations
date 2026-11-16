@@ -174,6 +174,39 @@ async def collect(model: ExaoneModel, **kwargs: Any) -> list[dict[str, Any]]:
 
 
 @pytest.mark.parametrize("stream", [True, False])
+@pytest.mark.parametrize("reasoning", [None, "Plan"])
+@pytest.mark.parametrize(
+    "parts", [["Text <thi", "nk>example</thi", "nk> end"], ["```html\n<thi", "nk>example</thi", "nk>\n```"]]
+)
+async def test_preserves_literal_thinking_markers(stream: bool, reasoning: str | None, parts: list[str]) -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        if stream:
+            return httpx.Response(
+                200,
+                content=sse(
+                    chunk({"reasoning": reasoning}), *(chunk({"content": p}) for p in parts), chunk(finish="stop")
+                ),
+            )
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": "".join(parts), "reasoning": reasoning}, "finish_reason": "stop"}]
+            },
+        )
+
+    model, client = model_for(handler, stream=stream)
+    try:
+        events = await collect(model)
+    finally:
+        await client.aclose()
+    deltas = [event["contentBlockDelta"]["delta"] for event in events if "contentBlockDelta" in event]
+    assert "".join(delta.get("text", "") for delta in deltas) == "".join(parts)
+    assert [delta["reasoningContent"]["text"] for delta in deltas if "reasoningContent" in delta] == (
+        [reasoning] if reasoning else []
+    )
+
+
+@pytest.mark.parametrize("stream", [True, False])
 async def test_named_tool_choice_accepts_vllm_stop_with_tool_call(stream: bool) -> None:
     call = {"id": "call_1", "type": "function", "function": {"name": "lookup", "arguments": '{"x":2}'}}
     requests: list[dict[str, Any]] = []

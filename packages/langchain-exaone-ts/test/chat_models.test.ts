@@ -54,6 +54,32 @@ function requestBody(fetcher: typeof fetch): Record<string, unknown> {
 describe("ChatExaone", () => {
   afterEach(() => vi.useRealTimers());
 
+  it.each(["v0", "v1"] as const)("preserves literal thinking markers in answer and code in %s", async (outputVersion) => {
+    for (const parts of [["Text <thi", "nk>example</thi", "nk> end"], ["```html\n<thi", "nk>example</thi", "nk>\n```"]]) {
+      for (const streaming of [false, true]) {
+        for (const reasoning of [undefined, "Plan"]) {
+          const response = streaming
+            ? sseResponse([
+                { choices: [{ index: 0, delta: { reasoning } }] },
+                ...parts.map((content) => ({ choices: [{ index: 0, delta: { content } }] })),
+                { choices: [{ index: 0, delta: {}, finish_reason: "stop" }] },
+              ])
+            : completion({ role: "assistant", content: parts.join(""), reasoning });
+          const model = new ChatExaone({ apiKey: "fixture", fetch: mockFetch([response]), outputVersion });
+          const messages: (AIMessage | AIMessageChunk)[] = [];
+          if (streaming) {
+            for await (const chunk of await model.stream("question")) messages.push(chunk);
+          } else {
+            messages.push(await model.invoke("question"));
+          }
+          const text = messages.map((message) => typeof message.content === "string" ? message.content : message.content.map((block) => typeof block !== "string" && block.type === "text" && typeof block.text === "string" ? block.text : "").join("")).join("");
+          expect(text).toBe(parts.join(""));
+          expect(messages.map((message) => message.additional_kwargs.reasoning_content ?? "").join("")).toBe(reasoning ?? "");
+        }
+      }
+    }
+  });
+
   it.each(["v0", "v1"] as const)("preserves vLLM reasoning and tool history in %s responses", async (outputVersion) => {
     const toolCall = { id: "call-1", type: "function", function: { name: "lookup", arguments: "{}" } };
     const fetcher = mockFetch([

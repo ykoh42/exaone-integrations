@@ -249,6 +249,21 @@ describe('ExaoneModel', () => {
     }
   })
 
+  it.each([true, false])('preserves literal thinking markers in answer and code (stream=%s)', async (streaming) => {
+    for (const parts of [['Text <thi', 'nk>example</thi', 'nk> end'], ['```html\n<thi', 'nk>example</thi', 'nk>\n```']]) {
+      for (const reasoning of [undefined, 'Plan']) {
+        const payload = streaming
+          ? sse([event({ reasoning }), ...parts.map((content) => event({ content })), event({}, 'stop')])
+          : JSON.stringify(wire([{ message: { reasoning, content: parts.join('') }, finish_reason: 'stop' }]))
+        const result = await aggregate(new ExaoneModel({ apiKey: 'fixture', stream: streaming, fetch: transport(response(payload)) }))
+        expect(result.message.content).toEqual([
+          ...(reasoning ? [expect.objectContaining({ type: 'reasoningBlock', text: reasoning })] : []),
+          expect.objectContaining({ type: 'textBlock', text: parts.join('') }),
+        ])
+      }
+    }
+  })
+
   it('preserves distinct streaming reasoning deltas', async () => {
     const data = sse([event({ reasoning: 'first ' }), event({ reasoning: 'second' }), event({}, 'stop')])
     const result = await aggregate(new ExaoneModel({ apiKey: 'key', fetch: transport(response(data)) }))
