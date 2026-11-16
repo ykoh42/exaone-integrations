@@ -28,7 +28,7 @@ For compatibility work, use the publisher's official model-card server examples 
 | [EXAONE 4.5](https://huggingface.co/LGAI-EXAONE/EXAONE-4.5-33B) | vLLM | `qwen3` | `hermes` |
 | EXAONE 4.5 | SGLang | `qwen3` | `hermes` |
 
-These are documented examples, not a guarantee for every server version or fork. Parser configuration belongs to the inference server. Track protocol fixtures, actual server execution, and real-model inference separately for each tested combination.
+These are documented examples, not a guarantee for every server version or fork. Parser configuration belongs to the inference server. The [compatibility matrix](COMPATIBILITY.md) tracks protocol fixtures, isolated server-code checks, and real-model inference separately.
 
 ## Shared recovery and verification
 

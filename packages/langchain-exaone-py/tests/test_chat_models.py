@@ -2032,7 +2032,8 @@ def test_framework_image_variants(block: dict[str, Any], url: str) -> None:
     assert requests[0]["messages"][0]["content"] == [{"type": "image_url", "image_url": {"url": url}}]
 
 
-def test_image_and_tool_history_survives_a_later_turn() -> None:
+@pytest.mark.parametrize("reasoning_field", ["reasoning_content", "reasoning"])
+def test_image_and_tool_history_survives_a_later_turn(reasoning_field: str) -> None:
     requests: list[dict[str, Any]] = []
     tool_call = {"id": "call-1", "type": "function", "function": {"name": "lookup", "arguments": '{"value":7}'}}
 
@@ -2040,6 +2041,8 @@ def test_image_and_tool_history_survives_a_later_turn() -> None:
         requests.append(json.loads(request.content))
         if len(requests) == 1:
             response = _completion(content="", reasoning="Plan")
+            message = response["choices"][0]["message"]
+            message[reasoning_field] = message.pop("reasoning_content")
             response["choices"][0]["message"]["tool_calls"] = [tool_call]
             response["choices"][0]["finish_reason"] = "tool_calls"
             return httpx.Response(200, json=response)

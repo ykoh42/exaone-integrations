@@ -144,13 +144,13 @@ describe('tool choice and content boundaries', () => {
     }
   })
 
-  it('forwards user images and text in order through the harness', async () => {
+  it.each(['reasoning_content', 'reasoning'])('forwards user images and %s through the harness', async (reasoningField) => {
     const requests: Record<string, unknown>[] = []
     const lookup = tool({ name: 'lookup', description: 'Synthetic lookup', inputSchema: z.object({}), callback: () => '7' })
     const fetcher: typeof fetch = async (_url, init) => {
       requests.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
       if (requests.length === 1) return response([
-        chunk({ reasoning_content: 'Plan' }),
+        chunk({ [reasoningField]: 'Plan' }),
         chunk({ tool_calls: [{ index: 0, id: 'image-tool-1', type: 'function', function: { name: 'lookup', arguments: '{}' } }] }),
         chunk({}, 'tool_calls'),
       ])

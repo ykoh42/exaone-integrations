@@ -4,16 +4,16 @@ Community-maintained model providers for the EXAONE Chat Completions API. This p
 
 Review and follow the terms that apply to your use of the EXAONE API.
 
-| Framework | Language | Package | Status |
-| --- | --- | --- | --- |
-| Strands | Python | [`strands-exaone`](packages/strands-exaone-py/) | Published on PyPI |
-| Strands | TypeScript | [`strands-exaone`](packages/strands-exaone-ts/) | Published on npm |
-| LangChain | Python | [`langchain-exaone`](packages/langchain-exaone-py/) | Published on PyPI |
-| LangChain | TypeScript | [`langchain-exaone`](packages/langchain-exaone-ts/) | Published on npm |
+| Framework | Language | Package |
+| --- | --- | --- |
+| Strands | Python | [`strands-exaone`](packages/strands-exaone-py/) |
+| Strands | TypeScript | [`strands-exaone`](packages/strands-exaone-ts/) |
+| LangChain | Python | [`langchain-exaone`](packages/langchain-exaone-py/) |
+| LangChain | TypeScript | [`langchain-exaone`](packages/langchain-exaone-ts/) |
 
 Each package README covers installation, examples, configuration, supported framework features, and API limitations.
 
-See the [roadmap](ROADMAP.md) for planned work and links to individual issues.
+See the [compatibility and verification matrix](COMPATIBILITY.md) for model and server coverage, and the [roadmap](ROADMAP.md) for planned work and links to individual issues.
 
 ## Why use a dedicated provider?
 

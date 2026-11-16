@@ -101,7 +101,8 @@ async def test_rejects_unsupported_image_source_before_request() -> None:
             _ = [event async for event in model.stream([message])]
 
 
-async def test_image_and_tool_history_through_strands_agent() -> None:
+@pytest.mark.parametrize("reasoning_field", ["reasoning_content", "reasoning"])
+async def test_image_and_tool_history_through_strands_agent(reasoning_field: str) -> None:
     requests: list[dict[str, Any]] = []
 
     @tool
@@ -121,7 +122,7 @@ async def test_image_and_tool_history_through_strands_agent() -> None:
             return httpx.Response(
                 200,
                 content=sse(
-                    chunk({"reasoning_content": "Plan"}), chunk({"tool_calls": [call]}), chunk(finish="tool_calls")
+                    chunk({reasoning_field: "Plan"}), chunk({"tool_calls": [call]}), chunk(finish="tool_calls")
                 ),
             )
         return httpx.Response(200, content=sse(chunk({"content": "Done"}), chunk(finish="stop")))

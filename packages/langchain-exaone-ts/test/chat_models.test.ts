@@ -1445,10 +1445,10 @@ describe("ChatExaone", () => {
     expect(requestBody(fetcher).messages).toEqual([{ role: "user", content: [{ type: "image_url", image_url: { url } }] }]);
   });
 
-  it("preserves image, reasoning and tool history across a later turn", async () => {
+  it.each(["reasoning_content", "reasoning"])("preserves image, %s and tool history across a later turn", async (reasoningField) => {
     const toolCall = { id: "call-1", type: "function", function: { name: "lookup", arguments: '{"value":7}' } };
     const fetcher = mockFetch([
-      completion({ role: "assistant", content: "", reasoning_content: "Plan", tool_calls: [toolCall] }),
+      completion({ role: "assistant", content: "", [reasoningField]: "Plan", tool_calls: [toolCall] }),
       completion({ role: "assistant", content: "done" }),
     ]);
     const model = new ChatExaone({ apiKey: "fixture-key", baseUrl: "http://localhost:8000/v1", model: "EXAONE-4.5-33B", fetch: fetcher });
