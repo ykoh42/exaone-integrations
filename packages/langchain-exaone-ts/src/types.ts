@@ -80,6 +80,8 @@ export interface ChatExaoneCallOptions extends BaseChatModelCallOptions {
   response_format?: Record<string, unknown>;
   /** Function tools to expose to the model. */
   tools?: BindToolsInput[] | ToolDefinition[];
+  /** Apply strict mode to function tools when supported by the endpoint. */
+  strict?: boolean;
   /** Whether the model may call multiple tools in one response. */
   parallel_tool_calls?: boolean;
   /** Whether to return token log probabilities when supported by the endpoint. */

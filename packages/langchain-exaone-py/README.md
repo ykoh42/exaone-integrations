@@ -109,6 +109,8 @@ model = ChatEXAONE().bind_tools([get_weather], tool_choice="auto")
 response = model.invoke("서울 날씨를 알려줘.")
 ```
 
+Pass `strict=True` to `bind_tools()` to request strict schemas for converted tools when the endpoint supports them. Already formatted OpenAI tool definitions retain their own `strict` value, following LangChain's converter.
+
 `with_structured_output()` uses LangChain's tool-based strategy by default. Pass `method="json_schema"` for native JSON Schema output or `method="json_mode"` for a JSON object. With JSON mode, ask for JSON in the prompt. Pydantic schemas validate the result; a plain JSON Schema dictionary is parsed as JSON without additional schema validation, following LangChain's parser. `include_raw=True` retains the original message and parsing error.
 
 You can pass additional Chat Completions fields with `model_kwargs` or per-call keyword arguments. Their acceptance depends on the EXAONE endpoint.

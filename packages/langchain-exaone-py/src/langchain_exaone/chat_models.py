@@ -996,10 +996,15 @@ class ChatEXAONE(BaseChatModel):
         raise RuntimeError("EXAONE retry loop exited without a response")
 
     def bind_tools(
-        self, tools: Sequence[Any], *, tool_choice: str | Mapping[str, Any] | bool | None = None, **kwargs: Any
+        self,
+        tools: Sequence[Any],
+        *,
+        tool_choice: str | Mapping[str, Any] | bool | None = None,
+        strict: bool | None = None,
+        **kwargs: Any,
     ) -> Any:
         """Bind LangChain tools using the EXAONE Chat Completions schema."""
-        formatted = [convert_to_openai_tool(tool) for tool in tools]
+        formatted = [convert_to_openai_tool(tool, strict=strict) for tool in tools]
         if tool_choice is True or tool_choice == "any":
             tool_choice = "required"
         elif tool_choice is False:

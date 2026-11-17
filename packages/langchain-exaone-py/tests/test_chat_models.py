@@ -496,6 +496,77 @@ def test_bind_tools_normalizes_langchain_tool_choice(choice: bool | str, expecte
         assert "tool_choice" not in requests[0]
 
 
+@pytest.mark.parametrize("strict", [True, False, None])
+def test_bind_tools_forwards_explicit_strict_in_function_definition(strict: bool | None) -> None:
+    class Lookup(BaseModel):
+        """Look up a value."""
+
+        query: str
+        limit: int | None = None
+
+    requests: list[dict[str, Any]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json=_completion())
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        model = ChatEXAONE(api_key="synthetic-key", http_client=client)
+        model.bind_tools([Lookup], strict=strict).invoke("Use lookup.")
+
+    function = requests[0]["tools"][0]["function"]
+    assert "strict" not in requests[0]
+    if strict is None:
+        assert "strict" not in function
+    else:
+        assert function["strict"] is strict
+    assert function["parameters"]["properties"]["query"]["type"] == "string"
+    if strict is True:
+        assert function["parameters"]["required"] == ["query", "limit"]
+        assert function["parameters"]["additionalProperties"] is False
+    else:
+        assert function["parameters"]["required"] == ["query"]
+        assert "additionalProperties" not in function["parameters"]
+
+
+def test_bind_tools_preserves_explicit_openai_tool_definition() -> None:
+    requests: list[dict[str, Any]] = []
+    tool = {
+        "type": "function",
+        "function": {
+            "name": "lookup",
+            "parameters": {"type": "object", "properties": {}},
+            "strict": False,
+        },
+    }
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json=_completion())
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        model = ChatEXAONE(api_key="synthetic-key", http_client=client)
+        model.bind_tools([tool], strict=True).invoke("Use lookup.")
+
+    # LangChain's converter passes already formatted OpenAI tools through unchanged.
+    assert requests[0]["tools"] == [tool]
+    assert "strict" not in requests[0]
+
+
+@pytest.mark.parametrize("strict", [None, False, True])
+def test_bind_tools_follows_langchain_strict_conflicts_for_function_definitions(strict: bool | None) -> None:
+    function = {"name": "lookup", "parameters": {"type": "object", "properties": {}}, "strict": False}
+    model = ChatEXAONE(api_key="synthetic-key")
+
+    if strict is True:
+        with pytest.raises(ValueError, match="strict"):
+            model.bind_tools([function], strict=strict)
+    else:
+        binding = model.bind_tools([function], strict=strict)
+        assert binding.kwargs["tools"][0]["function"]["strict"] is False
+        assert "strict" not in binding.kwargs
+
+
 @pytest.mark.parametrize("method", ["invoke", "ainvoke", "stream", "astream"])
 @pytest.mark.parametrize("stop", [["call-stop"], []])
 @pytest.mark.asyncio

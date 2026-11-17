@@ -203,10 +203,12 @@ export class ChatExaone extends BaseChatModel<
     ChatExaoneCallOptions
   > {
     const formattedTools = tools.map((tool) => convertToOpenAITool(tool));
+    const { strict, ...boundOptions } = kwargs ?? {};
+    const strictConfig: Partial<ChatExaoneCallOptions> = strict === undefined ? {} : { strict };
     return new RunnableBinding({
       bound: this,
-      kwargs: { ...kwargs, tools: formattedTools },
-      config: {},
+      kwargs: { ...boundOptions, tools: formattedTools },
+      config: strictConfig,
     });
   }
 
@@ -365,7 +367,7 @@ export class ChatExaone extends BaseChatModel<
         logprobs: options.logprobs,
         top_logprobs: options.top_logprobs,
         user: options.user,
-        tools: options.tools?.map((tool) => convertToOpenAITool(tool)),
+        tools: options.tools?.map((tool) => formatTool(tool, options.strict)),
         tool_choice: options.tool_choice === undefined ? undefined : formatToolChoice(options.tool_choice),
         stop: options.stop,
       }),
@@ -750,6 +752,15 @@ function formatToolChoice(choice: ChatExaoneCallOptions["tool_choice"]): unknown
     return { type: "function", function: { name: choice } };
   }
   return choice;
+}
+
+function formatTool(tool: BindToolsInput, strict: boolean | undefined): ReturnType<typeof convertToOpenAITool> {
+  const formatted = convertToOpenAITool(tool);
+  if (strict === undefined || formatted.type !== "function") return formatted;
+  // The SDK converter mutates preformatted inputs when given strict. Copy both
+  // levels so per-call overrides do not alter a user's reusable tool object.
+  const functionWithStrict = { ...formatted.function, strict };
+  return { ...formatted, function: functionWithStrict };
 }
 
 function omitUndefined(values: Record<string, unknown>): Record<string, unknown> {

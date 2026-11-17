@@ -131,6 +131,8 @@ Like LangChain's OpenAI integration, a normal `invoke()` returns an `AIMessage`;
 
 `bindTools()` accepts LangChain tools and OpenAI-shaped function tool definitions. The response exposes parsed `tool_calls` and the raw response metadata. The [LangChain agent example](examples/langchain/agent.ts) runs tools and returns their results through LangChain's agent loop.
 
+Pass `{ strict: true }` or `{ strict: false }` to `bindTools()` to set `strict` on every function tool. Omit it to preserve each tool's own setting. Support and enforcement depend on the endpoint.
+
 When a returned EXAONE message is reused in history, edits to its LangChain `tool_calls` determine the next request. Provider-specific fields from matching original calls are retained.
 
 `withStructuredOutput()` defaults to `functionCalling`: it requests its named tool and uses LangChain's parser. Set `{ method: "jsonSchema" }` for native JSON Schema output or `{ method: "jsonMode" }` for a JSON object. With JSON mode, ask for JSON in the prompt. Zod schemas are validated; a plain JSON Schema object is parsed as JSON without additional schema validation, following LangChain's parser. `{ includeRaw: true }` retains the original message when parsing fails. Invalid tool arguments remain available in `invalid_tool_calls`, and the original calls are retained in response metadata for conversation history.

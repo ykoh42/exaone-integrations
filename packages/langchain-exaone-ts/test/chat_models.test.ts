@@ -1,6 +1,7 @@
 import { inspect } from "node:util";
 import { AIMessage, FunctionMessage, HumanMessage, ToolMessage } from "@langchain/core/messages";
 import { load } from "@langchain/core/load";
+import { tool } from "@langchain/core/tools";
 import type { AIMessageChunk } from "@langchain/core/messages";
 import type { ChatGeneration, ChatGenerationChunk } from "@langchain/core/outputs";
 import { describe, expect, it, vi, afterEach } from "vitest";
@@ -838,6 +839,56 @@ describe("ChatExaone", () => {
     });
     expect(result.response_metadata).toMatchObject({ model_provider: "exaone", model_name: "k-exaone_v2.5" });
     expect(result.response_metadata.headers).toMatchObject({ "x-request-id": "request-fixture" });
+  });
+
+  it.each([undefined, true, false] as const)("applies explicit bindTools strict=%s without mutating tool definitions", async (strict) => {
+    const fetcher = mockFetch([completion({ role: "assistant", content: "Done" })]);
+    const model = new ChatExaone({ apiKey: "fixture-key", fetch: fetcher });
+    const rawTool = { type: "function" as const, function: { name: "lookup", description: "Look up a value", parameters: { type: "object", properties: {} }, strict: false } };
+    const strictTool = { type: "function" as const, function: { name: "search", description: "Search", parameters: { type: "object", properties: {} }, strict: true } };
+    const fn = tool(async ({ value }) => value, { name: "identity", description: "Return a value", schema: z.object({ value: z.string() }) });
+    const options = strict === undefined ? {} : { strict };
+
+    await model.bindTools([rawTool, strictTool, fn], options).invoke("Hello");
+
+    const body = requestBody(fetcher);
+    expect(body).not.toHaveProperty("strict");
+    const tools = body.tools as Array<{ function: { strict?: boolean } }>;
+    expect(tools[0]?.function.strict).toBe(strict ?? false);
+    expect(tools[1]?.function.strict).toBe(strict ?? true);
+    if (strict === undefined) expect(tools[2]?.function).not.toHaveProperty("strict");
+    else expect(tools[2]?.function.strict).toBe(strict);
+    expect(rawTool.function.strict).toBe(false);
+    expect(strictTool.function.strict).toBe(true);
+  });
+
+  it("applies per-call strict when tools are passed directly", async () => {
+    const fetcher = mockFetch([completion({ role: "assistant", content: "Done" })]);
+    const model = new ChatExaone({ apiKey: "fixture-key", fetch: fetcher });
+    await model.invoke("Hello", { strict: true, tools: [
+      { type: "function", function: { name: "lookup", description: "Look up a value", parameters: { type: "object", properties: {} } } },
+    ] });
+    expect(requestBody(fetcher).tools).toMatchObject([{ function: { strict: true } }]);
+    expect(requestBody(fetcher)).not.toHaveProperty("strict");
+  });
+
+  it("honors per-call strict overrides without changing subsequent bound tool calls", async () => {
+    const fetcher = mockFetch([
+      completion({ role: "assistant", content: "Done" }),
+      sseResponse([{ choices: [{ index: 0, delta: { content: "Done" }, finish_reason: "stop" }] }]),
+      completion({ role: "assistant", content: "Done" }),
+    ]);
+    const model = new ChatExaone({ apiKey: "fixture-key", fetch: fetcher });
+    const modelWithTools = model.bindTools([
+      { type: "function", function: { name: "lookup", description: "Look up a value", parameters: { type: "object", properties: {} } } },
+    ], { strict: true });
+
+    await modelWithTools.invoke("Hello", { strict: false });
+    expect(requestBody(fetcher).tools).toMatchObject([{ function: { strict: false } }]);
+    for await (const _chunk of await modelWithTools.stream("Hello")) { /* consume stream */ }
+    expect(requestBody(fetcher).tools).toMatchObject([{ function: { strict: true } }]);
+    await modelWithTools.invoke("Hello");
+    expect(requestBody(fetcher).tools).toMatchObject([{ function: { strict: true } }]);
   });
 
   it("preserves top-level reasoning usage when completion details omit it", async () => {
