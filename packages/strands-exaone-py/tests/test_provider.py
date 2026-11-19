@@ -228,7 +228,9 @@ async def test_named_tool_choice_accepts_vllm_stop_with_tool_call(stream: bool) 
     assert {"contentBlockDelta": {"delta": {"toolUse": {"input": '{"x":2}'}}}} in events
 
 
-@pytest.mark.parametrize(("choice", "finish"), [({"auto": {}}, "stop"), ({"tool": {"name": "lookup"}}, "length")])
+@pytest.mark.parametrize(
+    ("choice", "finish"), [({"auto": {}}, "stop"), ({"tool": {"name": "lookup"}}, "content_filter")]
+)
 async def test_named_tool_compatibility_does_not_accept_other_inconsistent_finishes(choice: Any, finish: str) -> None:
     call = {"index": 0, "id": "call_1", "type": "function", "function": {"name": "lookup", "arguments": "{}"}}
     model, client = model_for(
@@ -1167,66 +1169,31 @@ async def test_unknown_422_preserves_detail_body() -> None:
         await client.aclose()
 
 
-@pytest.mark.parametrize("arguments", ["{", '{"query":', '{"query":"unterminated'])
-async def test_incomplete_and_malformed_tool_arguments_never_emit_tool_block(arguments: str) -> None:
+@pytest.mark.parametrize("base_url", ["https://api.exaone.ai/v1", "http://localhost:8000/v1"])
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        "{",
+        '{"query":',
+        '{"query":"unterminated',
+        '{"count":12',
+        '{"items":[1,2',
+        '{"query":"EXAONE",}',
+        '{"items":[1,2,]}',
+    ],
+)
+async def test_incomplete_and_malformed_tool_arguments_never_emit_tool_block(arguments: str, base_url: str) -> None:
     raw = sse(
         chunk({"tool_calls": [{"index": 0, "id": "a", "function": {"name": "one", "arguments": arguments}}]}),
         chunk(finish="tool_calls"),
     )
-    model, client = model_for(lambda request: httpx.Response(200, content=raw))
+    model, client = model_for(lambda request: httpx.Response(200, content=raw), base_url=base_url)
     events: list[dict[str, Any]] = []
     try:
         with pytest.raises(ExaoneError, match="Invalid tool arguments"):
             async for event in model.stream([{"role": "user", "content": [{"text": "hello"}]}]):
                 events.append(event)
         assert not any(e.get("contentBlockStart", {}).get("start", {}).get("toolUse") for e in events)
-    finally:
-        await client.aclose()
-
-
-@pytest.mark.parametrize(
-    ("raw", "expected"),
-    [
-        ('{"query":"EXAONE"', '{"query":"EXAONE"}'),
-        ('{"query":"EXAONE","options":{"limit":2', '{"query":"EXAONE","options":{"limit":2}}'),
-        ('{"query":"brace } inside string"', '{"query":"brace } inside string"}'),
-        (r'{"query":"escaped \" } quote"', r'{"query":"escaped \" } quote"}'),
-        ('{"items":[1,2', '{"items":[1,2]}'),
-        ('{"query":"EXAONE",}', '{"query":"EXAONE"}'),
-        ('{"items":[1,2,]}', '{"items":[1,2]}'),
-    ],
-)
-async def test_hosted_25_completes_supported_tool_argument_syntax(raw: str, expected: str) -> None:
-    stream = sse(
-        chunk({"tool_calls": [{"index": 0, "id": "call_1", "function": {"name": "lookup", "arguments": raw}}]}),
-        chunk(finish="tool_calls"),
-    )
-    model, client = model_for(lambda request: httpx.Response(200, content=stream))
-    try:
-        result = await collect(model)
-        tool_inputs = [
-            event["contentBlockDelta"]["delta"]["toolUse"]["input"]
-            for event in result
-            if "toolUse" in event.get("contentBlockDelta", {}).get("delta", {})
-        ]
-        assert tool_inputs == [expected]
-    finally:
-        await client.aclose()
-
-
-@pytest.mark.parametrize("raw", ['{"count":12', '{"query":"EXAONE",}'])
-async def test_self_hosted_malformed_arguments_are_not_repaired(raw: str) -> None:
-    stream = sse(
-        chunk({"tool_calls": [{"index": 0, "id": "call_1", "function": {"name": "lookup", "arguments": raw}}]}),
-        chunk(finish="tool_calls"),
-    )
-    model, client = model_for(lambda request: httpx.Response(200, content=stream), base_url="http://localhost:8000/v1")
-    events: list[dict[str, Any]] = []
-    try:
-        with pytest.raises(ExaoneError, match="Invalid tool arguments"):
-            async for event in model.stream([{"role": "user", "content": [{"text": "hello"}]}]):
-                events.append(event)
-        assert not any(event.get("contentBlockStart", {}).get("start", {}).get("toolUse") for event in events)
     finally:
         await client.aclose()
 

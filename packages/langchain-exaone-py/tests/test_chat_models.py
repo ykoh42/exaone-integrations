@@ -13,6 +13,22 @@ from pydantic import BaseModel, ValidationError
 from langchain_exaone import ChatEXAONE, ExaoneAPIError
 
 
+def test_invalid_tool_json_reports_location_without_copying_argument_text() -> None:
+    raw = '{"private":"synthetic-secret",}'
+    payload = _completion()
+    payload["choices"][0]["message"]["tool_calls"] = [
+        {"id": "bad", "type": "function", "function": {"name": "lookup", "arguments": raw}}
+    ]
+    with httpx.Client(transport=httpx.MockTransport(lambda _: httpx.Response(200, json=payload))) as client:
+        result = ChatEXAONE(api_key="synthetic-key", http_client=client).invoke("Use lookup.")
+
+    invalid = result.invalid_tool_calls[0]
+    assert invalid["args"] == raw and invalid["id"] == "bad" and invalid["name"] == "lookup"
+    assert invalid["error"] == "Invalid JSON: Expecting property name enclosed in double quotes (line 1, column 31)."
+    assert "synthetic-secret" not in invalid["error"]
+    assert not result.tool_calls
+
+
 @pytest.mark.parametrize(
     "base_url",
     [

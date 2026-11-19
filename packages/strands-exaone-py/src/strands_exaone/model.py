@@ -32,7 +32,7 @@ from strands.types.streaming import StreamEvent
 from strands.types.tools import ToolChoice, ToolSpec
 from typing_extensions import override
 
-from .errors import ExaoneError, redact, response_error
+from .errors import ExaoneError, MalformedToolCallError, redact, response_error
 from .formatting import format_messages, format_tool_choice, format_tools
 from .metadata import ResponseMetadata
 from .retry import RETRY_STATUSES, retry_delay
@@ -300,6 +300,33 @@ def _check_cancel(signal: threading.Event | None, deadline: float | None = None)
         raise TimeoutError("EXAONE request timed out")
 
 
+def _named_tool(choice: Any) -> str | None:
+    if isinstance(choice, dict) and choice.get("type") == "function" and isinstance(fn := choice.get("function"), dict):
+        name = fn.get("name")
+        return name if isinstance(name, str) else None
+    return None
+
+
+def _recoverable_tools(body: dict[str, Any], expected: str | None, *, required: bool) -> frozenset[str]:
+    tools = body.get("tools")
+    names = frozenset(
+        tool["function"]["name"]
+        for tool in (tools if isinstance(tools, list) else [])
+        if isinstance(tool, dict)
+        and isinstance(tool.get("function"), dict)
+        and isinstance(tool["function"].get("name"), str)
+    )
+    choice = body.get("tool_choice")
+    named = _named_tool(choice)
+    if expected is not None:
+        correct_choice = choice == "required" if required else named == expected
+        if expected not in names or not correct_choice:
+            raise ExaoneError("The effective EXAONE request does not allow the tool correction")
+    if choice in (None, "auto", "required"):
+        return names
+    return frozenset({named}) if named is not None and named in names else frozenset()
+
+
 def _operation_deadline(timeout: float | None) -> float | None:
     return None if timeout is None else time.monotonic() + timeout
 
@@ -381,6 +408,26 @@ def _standard_usage(usage: dict[str, Any] | None) -> Usage | None:
         if type(write) is int and 0 <= write <= 2**53 - 1:
             result["cacheWriteInputTokens"] = write
     return result
+
+
+def _recovery_usage(usage: Usage | None, failed: dict[str, Any]) -> Usage | None:
+    """Include a hidden failed attempt only when both token counts are known."""
+    prior = _standard_usage(failed)
+    if usage is None or prior is None:
+        return usage
+    combined = dict(usage)
+    for name in ("inputTokens", "outputTokens", "totalTokens"):
+        total = usage[name] + prior[name]
+        if total > 2**53 - 1:
+            return usage
+        combined[name] = total
+    for name in ("cacheReadInputTokens", "cacheWriteInputTokens"):
+        left, right = usage.get(name), prior.get(name)
+        if left is None or right is None or left + right > 2**53 - 1:
+            combined.pop(name, None)
+        else:
+            combined[name] = left + right
+    return cast(Usage, combined)
 
 
 def _parse_response(payload: bytes | str, *, stream: bool = False) -> dict[str, Any]:
@@ -590,7 +637,12 @@ class ExaoneModel(Model):
         body: dict[str, Any] = {
             **params,
             "model": config["model_id"],
-            "messages": format_messages(messages, system_prompt, system_prompt_content),
+            "messages": format_messages(
+                messages,
+                system_prompt,
+                system_prompt_content,
+                recovery_tool_id=getattr(self, "_recovery_tool_id", None),
+            ),
             "stream": stream,
         }
         for name in ("max_tokens", "temperature", "top_p", "top_k", "presence_penalty", "reasoning_effort"):
@@ -706,15 +758,17 @@ class ExaoneModel(Model):
             headers = _safe_headers(response.headers, self._api_key)
             try:
                 safe_usage, safe_response = redact([usage, metadata.response], self._api_key)
-                result = callback(
-                    {
-                        "status_code": response.status_code,
-                        "request_id": headers.get("x-request-id"),
-                        "headers": headers,
-                        "usage": safe_usage,
-                        "response": safe_response,
-                    }
-                )
+                info = {
+                    "status_code": response.status_code,
+                    "request_id": headers.get("x-request-id"),
+                    "headers": headers,
+                    "usage": safe_usage,
+                    "response": safe_response,
+                }
+                failed = getattr(self, "_recovery_failed_usage", None)
+                if failed is not None:
+                    info["recovery"] = {"failed_attempts": [{"usage": deepcopy(failed)}]}
+                result = callback(info)
                 if inspect.isawaitable(result):
                     await _cancellable(result, signal, deadline)
             except Exception as error:
@@ -764,7 +818,6 @@ class ExaoneModel(Model):
             yield event
 
     @override
-    @_safe_transport_errors
     async def stream(
         self,
         messages: Messages,
@@ -796,15 +849,144 @@ class ExaoneModel(Model):
             ExaoneContextWindowError: If the input exceeds the model context window.
             TimeoutError: If the configured operation deadline expires.
         """
+        recovery = getattr(self, "_recovery_enabled", False)
+        buffered = recovery and (
+            not self._config["stream"]
+            or getattr(self, "_recovery_buffer_response", False)
+            or getattr(self, "_recovery_tool_name", None) is not None
+        )
+        callback = kwargs.get("metadata_callback", self._callback)
+        captured_metadata: list[dict[str, Any]] = []
+        if buffered and callback is not None:
+            kwargs = {**kwargs, "metadata_callback": captured_metadata.append}
+        source = self._stream_unbuffered(
+            messages,
+            tool_specs,
+            system_prompt,
+            tool_choice=tool_choice,
+            system_prompt_content=system_prompt_content,
+            cancel_signal=cancel_signal,
+            **kwargs,
+        )
+        if not buffered:
+            async with aclosing(self._live_recovery_stream(source) if recovery else source) as live:
+                async for event in live:
+                    yield event
+            return
+        async with aclosing(self._buffer_recovery_stream(source, callback, captured_metadata, cancel_signal)) as held:
+            async for event in held:
+                yield event
+
+    async def _buffer_recovery_stream(
+        self,
+        source: AsyncGenerator[StreamEvent, None],
+        callback: MetadataCallback | None,
+        captured_metadata: list[dict[str, Any]],
+        cancel_signal: threading.Event | None,
+    ) -> AsyncGenerator[StreamEvent, None]:
+        deadline = _operation_deadline(self._config["timeout"])
+        events: list[StreamEvent] = []
+        try:
+            async with aclosing(source):
+                async for event in source:
+                    events.append(event)
+        except MalformedToolCallError as error:
+            if self._prepare_recovery_error(error, events):
+                raise
+        else:
+            for event in events:
+                _check_cancel(cancel_signal, deadline)
+                if "metadata" in event and callback is not None and captured_metadata:
+                    await self._deliver_recovery_metadata(callback, captured_metadata.pop(), cancel_signal, deadline)
+                yield event
+            if callback is not None and captured_metadata:
+                await self._deliver_recovery_metadata(callback, captured_metadata.pop(), cancel_signal, deadline)
+            return
+        raise ExaoneError("Invalid tool arguments in EXAONE response")
+
+    async def _live_recovery_stream(
+        self, source: AsyncGenerator[StreamEvent, None]
+    ) -> AsyncGenerator[StreamEvent, None]:
+        """Hold the response start until text or a validated tool event arrives."""
+        start: StreamEvent | None = None
+        exposed = False
+        try:
+            async with aclosing(source):
+                async for event in source:
+                    if "messageStart" in event:
+                        start = event
+                        continue
+                    exposed = True
+                    if start is not None:
+                        yield start
+                        start = None
+                    yield event
+        except MalformedToolCallError as error:
+            if not exposed and self._prepare_recovery_error(error, []):
+                raise
+        else:
+            return
+        raise ExaoneError("Invalid tool arguments in EXAONE response")
+
+    def _prepare_recovery_error(self, error: MalformedToolCallError, buffered: list[StreamEvent]) -> bool:
+        values = (error.arguments, error.name, error.call_id)
+        if any(redact(value, self._api_key) != value for value in values):
+            return False
+        error.buffered_events = cast(list[dict[str, Any]], buffered)
+        return True
+
+    async def _deliver_recovery_metadata(
+        self, callback: MetadataCallback, info: dict[str, Any], signal: threading.Event | None, deadline: float | None
+    ) -> None:
+        """Invoke the user's metadata callback at its original event boundary."""
+        _check_cancel(signal, deadline)
+        try:
+            result = callback(info)
+            if inspect.isawaitable(result):
+                await _cancellable(result, signal, deadline)
+        except (httpx.HTTPError, httpx.InvalidURL, httpx.CookieConflict, httpx.StreamError) as error:
+            safe = _copy_transport_error(error, self._api_key)
+            BaseException.__setattr__(safe, "_exaone_events_exposed", True)
+            raise safe from None
+        except (ModelThrottledException, ContextWindowOverflowException) as error:
+            wrapped = ExaoneError("EXAONE metadata callback failed")
+            BaseException.__setattr__(wrapped, "_exaone_events_exposed", True)
+            raise wrapped from error
+        except Exception as error:
+            BaseException.__setattr__(error, "_exaone_events_exposed", True)
+            raise
+        _check_cancel(signal, deadline)
+
+    @_safe_transport_errors
+    async def _stream_unbuffered(
+        self,
+        messages: Messages,
+        tool_specs: list[ToolSpec] | None = None,
+        system_prompt: str | None = None,
+        *,
+        tool_choice: ToolChoice | None = None,
+        system_prompt_content: list[SystemContentBlock] | None = None,
+        cancel_signal: threading.Event | None = None,
+        **kwargs: Any,
+    ) -> AsyncGenerator[StreamEvent, None]:
+        """Translate one HTTP response into unbuffered Strands events."""
         config = self._config
         streaming = config["stream"]
         body = self._request(
             messages, tool_specs, system_prompt, system_prompt_content, tool_choice, stream=streaming, config=config
         )
         callback = kwargs.get("metadata_callback", self._callback)
+        recovery = getattr(self, "_recovery_enabled", False)
+        expected = getattr(self, "_recovery_tool_name", None)
         decoder = StreamDecoder(
             named_tool_choice=tool_choice is not None and "tool" in tool_choice,
-            allow_tool_repair=_is_hosted_default(config),
+            diagnose_tool_calls=recovery,
+            recovery_tool_name=expected,
+            recoverable_tools=_recoverable_tools(
+                body, expected, required=getattr(self, "_recovery_requires_any", False)
+            )
+            if recovery
+            else frozenset(),
         )
         metadata = ResponseMetadata(enabled=callback is not None)
         started = time.monotonic()
@@ -825,6 +1007,9 @@ class ExaoneModel(Model):
                     _check_cancel(cancel_signal, deadline)
                     yield cast(StreamEvent, event)
                 usage = _standard_usage(decoder.usage)
+                failed_usage = getattr(self, "_recovery_failed_usage", None)
+                if failed_usage is not None:
+                    usage = _recovery_usage(usage, failed_usage)
                 latency_ms = round((time.monotonic() - started) * 1000) if usage is not None else None
                 await self._metadata(callback, response, decoder.usage, metadata, cancel_signal, deadline)
                 if usage is not None:

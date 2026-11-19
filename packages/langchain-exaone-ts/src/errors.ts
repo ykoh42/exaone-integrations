@@ -64,7 +64,7 @@ function asStringOrNull(value: unknown): string | null | undefined {
   return value === null ? null : asString(value);
 }
 
-function redactSecret(value: unknown, secret: string): unknown {
+export function redactSecret(value: unknown, secret: string): unknown {
   if (typeof value === "string") return redactSecretText(value, secret);
   if (Array.isArray(value)) return value.map((item) => redactSecret(item, secret));
   if (isRecord(value)) {
@@ -82,7 +82,7 @@ export function safeTransportError(error: unknown, secret: string): Error {
   return safe;
 }
 
-function redactSecretText(value: string, secret: string): string {
+export function redactSecretText(value: string, secret: string): string {
   if (!secret) return value;
   const variants = new Set([secret]);
   try {

@@ -6,12 +6,13 @@
 import { Model, ModelError, ModelNetworkError, ModelThrottledError, ContextWindowOverflowError } from '@strands-agents/sdk'
 import type { Message, ModelInfo, ModelStreamEvent, StreamOptions, StopReason } from '@strands-agents/sdk'
 import { z } from 'zod'
-import { copyConfig, isHostedDefault, validateModelConfig } from './config.js'
+import { copyConfig, validateModelConfig } from './config.js'
 import { formatMessages } from './messages.js'
 import { redactMetadata, ResponseMetadataCollector } from './metadata.js'
 import { sendWithRetry } from './retry.js'
 import { readSSE, ResponseReadError } from './sse.js'
 import type { ExaoneMetadata, ExaoneModelConfig } from './types.js'
+import { InvalidToolArgumentsError, recoveryJsonDiagnostic } from './recovery-error.js'
 
 interface WireCallFunction {
   name?: string | null
@@ -39,10 +40,26 @@ interface WireChoice {
 type WireResponse = { choices?: WireChoice[]; usage?: Record<string, unknown> | null; error?: unknown } & Record<string, unknown>
 interface AccumulatedCall {
   id: string
+  idFragments: number
   name: string
   arguments: string
 }
 type TextKind = 'reasoning' | 'text'
+
+function recoverableTools(request: Record<string, unknown>, expected?: string, required = false): ReadonlySet<string> {
+  const tools = Array.isArray(request.tools) ? request.tools : []
+  const names = new Set<string>()
+  for (const tool of tools) {
+    if (isRecord(tool) && isRecord(tool.function) && typeof tool.function.name === 'string') names.add(tool.function.name)
+  }
+  const choice = request.tool_choice
+  const named = isRecord(choice) && choice.type === 'function' && isRecord(choice.function) ? choice.function.name : undefined
+  if (expected !== undefined && (!names.has(expected) || (required ? choice !== 'required' : named !== expected))) {
+    throw new ModelError('The effective EXAONE request does not allow the tool correction')
+  }
+  if (choice == null || choice === 'auto' || choice === 'required') return names
+  return new Set(typeof named === 'string' && names.has(named) ? [named] : [])
+}
 
 /** An HTTP error with EXAONE's response body and selected diagnostic headers. */
 export class ExaoneAPIError extends ModelError {
@@ -271,84 +288,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
 }
 
-/** Mark structural characters while respecting JSON string escapes. */
-function jsonOutsideStringMask(input: string): boolean[] | undefined {
-  const outside: boolean[] = []
-  let inString = false
-  let escaped = false
-  for (let index = 0; index < input.length; index += 1) {
-    const char = input[index]!
-    if (inString) {
-      outside.push(false)
-      if (escaped) escaped = false
-      else if (char === '\\') escaped = true
-      else if (char === '"') inString = false
-    } else {
-      outside.push(char !== '"')
-      if (char === '"') inString = true
-    }
-  }
-  return inString || escaped ? undefined : outside
-}
-
-/** Remove a comma only when the next token closes its JSON container. */
-function removeTrailingCommas(input: string, outside: boolean[]): { value: string; changed: boolean } {
-  const output: string[] = []
-  let changed = false
-  for (let index = 0; index < input.length; index += 1) {
-    const char = input[index]!
-    if (char === ',' && outside[index]) {
-      let next = index + 1
-      while (next < input.length && /\s/.test(input[next]!)) next += 1
-      if (input[next] === '}' || input[next] === ']') {
-        changed = true
-        continue
-      }
-    }
-    output.push(char)
-  }
-  return { value: output.join(''), changed }
-}
-
-/** Return missing object/array closers, or undefined for mismatched delimiters. */
-function openJsonClosers(input: string, outside: boolean[]): string[] | undefined {
-  const closers: string[] = []
-  for (let index = 0; index < input.length; index += 1) {
-    if (!outside[index]) continue
-    const char = input[index]!
-    if (char === '{' || char === '[') closers.push(char === '{' ? '}' : ']')
-    else if ((char === '}' || char === ']') && closers.pop() !== char) return undefined
-  }
-  return closers
-}
-
-/** Complete only mechanically recoverable JSON syntax; never infer argument values. */
-function closeToolArguments(input: string): string | undefined {
-  let outside = jsonOutsideStringMask(input)
-  if (outside === undefined) return undefined
-  const commas = removeTrailingCommas(input, outside)
-  let candidate = commas.value
-  outside = jsonOutsideStringMask(candidate)
-  if (outside === undefined) return undefined
-  const closers = openJsonClosers(candidate, outside)
-  if (closers === undefined) return undefined
-  let changed = commas.changed
-  if (closers.length) {
-    const lastSignificant = candidate.trimEnd().at(-1)
-    if (!lastSignificant || '{[:,'.includes(lastSignificant)) return undefined
-    candidate += closers.reverse().join('')
-    changed = true
-  }
-  if (!changed) return undefined
-
-  try {
-    const parsed: unknown = JSON.parse(candidate)
-    return isRecord(parsed) ? candidate : undefined
-  } catch {
-    return undefined
-  }
-}
-
 function validateWireMessage(message: unknown): void {
   if (message == null) return
   if (!isRecord(message)) throw new ModelError('EXAONE returned an invalid message')
@@ -398,7 +337,8 @@ class EventMapper {
   usage: Record<string, unknown> | undefined
   readonly responseMetadata = new ResponseMetadataCollector()
 
-  constructor(private readonly key: string, private readonly namedToolChoice: boolean, private readonly allowToolRepair: boolean) {}
+  constructor(private readonly key: string, private readonly namedToolChoice: boolean,
+    private readonly recoveryTools?: ReadonlySet<string>, private readonly recoveryToolName?: string) {}
 
   private textEvents(kind: TextKind, value: unknown): ModelStreamEvent[] {
     if (value === null || value === undefined || value === '') return []
@@ -423,8 +363,10 @@ class EventMapper {
       if (typeof index !== 'number' || !Number.isSafeInteger(index) || index < 0) {
         throw new ModelError('EXAONE returned a tool call without a valid index')
       }
-      const current = this.calls.get(index) ?? { id: '', name: '', arguments: '' }
-      current.id += toolFragment(call.id, 'ID')
+      const current = this.calls.get(index) ?? { id: '', idFragments: 0, name: '', arguments: '' }
+      const id = toolFragment(call.id, 'ID')
+      if (id) current.idFragments += 1
+      current.id += id
       current.name += toolFragment(call.function?.name, 'name')
       current.arguments += toolFragment(call.function?.arguments, 'arguments')
       this.calls.set(index, current)
@@ -472,20 +414,34 @@ class EventMapper {
 
   finish(key: string): ModelStreamEvent[] {
     if (!this.finished) throw new ModelError('EXAONE stream ended without a finish reason')
+    const namedToolStop = this.namedToolChoice && this.calls.size > 0 && this.finished === 'stop'
+    if (this.recoveryToolName !== undefined && this.finished !== 'length') this.validateReplacement(namedToolStop)
     const result: ModelStreamEvent[] = []
     this.appendRefusal(result)
     if (this.active) result.push({ type: 'modelContentBlockStopEvent' })
     this.appendToolCalls(result)
     this.validateToolFinishReason()
-    const namedToolStop = this.namedToolChoice && this.calls.size > 0 && this.finished === 'stop'
     result.push({ type: 'modelMessageStopEvent', stopReason: namedToolStop ? 'toolUse' : finishReason(this.finished, key) })
     return result
   }
 
+  private validateReplacement(namedToolStop: boolean): void {
+    if (this.refusal || (this.finished !== 'tool_calls' && !namedToolStop) || this.calls.size !== 1) {
+      throw new ModelError('EXAONE recovery must return exactly one completed tool call')
+    }
+    const call = this.calls.values().next().value!
+    if (call.idFragments > 1) throw new ModelError('EXAONE recovery returned an ambiguous streamed tool call ID')
+    if (call.name !== this.recoveryToolName || !call.arguments.trim()) {
+      throw new ModelError('EXAONE recovery must return the original tool with a JSON object')
+    }
+  }
+
   private appendRefusal(events: ModelStreamEvent[]): void {
-    if (!this.refusal || this.hasNonWhitespaceContent) return
-    if (this.calls.size) throw new ModelError('EXAONE returned refusal text together with tool calls')
-    events.push(...this.textEvents('text', this.refusal))
+    if (!this.refusal) return
+    if (this.calls.size && (this.recoveryTools !== undefined || !this.hasNonWhitespaceContent)) {
+      throw new ModelError('EXAONE returned refusal text together with tool calls')
+    }
+    if (!this.hasNonWhitespaceContent) events.push(...this.textEvents('text', this.refusal))
   }
 
   private appendToolCalls(events: ModelStreamEvent[]): void {
@@ -497,25 +453,43 @@ class EventMapper {
     if (!call.id || !call.name) throw new ModelError('EXAONE returned an incomplete tool call')
     if (ids.has(call.id)) throw new ModelError('EXAONE returned duplicate tool call IDs')
     ids.add(call.id)
-    let input = call.arguments
-    if (input.trim()) {
-      let args: unknown
-      try { args = JSON.parse(input) as unknown } catch {
-        const repaired = this.allowToolRepair ? closeToolArguments(input) : undefined
-        if (repaired === undefined) throw new ModelError('EXAONE returned invalid tool call arguments')
-        input = repaired
-        args = JSON.parse(input) as unknown
-      }
-      if (!args || typeof args !== 'object' || Array.isArray(args)) throw new ModelError('EXAONE tool call arguments must be an object')
-    }
+    this.checkRecoverable(call)
+    // The SDK gives maxTokens precedence over a partial tool-input parse error.
+    // Forward the original fragment; do not complete it or infer executability.
+    if (this.finished !== 'length') this.validateToolInput(call.arguments)
     events.push({ type: 'modelContentBlockStartEvent', start: { type: 'toolUseStart', name: call.name, toolUseId: call.id } })
-    events.push({ type: 'modelContentBlockDeltaEvent', delta: { type: 'toolUseInputDelta', input } })
+    events.push({ type: 'modelContentBlockDeltaEvent', delta: { type: 'toolUseInputDelta', input: call.arguments } })
     events.push({ type: 'modelContentBlockStopEvent' })
+  }
+
+  private checkRecoverable(call: AccumulatedCall): void {
+    if (!this.recoveryTools?.has(call.name) || this.calls.size !== 1 || this.finished === 'length' || this.refusal || !call.arguments.trim()) return
+    try { JSON.parse(call.arguments) } catch (error) {
+      if (call.idFragments > 1) throw new ModelError('Cannot recover a tool call with ambiguous streamed ID fragments')
+      const values = [call.id, call.name, call.arguments]
+      const containsKey = values.some((value) => redactMetadata(value, this.key) !== value)
+      if (!(this.finished === 'tool_calls' || (this.namedToolChoice && this.finished === 'stop')) || containsKey) {
+        throw new ModelError('EXAONE returned invalid tool call arguments')
+      }
+      const detail = recoveryJsonDiagnostic(error, call.arguments)
+      const failure = new InvalidToolArgumentsError(call.id, call.name, call.arguments, detail)
+      failure.usage = this.usage === undefined ? undefined : redactMetadata(this.usage, this.key) as Record<string, unknown>
+      throw failure
+    }
+  }
+
+  private validateToolInput(input: string): void {
+    if (!input.trim()) return
+    let args: unknown
+    try { args = JSON.parse(input) as unknown } catch {
+      throw new ModelError('EXAONE returned invalid tool call arguments')
+    }
+    if (!isRecord(args)) throw new ModelError('EXAONE tool call arguments must be an object')
   }
 
   private validateToolFinishReason(): void {
     if (this.finished === 'tool_calls' && !this.calls.size) throw new ModelError('EXAONE returned tool_calls without a tool call')
-    if (this.calls.size && this.finished !== 'tool_calls' && !(this.namedToolChoice && this.finished === 'stop')) {
+    if (this.calls.size && this.finished !== 'tool_calls' && this.finished !== 'length' && !(this.namedToolChoice && this.finished === 'stop')) {
       throw new ModelError('EXAONE returned tool calls without a tool_calls finish reason')
     }
   }
@@ -547,6 +521,28 @@ function metadataEvent(mapper: EventMapper, response: Response, key: string): { 
     }
   }
   return { event, metadata: safeMetadata }
+}
+
+/** Include a hidden failed attempt in SDK usage when both responses report it. */
+function addRecoveryUsage(event: ModelStreamEvent, metadata: ExaoneMetadata, failed: { usage?: Record<string, unknown> }): void {
+  metadata.recovery = { failedAttempts: [failed] }
+  if (event.type !== 'modelMetadataEvent' || !event.usage || !failed.usage) return
+  const previous = failed.usage
+  const counts = [previous.prompt_tokens, previous.completion_tokens, previous.total_tokens]
+  if (!counts.every(validTokenCount)) return
+  const [input, output, total] = counts as [number, number, number]
+  const totals = [event.usage.inputTokens + input, event.usage.outputTokens + output, event.usage.totalTokens + total]
+  if (!totals.every(validTokenCount)) return
+  event.usage.inputTokens = totals[0] as number
+  event.usage.outputTokens = totals[1] as number
+  event.usage.totalTokens = totals[2] as number
+  // Cache totals cannot be inferred when either response omits a count.
+  const details = isRecord(previous.prompt_tokens_details) ? previous.prompt_tokens_details : {}
+  for (const [key, source] of [['cacheReadInputTokens', 'cached_tokens'], ['cacheWriteInputTokens', 'cache_write_tokens']] as const) {
+    const old = details[source], current = event.usage[key]
+    if (validTokenCount(old) && validTokenCount(current) && validTokenCount(old + current)) event.usage[key] = old + current
+    else delete event.usage[key]
+  }
 }
 
 async function notifyMetadata(callback: ExaoneModelConfig['onMetadata'], metadata: ExaoneMetadata, signal: AbortSignal): Promise<void> {
@@ -658,6 +654,12 @@ async function fetchResponse(config: ExaoneModelConfig, body: string | undefined
  */
 export class ExaoneModel extends Model<ExaoneModelConfig> {
   #config: ExaoneModelConfig
+  #recovery = false
+  #bufferRecovery = false
+  #recoveryToolName: string | undefined
+  #recoveryRequiresAny = false
+  #failedAttempt: { usage?: Record<string, unknown> } | undefined
+  #deferredMetadataCallback: ExaoneModelConfig['onMetadata']
   constructor(config: ExaoneModelConfig = {}) {
     super()
     this.#config = { modelId: 'k-exaone_v2.5', ...copyConfig(config) }
@@ -700,10 +702,54 @@ export class ExaoneModel extends Model<ExaoneModelConfig> {
    * @param options - System prompt, tools, structured output, and cancellation options.
    * @yields Strands model events translated from the response.
    */
+  /** @internal Create an isolated model for recovery without changing the agent's model. */
+  recoveryModel(failedAttempt?: { usage?: Record<string, unknown>; toolName: string; required: boolean }, bufferResponse = false): ExaoneModel {
+    const model = new ExaoneModel(this.#config)
+    model.#recovery = true
+    model.#bufferRecovery = bufferResponse || this.#config.stream === false || failedAttempt !== undefined
+    model.#failedAttempt = failedAttempt === undefined ? undefined : failedAttempt.usage === undefined ? {} : { usage: failedAttempt.usage }
+    model.#recoveryToolName = failedAttempt?.toolName
+    model.#recoveryRequiresAny = failedAttempt?.required ?? false
+    if (model.#bufferRecovery) {
+      model.#deferredMetadataCallback = model.#config.onMetadata
+      delete model.#config.onMetadata
+    }
+    return model
+  }
+
   override async *stream(messages: Message[], options?: StreamOptions): AsyncGenerator<ModelStreamEvent> {
+    if (!this.#bufferRecovery) { yield* this.#stream(messages, options); return }
+    const events: ModelStreamEvent[] = []
+    const timeout = requestTimeout(this.#config.timeoutMs)
+    try {
+      for await (const event of this.#stream(messages, options)) events.push(event)
+      yield* this.#deliverEvents(events, options?.cancelSignal, timeout?.signal)
+    } catch (error) {
+      if (timeout?.signal.aborted) throw timeout.signal.reason
+      if (error instanceof InvalidToolArgumentsError) error.events = events
+      throw error
+    } finally { timeout?.dispose() }
+  }
+
+  async *#deliverEvents(events: ModelStreamEvent[], cancellation?: AbortSignal, timeout?: AbortSignal): AsyncGenerator<ModelStreamEvent> {
+    for (const event of events) {
+      cancellation?.throwIfAborted()
+      timeout?.throwIfAborted()
+      if (event.type === 'modelMetadataEvent' && this.#deferredMetadataCallback) {
+        const trace = isRecord(event.trace) ? event.trace : {}
+        if (!isRecord(trace.exaone)) throw new ModelError('EXAONE response metadata is missing')
+        const signals = [cancellation, timeout].filter((item): item is AbortSignal => item != null)
+        await notifyMetadata(this.#deferredMetadataCallback, structuredClone(trace.exaone) as unknown as ExaoneMetadata, AbortSignal.any(signals))
+      }
+      yield event
+    }
+  }
+
+  async *#stream(messages: Message[], options?: StreamOptions): AsyncGenerator<ModelStreamEvent> {
     const config = { ...this.#config }
     const key = getKey(config)
     const request = requestParameters(config, messages, options)
+    const recoveryTools = this.#recovery ? recoverableTools(request, this.#recoveryToolName, this.#recoveryRequiresAny) : undefined
     const body = requestBody(request)
     const controller = new AbortController()
     const timeout = requestTimeout(config.timeoutMs)
@@ -713,7 +759,8 @@ export class ExaoneModel extends Model<ExaoneModelConfig> {
       const response = await sendWithRetry(config, signal, () => fetchResponse(config, body, key, signal))
       signal.throwIfAborted()
       if (!response.ok) await throwHttpError(response, key, signal)
-      const mapper = new EventMapper(key, !!options?.toolSpecs?.length && !!options.toolChoice && 'tool' in options.toolChoice, isHostedDefault(config))
+      const mapper = new EventMapper(key, !!options?.toolSpecs?.length && !!options.toolChoice && 'tool' in options.toolChoice,
+        recoveryTools, this.#recoveryToolName)
       const messageStartState = { started: false }
       try {
         yield* withMessageStart(responseEvents(response, request.stream !== false, mapper), signal, messageStartState)
@@ -721,13 +768,14 @@ export class ExaoneModel extends Model<ExaoneModelConfig> {
         if (signal.aborted) throw signal.reason
         if (error instanceof ResponseReadError) {
           const cause = safeResponseReadCause(error.cause)
-          if (messageStartState.started) throw new ModelError('EXAONE response stream failed after output was exposed', { cause })
+          if (messageStartState.started && !this.#bufferRecovery) throw new ModelError('EXAONE response stream failed after output was exposed', { cause })
           throw new ModelNetworkError('EXAONE response stream failed', { cause })
         }
         throw error
       }
       yield* withMessageStart(mapper.finish(key), signal, messageStartState)
       const metadata = metadataEvent(mapper, response, key)
+      if (this.#failedAttempt) addRecoveryUsage(metadata.event, metadata.metadata, this.#failedAttempt)
       if (config.onMetadata) await notifyMetadata(config.onMetadata, structuredClone(metadata.metadata), signal)
       signal.throwIfAborted()
       yield metadata.event

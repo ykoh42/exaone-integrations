@@ -11,7 +11,7 @@ from typing import Any, NoReturn
 
 import httpx
 
-from .errors import ExaoneError, redact
+from .errors import ExaoneError, MalformedToolCallError, redact
 
 
 async def _sse_lines(response: httpx.Response) -> AsyncIterator[str]:
@@ -59,106 +59,59 @@ class _Tool:
     ident: str = ""
     name: str = ""
     arguments: list[str] = field(default_factory=list)
+    id_fragments: int = 0
 
 
 def _reject_json_constant(value: str) -> NoReturn:
     raise ValueError("Non-standard JSON numeric constant")
 
 
-def _json_outside_string_mask(raw: str) -> list[bool] | None:
-    """Mark structural characters while respecting JSON string escapes."""
-    outside: list[bool] = []
-    in_string = False
-    escaped = False
-    for char in raw:
-        if in_string:
-            outside.append(False)
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == '"':
-                in_string = False
-        else:
-            outside.append(char != '"')
-            if char == '"':
-                in_string = True
-    if in_string or escaped:
-        return None
-    return outside
-
-
-def _remove_trailing_commas(raw: str, outside: list[bool]) -> tuple[str, bool]:
-    """Remove a comma only when the next token closes its JSON container."""
-    output: list[str] = []
-    changed = False
-    for index, char in enumerate(raw):
-        if char == "," and outside[index]:
-            next_index = index + 1
-            while next_index < len(raw) and raw[next_index].isspace():
-                next_index += 1
-            if next_index < len(raw) and raw[next_index] in "}]":
-                changed = True
-                continue
-        output.append(char)
-    return "".join(output), changed
-
-
-def _open_json_closers(raw: str, outside: list[bool]) -> list[str] | None:
-    """Return missing object/array closers, or None for mismatched delimiters."""
-    closers: list[str] = []
-    for index, char in enumerate(raw):
-        if not outside[index]:
-            continue
-        if char in "{[":
-            closers.append("}" if char == "{" else "]")
-        elif char in "}]" and (not closers or closers.pop() != char):
-            return None
-    return closers
-
-
-def _close_tool_arguments(raw: str) -> str | None:
-    """Complete limited JSON syntax; truncated values cannot be recovered."""
-    outside = _json_outside_string_mask(raw)
-    if outside is None:
-        return None
-    candidate, changed = _remove_trailing_commas(raw, outside)
-    outside = _json_outside_string_mask(candidate)
-    if outside is None:
-        return None
-    closers = _open_json_closers(candidate, outside)
-    if closers is None:
-        return None
-    if closers:
-        last_significant = candidate.rstrip()[-1:]
-        if not last_significant or last_significant in "{[:,":
-            return None
-        candidate += "".join(reversed(closers))
-        changed = True
-    if not changed:
-        return None
-
+def _json_syntax_diagnostic(arguments: str) -> str | None:
     try:
-        arguments = json.loads(candidate, parse_constant=_reject_json_constant)
-    except (TypeError, ValueError):
+        json.loads(arguments, parse_constant=_reject_json_constant)
+    except json.JSONDecodeError as error:
+        return f"{error.msg} (line {error.lineno}, column {error.colno})"
+    except ValueError:
         return None
-    return candidate if isinstance(arguments, dict) else None
+    return None
 
 
-def _normalize_tool_arguments(raw: str, *, allow_repair: bool) -> str:
-    """Require an object and return its original or mechanically completed JSON."""
+def _raise_malformed_tool_call(item: _Tool, arguments: str, usage: dict[str, Any] | None) -> None:
+    if not arguments.strip():
+        return
+    detail = _json_syntax_diagnostic(arguments)
+    if detail is None:
+        return
+    if item.id_fragments > 1:
+        raise ExaoneError("Cannot recover a tool call with ambiguous streamed ID fragments")
+    failure = MalformedToolCallError(item.ident, item.name, arguments, detail)
+    failure.usage = {
+        name: value
+        for name, value in (usage or {}).items()
+        if name in {"prompt_tokens", "completion_tokens", "total_tokens"} and type(value) is int and value >= 0
+    }
+    details = (usage or {}).get("prompt_tokens_details")
+    if isinstance(details, dict):
+        failure.usage["prompt_tokens_details"] = {
+            name: value
+            for name, value in details.items()
+            if name in {"cached_tokens", "cache_write_tokens"} and type(value) is int and value >= 0
+        }
+    raise failure
+
+
+def _validate_tool_arguments(raw: str) -> None:
+    """Require nonblank arguments to be a JSON object."""
     if not raw.strip():
-        return raw
+        return
     try:
         arguments = json.loads(raw, parse_constant=_reject_json_constant)
-    except (TypeError, ValueError):
-        repaired = _close_tool_arguments(raw) if allow_repair else None
+    except ValueError:
+        pass
     else:
         if isinstance(arguments, dict):
-            return raw
+            return
         raise ExaoneError("Tool arguments must be a JSON object")
-    if repaired is not None:
-        return repaired
     # Raise outside the handler so tool arguments are not retained as exception context.
     raise ExaoneError("Invalid tool arguments in EXAONE response")
 
@@ -189,7 +142,9 @@ class StreamDecoder:
     """Accumulate interleaved tool calls while emitting text and reasoning deltas."""
 
     named_tool_choice: bool = False
-    allow_tool_repair: bool = False
+    diagnose_tool_calls: bool = False
+    recovery_tool_name: str | None = None
+    recoverable_tools: frozenset[str] = field(default_factory=frozenset)
     active: str | None = None
     tools: dict[int, _Tool] = field(default_factory=dict)
     finish_reason: str | None = None
@@ -238,7 +193,10 @@ class StreamDecoder:
             function = {}
         if not isinstance(function, dict):
             raise ExaoneError("Invalid EXAONE tool-call delta: expected a function object")
-        item.ident += _tool_text(fragment.get("id"))
+        ident = _tool_text(fragment.get("id"))
+        if ident:
+            item.id_fragments += 1
+        item.ident += ident
         item.name += _tool_text(function.get("name"))
         arguments = _tool_text(function.get("arguments"))
         if arguments:
@@ -281,7 +239,9 @@ class StreamDecoder:
                 raise ExaoneError("Multiple finish reasons received")
             self.finish_reason = finish
 
-    def _tool_events(self) -> Iterator[dict[str, Any]]:
+    def _tool_events(self, *, truncated: bool = False) -> Iterator[dict[str, Any]]:
+        if self.diagnose_tool_calls and self.refusal and self.tools:
+            raise ExaoneError("EXAONE returned refusal text together with tool calls")
         ids: set[str] = set()
         validated: list[tuple[_Tool, str]] = []
         for index in sorted(self.tools):
@@ -292,7 +252,12 @@ class StreamDecoder:
             if item.ident in ids:
                 raise ExaoneError("Duplicate tool call IDs in EXAONE response")
             ids.add(item.ident)
-            arguments = _normalize_tool_arguments(arguments, allow_repair=self.allow_tool_repair)
+            # The SDK must see a length stop before deciding what to do with a
+            # truncated call. Preserve its fragments verbatim, without repair.
+            if not truncated:
+                if item.name in self.recoverable_tools and len(self.tools) == 1:
+                    _raise_malformed_tool_call(item, arguments, self.usage)
+                _validate_tool_arguments(arguments)
             validated.append((item, arguments))
         for item, arguments in validated:
             yield {"contentBlockStart": {"start": {"toolUse": {"name": item.name, "toolUseId": item.ident}}}}
@@ -313,8 +278,12 @@ class StreamDecoder:
             reason = redact(self.finish_reason, secret) if isinstance(self.finish_reason, str) else None
             raise ExaoneError(f"EXAONE response ended with unsupported finish reason: {reason!r}", finish_reason=reason)
         named_tool_stop = bool(self.tools) and self.named_tool_choice and self.finish_reason == "stop"
-        if bool(self.tools) != (self.finish_reason == "tool_calls" or named_tool_stop):
+        if self.finish_reason != "length" and bool(self.tools) != (
+            self.finish_reason == "tool_calls" or named_tool_stop
+        ):
             raise ExaoneError("Tool calls and finish reason are inconsistent")
+        if self.recovery_tool_name is not None:
+            self._validate_replacement(named_tool_stop)
         if self.active is not None:
             yield {"contentBlockStop": {}}
             self.active = None
@@ -325,8 +294,19 @@ class StreamDecoder:
             yield {"contentBlockDelta": {"delta": {"text": self.refusal}}}
             yield {"contentBlockStop": {}}
             self.active = None
-        yield from self._tool_events()
+        yield from self._tool_events(truncated=self.finish_reason == "length")
         yield {"messageStop": {"stopReason": "tool_use" if named_tool_stop else reasons[self.finish_reason]}}
+
+    def _validate_replacement(self, named_tool_stop: bool) -> None:
+        if self.finish_reason == "length":
+            return
+        if self.refusal or (self.finish_reason != "tool_calls" and not named_tool_stop) or len(self.tools) != 1:
+            raise ExaoneError("EXAONE recovery must return exactly one completed tool call")
+        call = next(iter(self.tools.values()))
+        if call.id_fragments > 1:
+            raise ExaoneError("EXAONE recovery returned an ambiguous streamed tool call ID")
+        if call.name != self.recovery_tool_name or not "".join(call.arguments).strip():
+            raise ExaoneError("EXAONE recovery must return the original tool with a JSON object")
 
 
 def nonstream_chunk(data: dict[str, Any]) -> dict[str, Any]:

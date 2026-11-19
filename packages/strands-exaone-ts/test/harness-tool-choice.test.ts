@@ -87,7 +87,7 @@ describe('tool choice and content boundaries', () => {
     expect(callback).not.toHaveBeenCalled()
   })
 
-  it('executes a tool when EXAONE omits only the final object brace', async () => {
+  it('rejects tool arguments with a missing closing brace before execution', async () => {
     const requests: Record<string, unknown>[] = []
     const callback = vi.fn(({ query }: { query: string }) => query)
     const lookup = tool({ name: 'lookup', description: 'Look up a query', inputSchema: z.object({ query: z.string() }), callback })
@@ -103,13 +103,9 @@ describe('tool choice and content boundaries', () => {
     const model = new ExaoneModel({ apiKey: 'key', fetch: fetcher })
     const agent = await createHarness({ ...options, model, tools: [lookup] })
 
-    await agent.invoke('Use the lookup tool.')
-
-    expect(callback).toHaveBeenCalledOnce()
-    expect(callback.mock.calls[0]?.[0]).toEqual({ query: 'EXAONE' })
-    const history = requests[1]!.messages as Record<string, unknown>[]
-    const assistant = history.find((message) => message.role === 'assistant')!
-    expect((assistant.tool_calls as { function: { arguments: string } }[])[0]!.function.arguments).toBe('{"query":"EXAONE"}')
+    await expect(agent.invoke('Use the lookup tool.')).rejects.toThrow('invalid tool call arguments')
+    expect(callback).not.toHaveBeenCalled()
+    expect(requests).toHaveLength(1)
   })
 
   it('joins SDK system text blocks without changing whitespace', async () => {

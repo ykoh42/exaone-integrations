@@ -42,7 +42,7 @@ For SDK tool use, streaming, structured output, Harness, and CLI walkthroughs, s
 
 ## Why use this provider?
 
-The provider preserves EXAONE reasoning across Strands turns, maps model information, streaming, tools, usage and errors, and performs limited tool-argument syntax completion for hosted 2.5. Configure `ExaoneRetryStrategy` for Agent and Harness calls to honor server delay hints; the model's own HTTP retries are disabled by default.
+The provider preserves EXAONE reasoning across Strands turns and maps model information, streaming, tools, usage and errors. Configure `ExaoneRetryStrategy` for Agent and Harness calls to honor server delay hints. The model's own HTTP retries are disabled by default.
 
 ## Configuration
 
@@ -142,6 +142,8 @@ The context budget covers input plus output, including reasoning. See the [EXAON
 
 The provider stores reasoning separately from the final answer and sends it back as reasoning_content when it appears in the Strands conversation. By default, requests use EXAONE's recommended agent settings: temperature=1.0, top_p=0.95, and preserve_thinking=True. K-EXAONE 2.5 always reasons; `enable_thinking` can be forwarded for compatible custom models.
 
+When consuming `model.stream()` directly, execute tools only after `messageStop` reports `tool_use`: a `max_tokens` stop can include incomplete fragments, while missing tool IDs or names and duplicate IDs cause a provider error. When the Strands SDK processes malformed tool arguments, it may log a warning containing part of those arguments, which can include sensitive data.
+
 Strands can summarize older conversation history during automatic context management. The provider forwards the reasoning that remains in the history it receives; it cannot restore content that was summarized or removed. Token counts used for proactive context management are estimates, not exact EXAONE token counts.
 
 The provider requests streaming usage by default (include_usage=True) so Strands can use token counts for context management. EXAONE may omit usage, and downstream context management is controlled by the framework.
@@ -172,9 +174,9 @@ agent = Agent(
 print(agent("Use the tool to get the number, then add 3."))
 ```
 
-The provider assembles streamed tool-call arguments before exposing calls to Strands. For the hosted `k-exaone_v2.5` endpoint only, it completes missing closing braces or brackets and removes trailing commas when that produces a JSON object. This cannot detect a truncated value: for example, `12` may have been intended as `123`. The Harness validates the resulting object against the tool schema, but cannot determine the intended value. Other malformed arguments are rejected; self-hosted endpoints receive no such syntax completion. The provider accepts text, reasoning, tool calls, and text/JSON tool results. Unsupported content types and reasoning signatures present in the history received by the provider are rejected.
+The provider assembles streamed tool-call arguments and validates each completed call before exposing it to Strands. Hosted and self-hosted endpoints follow the same rules. Nonblank arguments must be a valid JSON object, and blank arguments follow Strands' rules. The Harness validates the object against the tool schema. The provider accepts text, reasoning, tool calls, and text or JSON tool results. Unsupported content types and reasoning signatures in the received history are rejected.
 
-Because Chat Completions tool messages have no separate status field, tool results marked as errors are sent with an `[ERROR] ` prefix. Successful results are sent without a prefix.
+Because Chat Completions tool messages have no separate status field, ordinary tool results marked as errors are sent with an `[ERROR] ` prefix. Successful results are sent without a prefix.
 
 When Strands supplies multiple system text blocks, the provider sends them as separate system messages.
 
@@ -230,6 +232,32 @@ When using recursive schemas, verify that the selected framework path preserves 
 Structured-output calls reject aborted responses rather than treating them as valid schema results.
 
 Handle validation failures through Strands' structured-output contract; the provider does not automatically rewrite prompts or retry model-generated output.
+
+## Tool-call recovery
+
+To let an Agent retry one malformed JSON tool call, register the optional middleware:
+
+```python
+from strands.middleware import InvokeModelStage
+from strands_exaone.recovery import recover_tool_calls
+
+agent.add_middleware(InvokeModelStage, recover_tool_calls)
+```
+
+Text and reasoning stream as they arrive. Tool events are released after the arguments have been checked. Recovery can retry one malformed call before any output is emitted. To wait for validation before streaming any part of the response, register `functools.partial(recover_tool_calls, buffer_response=True)`.
+
+With the middleware enabled, a refusal blocks tool execution even when the response also includes ordinary text.
+Recovery uses the actual tools and tool choice sent to EXAONE. A correction is skipped if another middleware removes that tool or overrides the correction's tool choice. A correction stopped by the output limit follows the SDK's normal max-token handling.
+
+Recovery sends the original arguments and parser diagnostic in a matching error tool result. The preceding empty argument object is a transport placeholder and is never executed. The system prompt and user messages are retained. Truncated, mixed, incomplete and repeated failures, and ambiguous streamed call IDs, are not recovered. Recovery can add latency and model charges. Tracing may record the diagnostic and original arguments. When both attempts report usage, the SDK usage includes both. Failed-attempt usage is also supplied to `metadata_callback` under `recovery.failed_attempts` and logged at INFO. If recovery itself fails, that callback is not invoked.
+
+The tool error includes a separate JSON record with `raw_arguments` as a string and `parse_error` as the diagnostic. When available, the location is a one-based line and column in the original argument text. It refers to the decoded argument text, before JSON escaping. Recovery uses the SDK-style `Error:` content without the provider's legacy `[ERROR]` prefix.
+
+Only the correction request selects the failed tool by name. If the endpoint explicitly rejects named tool choice before emitting a response, the middleware tries `tool_choice="required"` once. Recovery succeeds only with a completed reply containing exactly one call to the original tool with a valid JSON object as its arguments. The SDK still validates the tool schema before execution.
+
+The middleware applies to direct `ExaoneModel` instances; other model implementations and subclasses pass through unchanged.
+
+Empty or whitespace-only tool input is not automatically retried; the SDK handles it according to its existing rules, which can allow a tool's default arguments to run.
 
 ## Retries
 

@@ -48,7 +48,7 @@ For SDK tool use, streaming, structured output, Harness, and CLI walkthroughs, s
 
 ## Why use this provider?
 
-The provider preserves EXAONE reasoning across Strands turns, maps model information, streaming, tools, usage and errors, and performs limited tool-argument syntax completion for hosted 2.5. Configure `ExaoneRetryStrategy` for Agent and Harness calls to honor server delay hints; the model's own HTTP retries are disabled by default.
+The provider preserves EXAONE reasoning across Strands turns and maps model information, streaming, tools, usage and errors. Configure `ExaoneRetryStrategy` for Agent and Harness calls to honor server delay hints. The model's own HTTP retries are disabled by default.
 
 ## Configuration
 
@@ -61,7 +61,7 @@ The provider preserves EXAONE reasoning across Strands turns, maps model informa
 | `temperature` | Sampling temperature. | `1.0` |
 | `topP` | Nucleus sampling threshold. | `0.95` |
 | `reasoningEffort` | EXAONE reasoning setting. | Service default |
-| `preserveThinking` | Preserve earlier assistant reasoning in the model input. | `true` |
+| `preserveThinking` | Request preservation of earlier assistant reasoning in the model input. | `true` |
 | `enableThinking` | Reasoning-generation option for compatible custom models. K-EXAONE 2.5 always reasons. | Service default |
 | `includeUsage` | Set `stream_options.include_usage` on streaming requests. | `true` |
 | `timeoutMs` | Deadline for attempts, retry waits, response reads, and stream consumption. A custom fetch implementation must honor the supplied abort signal. | No provider-imposed timeout |
@@ -150,6 +150,8 @@ The context budget covers input plus output, including reasoning. See the [EXAON
 
 The provider stores reasoning separately from the final answer and sends it back as reasoning_content when it appears in the Strands conversation. preserveThinking defaults to true; set it to false to stop requesting preservation of earlier reasoning. K-EXAONE 2.5 always reasons; `enableThinking` can be forwarded for compatible custom models.
 
+When an output-limit response maps to the SDK `maxTokens` stop, the SDK Agent raises `MaxTokensError` instead of executing its tool calls. Calls with missing names or missing or duplicate IDs are rejected before that stop. Low-level stream consumers should wait for the stop reason before executing tools: earlier tool fragments may be incomplete. The SDK logs tool-input JSON parse errors, which can include fragments of malformed input; configure logging accordingly.
+
 Strands can summarize older conversation history during automatic context management. The provider forwards the reasoning that remains in the history it receives; it cannot restore content that was summarized or removed. Token counts used for proactive context management are estimates, not exact EXAONE token counts.
 
 Check both the returned reasoning fields and visible content. The request setting alone does not guarantee that reasoning is absent from the content.
@@ -174,7 +176,7 @@ const agent = new Agent({
 await agent.invoke('Use the tool to get the number, then add 3.')
 ```
 
-The provider assembles streamed tool-call arguments before exposing calls to Strands. For the hosted `k-exaone_v2.5` endpoint only, it completes missing closing braces or brackets and removes trailing commas when that produces a JSON object. This cannot detect a truncated value: for example, `12` may have been intended as `123`. The Harness validates the resulting object against the tool schema, but cannot determine the intended value. Other malformed arguments are rejected; self-hosted endpoints receive no such syntax completion. Empty and whitespace-only arguments are passed through to Strands. The provider accepts text, reasoning, tool calls, and text or JSON tool results; it rejects unsupported content types and reasoning signatures in the received history.
+The provider assembles streamed tool-call arguments and validates each completed call before exposing it to Strands. Hosted and self-hosted endpoints follow the same rules. Nonblank arguments must be a valid JSON object, and blank arguments follow Strands' rules. The Harness validates the object against the tool schema. The provider accepts text, reasoning, tool calls, and text or JSON tool results. Unsupported content types and reasoning signatures in the received history are rejected.
 
 Because Chat Completions tool messages have no separate status field, tool results marked as errors are sent with an `[ERROR] ` prefix. Successful results are sent without a prefix.
 
@@ -254,6 +256,35 @@ const agent = await createHarness({
 This disables the SDK's model retry strategy for that Agent. Cancellation interrupts provider retry waits; `timeoutMs` bounds provider attempts, provider retry waits, response reads, and stream consumption. Agent-level `ExaoneRetryStrategy` waits are outside the model timeout and follow Strands retry-strategy semantics. A custom `fetch` implementation must honor the supplied abort signal.
 
 When stopping an agent stream early, use SDK cancellation APIs and let the model stream close; custom fetch implementations should honor the supplied abort signal.
+
+## Tool-call recovery
+
+To opt in to recovery from one completed tool call with malformed JSON arguments, register the model-stage middleware:
+
+```typescript
+import { Agent, InvokeModelStage } from '@strands-agents/sdk'
+import { ExaoneModel, toolCallRecovery } from 'strands-exaone'
+
+const agent = new Agent({ model: new ExaoneModel(), tools: [] })
+agent.addMiddleware(InvokeModelStage, toolCallRecovery())
+```
+
+Text and reasoning stream as they arrive. Tool events are released after the arguments have been checked. Recovery can retry one malformed call before any output is emitted. To wait for validation before streaming any part of the response, register `toolCallRecovery({ bufferResponse: true })`.
+
+With the middleware enabled, a refusal blocks tool execution even when the response also includes ordinary text.
+Recovery uses the actual tools and tool choice sent to EXAONE. A correction is skipped if another middleware removes that tool or overrides the correction's tool choice. A correction stopped by the output limit follows the SDK's normal max-token handling.
+
+Recovery sends the original argument text and JSON diagnostic as a matching error tool result. For transport compatibility the failed assistant call has `{}` arguments in that retry, explicitly described as a placeholder in the tool result. The placeholder is never executed. The original system prompt and user messages are retained. Mixed calls, incomplete calls, length stops, refusals and ambiguous streamed call IDs are not automatically recovered. If recovery is unsuccessful, the error is propagated.
+
+The tool error includes a separate JSON record with `raw_arguments` as a string and `parse_error` as the diagnostic. When available, the location is a one-based line and column in the original argument text. It refers to the decoded argument text, before JSON escaping.
+
+Only the correction request selects the failed tool by name. If the endpoint explicitly rejects named tool choice before emitting a response, the middleware tries `tool_choice="required"` once. Recovery succeeds only with a completed reply containing exactly one call to the original tool with a valid JSON object as its arguments. The SDK validates Zod-backed input schemas before execution. Plain JSON Schema describes the expected inputs, and the tool implementation defines its runtime validation.
+
+The middleware applies to direct `ExaoneModel` instances; other model implementations and subclasses pass through unchanged.
+
+Empty or whitespace-only tool input is not automatically retried; the SDK handles it according to its existing rules, which can allow a tool's default arguments to run.
+
+On successful recovery, `onMetadata` receives `recovery.failedAttempts` with the failed response's usage if the server supplied it. When both attempts report valid token counts, the SDK model usage includes both attempts; `onMetadata.usage` remains the raw usage from the successful response. Missing usage cannot be inferred. If the retry fails before a successful response, the earlier attempt's usage is not currently reported by `onMetadata`.
 
 ## Metadata and errors
 

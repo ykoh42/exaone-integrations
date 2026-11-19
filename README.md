@@ -29,7 +29,7 @@ These packages provide a maintained, tested mapping between EXAONE and each fram
 | Streaming and tools | Maps reasoning, text, streamed tool calls, and tool results to framework types. Frameworks execute tools and validate their schemas. Unsupported inputs and malformed responses follow the package's documented error handling. |
 | Diagnostics | Adapts usage, including reasoning-token counts where available, response metadata, and API errors to the framework's interfaces. Exact fields and access methods are documented per package. |
 
-The Strands packages can repair missing closing braces or brackets and trailing commas in tool-argument JSON objects without guessing argument values. They reject other malformed arguments before tool execution. See the Strands [Python](packages/strands-exaone-py/#reasoning-and-tools) and [TypeScript](packages/strands-exaone-ts/#reasoning-and-tools) documentation for the exact limits of this behavior.
+The Strands providers reject malformed JSON arguments before tool execution. Agents can opt in to one model retry for an eligible malformed call. See the [Python](packages/strands-exaone-py/#tool-call-recovery) and [TypeScript](packages/strands-exaone-ts/#tool-call-recovery) setup.
 
 The integrations follow each framework's public contracts and document API compatibility limits. Model decisions can still be wrong, and service errors can still occur. If your existing OpenAI adapter preserves the EXAONE fields you need and handles your application's limits and retry policy, you can continue using it.
 

@@ -48,6 +48,15 @@ from langchain_core.utils.pydantic import is_basemodel_subclass
 from pydantic import ConfigDict, Field, SecretStr, ValidationInfo, field_validator
 
 from langchain_exaone._profiles import get_model_profile
+from langchain_exaone._recovery import (
+    RecoveryStream,
+    check_completed_message,
+    check_message,
+    check_stream,
+    recoverable_tools,
+    recovery_state,
+    reject_json_constant,
+)
 
 _RETRYABLE_STATUSES = {408, 429, 500, 502, 503, 504}
 _SAFE_HEADERS = {"content-type", "retry-after", "retry-after-ms", "x-request-id"}
@@ -479,7 +488,7 @@ def _usage_metadata(usage: Mapping[str, Any] | None) -> dict[str, Any] | None:
     return result
 
 
-def _tool_calls(raw_calls: Any) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def _tool_calls(raw_calls: Any, *, strict_json: bool = False) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     valid: list[dict[str, Any]] = []
     invalid: list[dict[str, Any]] = []
     if raw_calls is None:
@@ -500,7 +509,12 @@ def _tool_calls(raw_calls: Any) -> tuple[list[dict[str, Any]], list[dict[str, An
         if call_id is not None and not isinstance(call_id, str):
             raise ValueError("EXAONE response tool call id must be a string")
         try:
-            parsed = json.loads(arguments)
+            parsed = json.loads(arguments, parse_constant=reject_json_constant if strict_json else None)
+        except json.JSONDecodeError as exc:
+            # JSONDecodeError.msg and the location do not include the input text.
+            error = f"Invalid JSON: {exc.msg} (line {exc.lineno}, column {exc.colno})."
+            invalid.append({"name": name, "args": arguments, "id": call_id, "error": error})
+            continue
         except ValueError:
             invalid.append({"name": name, "args": arguments, "id": call_id, "error": "Arguments were not valid JSON."})
             continue
@@ -524,7 +538,9 @@ def _response_reasoning(source: Mapping[str, Any], context: str) -> str | None:
     return original or alternate
 
 
-def _assistant_message(choice: Mapping[str, Any], response: Mapping[str, Any], api_key: str) -> AIMessage:
+def _assistant_message(
+    choice: Mapping[str, Any], response: Mapping[str, Any], api_key: str, *, strict_json: bool = False
+) -> AIMessage:
     raw = choice.get("message")
     if not isinstance(raw, Mapping):
         raise ValueError("EXAONE response choice is missing its assistant message")
@@ -546,7 +562,7 @@ def _assistant_message(choice: Mapping[str, Any], response: Mapping[str, Any], a
         additional["tool_calls"] = raw["tool_calls"]
     if isinstance(raw.get("function_call"), Mapping):
         additional["function_call"] = raw["function_call"]
-    valid, invalid = _tool_calls(raw.get("tool_calls"))
+    valid, invalid = _tool_calls(raw.get("tool_calls"), strict_json=strict_json)
     usage = response.get("usage") if isinstance(response.get("usage"), Mapping) else None
     metadata = {
         "model_provider": "exaone",
@@ -575,7 +591,7 @@ def _assistant_message(choice: Mapping[str, Any], response: Mapping[str, Any], a
     )
 
 
-def _decode_sse(lines: Iterator[str]) -> Iterator[dict[str, Any]]:
+def _decode_sse(lines: Iterator[str], complete: list[bool] | None = None) -> Iterator[dict[str, Any]]:
     pending: list[str] = []
     for line in lines:
         if not line:
@@ -583,6 +599,8 @@ def _decode_sse(lines: Iterator[str]) -> Iterator[dict[str, Any]]:
                 payload = "\n".join(pending)
                 pending.clear()
                 if payload == "[DONE]":
+                    if complete is not None:
+                        complete[0] = True
                     return
                 data = _load_response_json(payload, "event stream")
                 if not isinstance(data, dict):
@@ -592,6 +610,8 @@ def _decode_sse(lines: Iterator[str]) -> Iterator[dict[str, Any]]:
             pending.append(line[5:].lstrip())
     if pending:
         payload = "\n".join(pending)
+        if payload == "[DONE]" and complete is not None:
+            complete[0] = True
         if payload != "[DONE]":
             data = _load_response_json(payload, "event stream")
             if not isinstance(data, dict):
@@ -599,7 +619,7 @@ def _decode_sse(lines: Iterator[str]) -> Iterator[dict[str, Any]]:
             yield data
 
 
-async def _decode_sse_async(lines: Any) -> AsyncIterator[dict[str, Any]]:
+async def _decode_sse_async(lines: Any, complete: list[bool] | None = None) -> AsyncIterator[dict[str, Any]]:
     pending: list[str] = []
     async for line in lines:
         if not line:
@@ -607,6 +627,8 @@ async def _decode_sse_async(lines: Any) -> AsyncIterator[dict[str, Any]]:
                 payload = "\n".join(pending)
                 pending.clear()
                 if payload == "[DONE]":
+                    if complete is not None:
+                        complete[0] = True
                     return
                 data = _load_response_json(payload, "event stream")
                 if not isinstance(data, dict):
@@ -616,6 +638,8 @@ async def _decode_sse_async(lines: Any) -> AsyncIterator[dict[str, Any]]:
             pending.append(line[5:].lstrip())
     if pending:
         payload = "\n".join(pending)
+        if payload == "[DONE]" and complete is not None:
+            complete[0] = True
         if payload != "[DONE]":
             data = _load_response_json(payload, "event stream")
             if not isinstance(data, dict):
@@ -788,7 +812,12 @@ class ChatEXAONE(BaseChatModel):
 
     @property
     def _identifying_params(self) -> dict[str, Any]:
-        return {"model": self.model, "base_url": self.base_url}
+        params: dict[str, Any] = {"model": self.model, "base_url": self.base_url}
+        state = recovery_state.get()
+        if state is not None:
+            # Cached streams may no longer carry the original tool argument fragments.
+            params["_exaone_tool_call_recovery"] = (2, state.expected_tool, state.required)
+        return params
 
     def _key(self) -> str:
         key = self.api_key.get_secret_value()
@@ -824,6 +853,9 @@ class ChatEXAONE(BaseChatModel):
         body["model"] = kwargs.get("model") or self.model
         body["messages"] = serialized_messages
         body["stream"] = stream
+        state = recovery_state.get()
+        if state is not None and state.expected_tool is not None:
+            recoverable_tools(body, state)
         return body
 
     @contextmanager
@@ -899,7 +931,7 @@ class ChatEXAONE(BaseChatModel):
             result["token_usage"] = token_usage
         return result
 
-    def _parse_result(self, payload: Any, api_key: str) -> ChatResult:
+    def _parse_result(self, payload: Any, api_key: str, request: Mapping[str, Any]) -> ChatResult:
         if not isinstance(payload, Mapping):
             raise ValueError("EXAONE response must be a JSON object")
         choices = payload.get("choices")
@@ -907,9 +939,12 @@ class ChatEXAONE(BaseChatModel):
             raise ValueError("EXAONE response did not contain choices")
         if any(not isinstance(choice, Mapping) for choice in choices):
             raise ValueError("EXAONE response choices must be objects")
+        state = recovery_state.get()
         generations = [
             ChatGeneration(
-                message=self._standard_refusal(_assistant_message(choice, payload, api_key)),
+                message=self._standard_refusal(
+                    _assistant_message(choice, payload, api_key, strict_json=state is not None)
+                ),
                 generation_info={
                     key: choice.get(key)
                     for key in ("finish_reason", "matched_stop", "logprobs")
@@ -918,6 +953,15 @@ class ChatEXAONE(BaseChatModel):
             )
             for choice in choices
         ]
+        if state is not None:
+            if state.expected_tool is not None:
+                if len(generations) != 1:
+                    raise ValueError("EXAONE recovery must return exactly one completion choice")
+                check_completed_message(generations[0].message, state.expected_tool)
+            else:
+                tools = recoverable_tools(request, state)
+                for generation in generations:
+                    check_message(generation.message, api_key, tools=tools, allow_retry=len(generations) == 1)
         return ChatResult(
             generations=generations, llm_output={"model": payload.get("model"), "usage": payload.get("usage")}
         )
@@ -959,7 +1003,7 @@ class ChatEXAONE(BaseChatModel):
                     payload = _load_response_json(response.content, "response body")
                 finally:
                     response.close()
-                return self._parse_result(payload, key)
+                return self._parse_result(payload, key, body)
         raise RuntimeError("EXAONE retry loop exited without a response")
 
     @_safe_transport_errors
@@ -992,7 +1036,7 @@ class ChatEXAONE(BaseChatModel):
                     payload = _load_response_json(response.content, "response body")
                 finally:
                     await response.aclose()
-                return self._parse_result(payload, key)
+                return self._parse_result(payload, key, body)
         raise RuntimeError("EXAONE retry loop exited without a response")
 
     def bind_tools(
@@ -1099,7 +1143,13 @@ class ChatEXAONE(BaseChatModel):
                                 continue
                         raise error
                     seen_metadata: dict[str, Any] = {}
-                    for payload in _decode_sse(response.iter_lines()):
+                    complete = [False]
+                    payloads = _decode_sse(response.iter_lines(), complete)
+                    state = recovery_state.get()
+                    if state is not None:
+                        router = RecoveryStream(state, recoverable_tools(body, state))
+                        payloads = self._guard_stream(payloads, complete, router, key)
+                    for payload in payloads:
                         for chunk in self._stream_payload(payload, run_manager, key):
                             self._deduplicate_stream_metadata(chunk, seen_metadata)
                             yield chunk
@@ -1132,7 +1182,13 @@ class ChatEXAONE(BaseChatModel):
                                 continue
                         raise error
                     seen_metadata: dict[str, Any] = {}
-                    async for payload in _decode_sse_async(response.aiter_lines()):
+                    complete = [False]
+                    payloads = _decode_sse_async(response.aiter_lines(), complete)
+                    state = recovery_state.get()
+                    if state is not None:
+                        router = RecoveryStream(state, recoverable_tools(body, state))
+                        payloads = self._aguard_stream(payloads, complete, router, key)
+                    async for payload in payloads:
                         for chunk in self._stream_payload(payload, None, key):
                             self._deduplicate_stream_metadata(chunk, seen_metadata)
                             yield chunk
@@ -1140,6 +1196,30 @@ class ChatEXAONE(BaseChatModel):
                                 await run_manager.on_llm_new_token(chunk.text, chunk=chunk)
                     return
         raise RuntimeError("EXAONE retry loop exited without a response")
+
+    def _guard_stream(
+        self, payloads: Iterator[dict[str, Any]], complete: list[bool], router: RecoveryStream, key: str
+    ) -> Iterator[dict[str, Any]]:
+        for payload in payloads:
+            yield from router.accept(payload)
+        yield from self._validate_held_payloads(router.finish(complete[0]), router, key)
+
+    async def _aguard_stream(
+        self, payloads: AsyncIterator[dict[str, Any]], complete: list[bool], router: RecoveryStream, key: str
+    ) -> AsyncIterator[dict[str, Any]]:
+        async for payload in payloads:
+            for item in router.accept(payload):
+                yield item
+        for item in self._validate_held_payloads(router.finish(complete[0]), router, key):
+            yield item
+
+    def _validate_held_payloads(
+        self, payloads: list[dict[str, Any]], router: RecoveryStream, key: str
+    ) -> list[dict[str, Any]]:
+        for payload in payloads:
+            list(self._stream_payload(payload, None, key))
+        check_stream(payloads, key, router)
+        return payloads
 
     @staticmethod
     def _deduplicate_stream_metadata(chunk: ChatGenerationChunk, seen: dict[str, Any]) -> None:

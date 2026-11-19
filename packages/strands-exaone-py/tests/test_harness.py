@@ -416,7 +416,7 @@ async def test_harness_executes_zero_argument_tool_with_empty_input(arguments: s
     assert json.loads(assistant["tool_calls"][0]["function"]["arguments"]) == {}
 
 
-async def test_harness_executes_tool_when_only_closing_object_brace_is_missing() -> None:
+async def test_harness_rejects_tool_arguments_with_a_missing_closing_brace() -> None:
     calls: list[str] = []
     requests: list[dict[str, Any]] = []
 
@@ -446,11 +446,11 @@ async def test_harness_executes_tool_when_only_closing_object_brace_is_missing()
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         model = ExaoneModel(api_key="test-only-key", http_client=client)
-        await make_harness(model, [lookup]).invoke_async("Look up EXAONE.")
+        with pytest.raises(ExaoneError, match="Invalid tool arguments"):
+            await make_harness(model, [lookup]).invoke_async("Look up EXAONE.")
 
-    assert calls == ["EXAONE"]
-    assistant = next(message for message in requests[1]["messages"] if message["role"] == "assistant")
-    assert assistant["tool_calls"][0]["function"]["arguments"] == '{"query":"EXAONE"}'
+    assert calls == []
+    assert len(requests) == 1
 
 
 @pytest.mark.parametrize("failure", ["truncated", "invalid_arguments", "stream_error"])

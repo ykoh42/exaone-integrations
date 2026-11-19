@@ -51,7 +51,7 @@ When the endpoint reports cache reads or writes, `usage_metadata.input_token_det
 | `maxTokens` | Maximum generated tokens. | Service default |
 | `frequencyPenalty`, `presencePenalty`, `seed` | Generation settings. | Service defaults |
 | `reasoningEffort` | Reasoning setting accepted by the selected endpoint. | Service default |
-| `preserveThinking` | Preserve earlier reasoning in multi-turn conversations. | `true` |
+| `preserveThinking` | Request preservation of earlier assistant reasoning in the model input. | `true` |
 | `enableThinking` | Set `chat_template_kwargs.enable_thinking` for compatible custom models. K-EXAONE 2.5 always reasons. | Service default |
 | `timeout` | Request timeout in milliseconds. | No provider-imposed timeout |
 | `maxRetries` | Retries for 408, 429, 500, 502, 503, and 504 responses. | `2` |
@@ -135,7 +135,42 @@ Pass `{ strict: true }` or `{ strict: false }` to `bindTools()` to set `strict` 
 
 When a returned EXAONE message is reused in history, edits to its LangChain `tool_calls` determine the next request. Provider-specific fields from matching original calls are retained.
 
-`withStructuredOutput()` defaults to `functionCalling`: it requests its named tool and uses LangChain's parser. Set `{ method: "jsonSchema" }` for native JSON Schema output or `{ method: "jsonMode" }` for a JSON object. With JSON mode, ask for JSON in the prompt. Zod schemas are validated; a plain JSON Schema object is parsed as JSON without additional schema validation, following LangChain's parser. `{ includeRaw: true }` retains the original message when parsing fails. Invalid tool arguments remain available in `invalid_tool_calls`, and the original calls are retained in response metadata for conversation history.
+`withStructuredOutput()` defaults to `functionCalling`: it requests its named tool and uses LangChain's parser. Set `{ method: "jsonSchema" }` for native JSON Schema output or `{ method: "jsonMode" }` for a JSON object. With JSON mode, ask for JSON in the prompt. Zod schemas are validated; a plain JSON Schema object is parsed as JSON without additional schema validation, following LangChain's parser. `{ includeRaw: true }` retains the original message when parsing fails. Invalid non-streamed tool arguments remain available in `invalid_tool_calls`, and the original calls are retained in response metadata for conversation history.
+
+Malformed non-streamed JSON includes an error and, when the runtime reports one, a UTF-16 offset. This does not automatically send the error back to the model or retry the call; that behavior depends on the agent.
+
+To opt in to one recovery attempt for a single malformed JSON tool call, attach this middleware to a LangChain agent:
+
+```typescript
+import { createAgent, createMiddleware } from 'langchain'
+import { ChatExaone, toolCallRecovery } from 'langchain-exaone'
+
+const agent = createAgent({
+  model: new ChatExaone(),
+  tools: [], // Add your LangChain tools here.
+  middleware: [createMiddleware(toolCallRecovery())],
+})
+```
+
+Text and reasoning stream as they arrive. Tool chunks are released after the arguments have been checked. Recovery can retry one malformed call before any output is emitted. To wait for validation before streaming any part of the response, use `toolCallRecovery({ bufferResponse: true })`.
+
+Recovery sends the original arguments and parser diagnostic in a matched tool-error message. The preceding assistant tool-call arguments use an explicitly identified `{}` placeholder. The tool runs only after the model returns a valid call. The system prompt, user messages and tool definitions are retained. An incomplete, filtered, or refused response cannot run a tool. Responses with multiple choices or tool calls are rejected if any call has malformed JSON. Server acceptance of this recovery exchange and successful correction depend on the endpoint and model.
+
+If LangChain's response cache is configured, the middleware uses a separate cache key for validated responses. The key is local to LangChain and is omitted from API requests.
+
+Recovery uses the effective EXAONE request after SDK middleware has applied tool selection. It stops before sending a correction if the tool was removed or the correction's tool choice was overridden. Register recovery after routing middleware that switches providers or makes its own model calls, so the correction applies to the selected EXAONE model call.
+
+The tool error includes a separate JSON record with `raw_arguments` as a string and `parse_error` as the diagnostic. When available, the location is a one-based line and column in the original argument text. It refers to the decoded argument text, before JSON escaping.
+
+Only the correction request selects the failed tool by name. If the endpoint explicitly rejects named tool choice before emitting a response, the middleware tries `tool_choice="required"` once. Recovery succeeds only with a completed reply containing exactly one call to the original tool with a valid JSON object as its arguments. The SDK still validates the tool schema before execution.
+
+Without the middleware, LangChain's partial JSON parser can turn incomplete streamed arguments into an executable tool call. For example, an Agent can execute a tool with `amount=12` when the stream ends with the raw arguments `{"amount":12`.
+
+Empty or whitespace-only arguments follow LangChain's existing behavior and do not trigger recovery. LangChain may treat an empty streamed input as `{}` and run a zero-argument or defaulted tool; an empty input alone does not show whether the server omitted arguments. The middleware still rejects tool calls ending due to length.
+
+The failed model call is observable via LangChain error callbacks and tracing, even when recovery succeeds. Raw arguments are accessible to the middleware and sent back to the model, so apply your normal tracing and data-handling settings. When supplied by the server, usage for the failed attempt is recorded in the recovered assistant message's `response_metadata.exaone_tool_call_recovery.failed_usage`; standard usage fields still describe the successful call. In streaming runs, inspect the agent's `updates` stream or final state for this metadata; individual `messages` chunks can be emitted before middleware attaches it. Plain model calls and agents without the middleware retain their existing behavior.
+
+For streamed tool calls, `invalid_tool_calls` and schema validation do not guarantee that the server sent complete JSON. With `@langchain/core` 1.4.0 and LangChain 1.6.5, an incomplete tool call from vLLM Metal 0.33.0 using the qwen3 reasoning and hermes tool parsers was partially parsed into a schema-valid object and the Agent executed it. In the same setup, the Agent also executed schema-valid calls after a `length` finish, including calls with complete JSON. Both behaviors were observed with the official `ChatOpenAI` integration as well. If you manage tool dispatch, treat a `length` finish as incomplete and do not execute its tool calls. Combine the streamed `AIMessageChunk`s and check each combined `tool_call_chunks[].args` with `JSON.parse` before executing tools. This checks JSON syntax, not whether a valid argument contains the intended value.
 
 The integration also preserves legacy `function_call` fields and LangChain `FunctionMessage` results in conversation history for compatible endpoints. A synthetic history containing both fields and a `function` role returned HTTP 400 from the default EXAONE endpoint; use the tool-calling protocol for EXAONE. The integration does not execute tools by itself.
 

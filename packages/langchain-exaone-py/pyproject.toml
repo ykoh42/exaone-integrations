@@ -17,6 +17,9 @@ dependencies = [
     "pydantic>=2,<3",
 ]
 
+[project.optional-dependencies]
+recovery = ["langchain>=1.5,<2; python_version >= '3.11'"]
+
 [project.urls]
 Repository = "https://github.com/ykoh42/exaone-integrations"
 Homepage = "https://github.com/ykoh42/exaone-integrations/tree/main/packages/langchain-exaone-py#readme"
@@ -26,6 +29,7 @@ Changelog = "https://github.com/ykoh42/exaone-integrations/blob/main/packages/la
 
 [dependency-groups]
 test = [
+    "langchain>=1.5,<2; python_version >= '3.11'",
     "langchain-tests==1.1.9",
     "pytest>=9,<10",
     "pytest-asyncio>=1,<2",

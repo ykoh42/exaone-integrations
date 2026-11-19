@@ -1,6 +1,6 @@
 import { inspect } from 'node:util'
 import { describe, expect, it, vi } from 'vitest'
-import { Agent, Message, ModelError, ModelNetworkError, ModelThrottledError, tool } from '@strands-agents/sdk'
+import { Agent, MaxTokensError, Message, ModelError, ModelNetworkError, ModelThrottledError, tool } from '@strands-agents/sdk'
 import { z } from 'zod'
 import { ExaoneAPIError, ExaoneModel, ExaoneResponseError } from '../src/index.js'
 import { readSSE } from '../src/sse.js'
@@ -464,14 +464,90 @@ describe('ExaoneModel', () => {
     expect(result.message.content[0]).toMatchObject({ toolUseId: 'call_1', name: 'lookup', input: { x: 2 } })
   })
 
-  it.each([
-    [{ auto: {} }, 'stop'],
-    [{ tool: { name: 'lookup' } }, 'length'],
-  ] as const)('rejects other inconsistent tool finishes', async (toolChoice, finish) => {
+  it.each(['stop', 'content_filter'])('rejects tool calls with %s finish when the choice is not named', async (finish) => {
     const call = { index: 0, id: 'call_1', function: { name: 'lookup', arguments: '{}' } }
     const model = new ExaoneModel({ apiKey: 'key', fetch: transport(response(sse([event({ tool_calls: [call] }), event({}, finish)]))) })
-    const options = { toolSpecs: [{ name: 'lookup', description: 'Lookup', inputSchema: { type: 'object' } }], toolChoice }
+    const options = { toolSpecs: [{ name: 'lookup', description: 'Lookup', inputSchema: { type: 'object' } }], toolChoice: { auto: {} } }
     await expect(async () => { for await (const _item of model.stream([user()], options)) { /* consume */ } }).rejects.toThrow(/finish reason/)
+  })
+
+  it.each([true, false])('preserves length and partial tool input in SDK event order (stream=%s)', async (stream) => {
+    const call = { id: 'call_1', type: 'function', function: { name: 'lookup', arguments: '{"x":1' } }
+    const data = stream
+      ? sse([event({ reasoning_content: 'synthetic reasoning' }), event({ tool_calls: [{ index: 0, ...call }] }), event({}, 'length')])
+      : JSON.stringify(wire([{ index: 0, message: { reasoning_content: 'synthetic reasoning', tool_calls: [call] }, finish_reason: 'length' }]))
+    const model = new ExaoneModel({ apiKey: 'key', stream, fetch: transport(response(data)) })
+    const items = await collect(model)
+    const blocks = items.filter((item) => item.type !== 'modelMetadataEvent')
+    expect(blocks.map((item) => item.type)).toEqual([
+      'modelMessageStartEvent', 'modelContentBlockStartEvent', 'modelContentBlockDeltaEvent', 'modelContentBlockStopEvent',
+      'modelContentBlockStartEvent', 'modelContentBlockDeltaEvent', 'modelContentBlockStopEvent', 'modelMessageStopEvent',
+    ])
+    expect(blocks[4]).toMatchObject({ start: { type: 'toolUseStart', name: 'lookup', toolUseId: 'call_1' } })
+    expect(blocks[5]).toMatchObject({ delta: { type: 'toolUseInputDelta', input: '{"x":1' } })
+    expect(blocks[7]).toMatchObject({ stopReason: 'maxTokens' })
+  })
+
+  it.each([true, false])('keeps named-tool length as maxTokens (stream=%s)', async (stream) => {
+    const call = { id: 'call_1', type: 'function', function: { name: 'lookup', arguments: '{}' } }
+    const data = stream ? sse([event({ tool_calls: [{ index: 0, ...call }] }), event({}, 'length')])
+      : JSON.stringify(wire([{ index: 0, message: { tool_calls: [call] }, finish_reason: 'length' }]))
+    const model = new ExaoneModel({ apiKey: 'key', stream, fetch: transport(response(data)) })
+    const iterator = model.stream([user()], { toolSpecs: [{ name: 'lookup', description: 'Lookup', inputSchema: { type: 'object' } }], toolChoice: { tool: { name: 'lookup' } } })
+    const items = []
+    for await (const item of iterator) items.push(item)
+    expect(items.find((item) => item.type === 'modelMessageStopEvent')).toMatchObject({ stopReason: 'maxTokens' })
+  })
+
+  it.each([true, false].flatMap((stream) => ['missing ID', 'missing name', 'duplicate ID'].map((shape) => ({ stream, shape }))))(
+    'rejects unrepresentable length-limited tool calls ($stream, $shape)', async ({ stream, shape }) => {
+      const first = { id: shape === 'missing ID' ? '' : 'call_1', type: 'function', function: { name: shape === 'missing name' ? '' : 'lookup', arguments: '{"x":' } }
+      const calls = shape === 'duplicate ID' ? [first, { ...first }] : [first]
+      const data = stream ? sse([event({ tool_calls: calls.map((call, index) => ({ ...call, index })) }), event({}, 'length')])
+        : JSON.stringify(wire([{ index: 0, message: { tool_calls: calls }, finish_reason: 'length' }]))
+      const model = new ExaoneModel({ apiKey: 'key', stream, fetch: transport(response(data)) })
+      await expect(collect(model)).rejects.toThrow(shape === 'duplicate ID' ? 'duplicate tool call IDs' : 'incomplete tool call')
+    },
+  )
+
+  it.each([true, false].flatMap((stream) => [true, false].flatMap((valid) => [true, false].map((hosted) => ({ stream, valid, hosted })))))(
+    'lets the Agent prioritize maxTokens without executing a tool: $stream, $valid, $hosted',
+    async ({ stream, valid, hosted }) => {
+      const args = valid ? '{"x":1}' : '{"x":1'
+      const call = { id: 'call_1', type: 'function', function: { name: 'lookup', arguments: args } }
+      const data = stream ? sse([event({ tool_calls: [{ index: 0, ...call }] }), event({}, 'length')])
+        : JSON.stringify(wire([{ index: 0, message: { tool_calls: [call] }, finish_reason: 'length' }]))
+      const fetcher = vi.fn(async () => response(data))
+      const callback = vi.fn(() => 'synthetic result')
+      const lookup = tool({ name: 'lookup', description: 'Lookup', inputSchema: z.object({ x: z.number() }), callback })
+      const model = new ExaoneModel({ apiKey: 'key', stream, ...(hosted ? {} : { baseURL: 'http://server.example/v1', modelId: 'custom-model' }), fetch: fetcher as typeof fetch })
+      const agent = new Agent({ model, tools: [lookup], printer: false, retryStrategy: null })
+      await expect(agent.invoke('Look up a number')).rejects.toBeInstanceOf(MaxTokensError)
+      expect(callback).not.toHaveBeenCalled()
+      expect(fetcher).toHaveBeenCalledOnce()
+    },
+  )
+
+  it.each([true, false])('does not execute either of two tool calls when the SDK receives maxTokens (stream=%s)', async (stream) => {
+    const calls = [
+      { id: 'call_1', type: 'function', function: { name: 'first_lookup', arguments: '{"x":1}' } },
+      { id: 'call_2', type: 'function', function: { name: 'second_lookup', arguments: '{"x":2}' } },
+    ]
+    const data = stream ? sse([event({ tool_calls: calls.map((call, index) => ({ ...call, index })) }), event({}, 'length')])
+      : JSON.stringify(wire([{ index: 0, message: { tool_calls: calls }, finish_reason: 'length' }]))
+    const fetcher = vi.fn(async () => response(data))
+    const first = vi.fn(() => 'synthetic result')
+    const second = vi.fn(() => 'synthetic result')
+    const tools = [
+      tool({ name: 'first_lookup', description: 'First lookup', inputSchema: z.object({ x: z.number() }), callback: first }),
+      tool({ name: 'second_lookup', description: 'Second lookup', inputSchema: z.object({ x: z.number() }), callback: second }),
+    ]
+    const model = new ExaoneModel({ apiKey: 'key', stream, fetch: fetcher as typeof fetch })
+    const agent = new Agent({ model, tools, printer: false, retryStrategy: null })
+    await expect(agent.invoke('Run two lookups')).rejects.toBeInstanceOf(MaxTokensError)
+    expect(first).not.toHaveBeenCalled()
+    expect(second).not.toHaveBeenCalled()
+    expect(fetcher).toHaveBeenCalledOnce()
   })
 
   it('keeps multiple non-streaming tool calls even though they lack index fields', async () => {
@@ -557,6 +633,28 @@ describe('ExaoneModel', () => {
     expect(result.message.content[0]).toMatchObject({
       toolUseId: testCase.expectedId, name: testCase.expectedName, input: testCase.expectedInput,
     })
+  })
+
+  it('preserves literal tags and escaped characters in streamed tool arguments and later history', async () => {
+    const text = 'const tag = "<think>";\nconst path = "C:\\temp\\sample";\nreturn "</tool_call>";\n'
+    const json = JSON.stringify({ text })
+    const frames = Array.from(json, (part, index) => event({
+      tool_calls: [{ index: 0, ...(index === 0 ? { id: 'call_1', type: 'function' } : {}), function: { ...(index === 0 ? { name: 'inspect_text' } : {}), arguments: part } }],
+    }))
+    const fetcher = vi.fn(async () => response(fetcher.mock.calls.length === 1
+      ? sse([...frames, event({}, 'tool_calls')])
+      : sse([event({ content: 'done' }), event({}, 'stop')])))
+    const model = new ExaoneModel({ apiKey: 'key', fetch: fetcher as typeof fetch })
+    const first = await aggregate(model)
+    expect(first.message.content).toContainEqual(expect.objectContaining({ type: 'toolUseBlock', toolUseId: 'call_1', name: 'inspect_text', input: { text } }))
+
+    const toolResult = Message.fromMessageData({ role: 'user', content: [{ toolResult: { toolUseId: 'call_1', status: 'success', content: [{ text: 'ok' }] } }] })
+    await collect(model, [user(), first.message, toolResult])
+    const init = (fetcher.mock.calls as unknown as [string, RequestInit][])[1]![1]
+    const body = JSON.parse(String(init.body)) as { messages: Array<{ role: string; tool_calls?: Array<{ function: { arguments: string } }> }> }
+    const call = body.messages.find((message) => message.role === 'assistant')?.tool_calls?.[0]
+    expect(call).toBeDefined()
+    expect(JSON.parse(call!.function.arguments)).toEqual({ text })
   })
 
   it('executes only the tool whose name matches the combined streamed fragments', async () => {
@@ -724,30 +822,22 @@ describe('ExaoneModel', () => {
     await expect(collect(model)).rejects.toThrow(ModelError)
   })
 
-  it.each([
-    ['{"query":"EXAONE"', '{"query":"EXAONE"}'],
-    ['{"query":"EXAONE","options":{"limit":2', '{"query":"EXAONE","options":{"limit":2}}'],
-    ['{"query":"brace } inside string"', '{"query":"brace } inside string"}'],
-    ['{"query":"escaped \\" } quote"', '{"query":"escaped \\" } quote"}'],
-    ['{"items":[1,2', '{"items":[1,2]}'],
-    ['{"query":"EXAONE",}', '{"query":"EXAONE"}'],
-    ['{"items":[1,2,]}', '{"items":[1,2]}'],
-  ])('completes supported tool argument syntax for hosted 2.5: %s', async (raw, expected) => {
-    const data = sse([event({ tool_calls: [{ index: 0, id: 'id', function: { name: 'fn', arguments: raw } }] }), event({}, 'tool_calls')])
-    const model = new ExaoneModel({ apiKey: 'key', fetch: transport(response(data)) })
-    const result = await collect(model)
-    const toolInput = result.find((item) => item.type === 'modelContentBlockDeltaEvent' && item.delta.type === 'toolUseInputDelta')
-    expect(toolInput).toMatchObject({ delta: { input: expected } })
-  })
-
-  it.each(['{"count":12', '{"query":"EXAONE",}'])('rejects malformed self-hosted tool arguments %s without emitting a tool call', async (raw) => {
-    const data = sse([event({ tool_calls: [{ index: 0, id: 'id', function: { name: 'fn', arguments: raw } }] }), event({}, 'tool_calls')])
-    const model = new ExaoneModel({ apiKey: 'key', baseURL: 'http://localhost:8000/v1', fetch: transport(response(data)) })
-    const events = []
-    const readStream = async () => { for await (const item of model.stream([user()])) events.push(item) }
-    await expect(readStream()).rejects.toThrow('invalid tool call arguments')
-    expect(events.some((item) => item.type === 'modelContentBlockStartEvent' && item.start?.type === 'toolUseStart')).toBe(false)
-  })
+  const malformedToolInputs = ['{"count":12', '{"items":[1,2', '{"query":"EXAONE",}', '{"items":[1,2,]}']
+  it.each(malformedToolInputs.flatMap((raw) => [false, true].map((hosted) => ({ raw, hosted }))))(
+    'rejects malformed tool arguments $raw before emitting a tool call (hosted=$hosted)',
+    async ({ raw, hosted }) => {
+      const data = sse([event({ tool_calls: [{ index: 0, id: 'id', function: { name: 'fn', arguments: raw } }] }), event({}, 'tool_calls')])
+      const model = new ExaoneModel({
+        apiKey: 'key',
+        fetch: transport(response(data)),
+        ...(hosted ? {} : { baseURL: 'http://localhost:8000/v1' }),
+      })
+      const events = []
+      const readStream = async () => { for await (const item of model.stream([user()])) events.push(item) }
+      await expect(readStream()).rejects.toThrow('invalid tool call arguments')
+      expect(events.some((item) => item.type === 'modelContentBlockStartEvent' && item.start?.type === 'toolUseStart')).toBe(false)
+    },
+  )
 
   it('rejects truncated streams, missing finish reason, and multiple choices', async () => {
     const truncated = new ExaoneModel({ apiKey: 'key', fetch: transport(response('data: {"choices":[]}\n\n')) })

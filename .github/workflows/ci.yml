@@ -548,16 +548,17 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '20.3.0'
-      - name: Test the package and fixtures on the minimum Node.js version
+      - name: Test the provider on the minimum Node.js version
         run: |
           mkdir "$RUNNER_TEMP/langchain-node20"
           cp -R packages/langchain-exaone-ts/src packages/langchain-exaone-ts/test packages/langchain-exaone-ts/vitest.config.ts "$RUNNER_TEMP/langchain-node20/"
           cd "$RUNNER_TEMP/langchain-node20"
           printf '%s\n' '{"private":true,"type":"module"}' > package.json
           npm install --ignore-scripts --engine-strict "$RUNNER_TEMP"/langchain-exaone-*.tgz '@langchain/core@${{ matrix.core-version }}' vitest@2.1.9 zod@4.6.6
-          node --input-type=module -e "import { ChatExaone } from 'langchain-exaone'; if (new ChatExaone({ apiKey: 'package-check' })._llmType() !== 'exaone') process.exit(1)"
-          node -e "const { ChatExaone } = require('langchain-exaone'); if (new ChatExaone({ apiKey: 'package-check' })._llmType() !== 'exaone') process.exit(1)"
-          ./node_modules/.bin/vitest run
+          node --input-type=module -e "import { ChatExaone, toolCallRecovery } from 'langchain-exaone'; if (new ChatExaone({ apiKey: 'package-check' })._llmType() !== 'exaone' || typeof toolCallRecovery !== 'function') process.exit(1)"
+          node -e "const { ChatExaone, toolCallRecovery } = require('langchain-exaone'); if (new ChatExaone({ apiKey: 'package-check' })._llmType() !== 'exaone' || typeof toolCallRecovery !== 'function') process.exit(1)"
+          # The full LangChain CI jobs install the Agent dependencies used by recovery.test.ts.
+          ./node_modules/.bin/vitest run --exclude test/recovery.test.ts
 
   strands-node22:
     runs-on: ubuntu-24.04

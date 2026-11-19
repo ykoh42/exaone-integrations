@@ -36,6 +36,19 @@ class ExaoneError(Exception):
         self.finish_reason = finish_reason
 
 
+class MalformedToolCallError(ExaoneError):
+    """Internal diagnostic for opt-in, pre-output tool-call recovery."""
+
+    def __init__(self, call_id: str, name: str, arguments: str, detail: str) -> None:
+        super().__init__("Invalid tool arguments in EXAONE response")
+        self.call_id = call_id
+        self.name = name
+        self.arguments = arguments
+        self.detail = detail
+        self.buffered_events: list[dict[str, Any]] = []
+        self.usage: dict[str, Any] = {}
+
+
 class ExaoneThrottledError(ModelThrottledException):
     """HTTP 429 with the sanitized response attached as ``details``."""
 

@@ -266,6 +266,29 @@ describe("ChatExaone", () => {
     expect(requestBody(fetcher).messages).toMatchObject([{ role: "assistant", tool_calls: rawCalls }]);
   });
 
+  it("reports invalid JSON without copying argument text into the error", async () => {
+    const raw = '{"private":"synthetic-secret",}';
+    const fetcher = mockFetch([completion({ role: "assistant", content: "", tool_calls: [
+      { id: "bad", type: "function", function: { name: "lookup", arguments: raw } },
+    ] })]);
+    const result = await new ChatExaone({ apiKey: "fixture-key", fetch: fetcher }).invoke("Use lookup.");
+
+    expect(result.tool_calls).toEqual([]);
+    expect(result.invalid_tool_calls).toHaveLength(1);
+    expect(result.invalid_tool_calls?.[0]).toMatchObject({ id: "bad", name: "lookup", args: raw });
+    expect(result.invalid_tool_calls?.[0]?.error).toMatch(/^Invalid JSON at UTF-16 offset \d+\.$|^Arguments were not valid JSON\.$/);
+    expect(result.invalid_tool_calls?.[0]?.error).not.toContain("synthetic-secret");
+  });
+
+  it("reports the end position of an unfinished JSON argument", async () => {
+    const raw = '{"amount":';
+    const fetcher = mockFetch([completion({ role: "assistant", content: "", tool_calls: [
+      { id: "bad", type: "function", function: { name: "transfer", arguments: raw } },
+    ] })]);
+    const result = await new ChatExaone({ apiKey: "fixture-key", fetch: fetcher }).invoke("Use transfer.");
+    expect(result.invalid_tool_calls?.[0]?.error).toBe(`Unexpected end of JSON at UTF-16 offset ${raw.length}.`);
+  });
+
   it.each(["null", "false", "[]", '"value"', "1"])(
     "treats non-object JSON tool arguments %s as an invalid tool call",
     async (args) => {
@@ -1064,6 +1087,29 @@ describe("ChatExaone", () => {
     expect(chunks.map((chunk) => chunk.additional_kwargs.reasoning_content).filter(Boolean)).toEqual(["Think"]);
     expect(final.tool_calls).toEqual([{ id: "call-1", name: "lookup", args: { key: "x" }, type: "tool_call" }]);
     expect(final.usage_metadata).toMatchObject({ input_tokens: 4, output_tokens: 6, total_tokens: 10 });
+  });
+
+  it.each(["v0", "v1"] as const)("preserves literal tags and escaped characters in streamed %s tool arguments and later history", async (outputVersion) => {
+    const text = 'const tag = "<think>";\nconst path = "C:\\temp\\sample";\nreturn "</tool_call>";\n';
+    const json = JSON.stringify({ text });
+    const frames: unknown[] = Array.from(json, (part, index) => ({ choices: [{ index: 0, delta: { tool_calls: [{
+      index: 0, ...(index === 0 ? { id: "call-1", type: "function" } : {}),
+      function: { ...(index === 0 ? { name: "inspect_text" } : {}), arguments: part },
+    }] } }] }));
+    frames.push({ choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] });
+    const fetcher = mockFetch([sseResponse(frames), completion({ role: "assistant", content: "done" })]);
+    const model = new ChatExaone({ apiKey: "fixture-key", fetch: fetcher, outputVersion });
+    const chunks: AIMessageChunk[] = [];
+    for await (const chunk of await model.stream("Inspect the text.")) chunks.push(chunk);
+    const message = chunks.reduce((left, right) => left.concat(right));
+    expect(message.tool_calls).toEqual([{ id: "call-1", name: "inspect_text", args: { text }, type: "tool_call" }]);
+    expect(message.invalid_tool_calls).toEqual([]);
+
+    await model.invoke([new HumanMessage("Inspect the text."), message, new ToolMessage({ content: "ok", tool_call_id: "call-1" })]);
+    const body = requestBody(fetcher) as { messages: Array<{ role: string; tool_calls?: Array<{ function: { arguments: string } }> }> };
+    const call = body.messages.find((item) => item.role === "assistant")?.tool_calls?.[0];
+    expect(call).toBeDefined();
+    expect(JSON.parse(call!.function.arguments)).toEqual({ text });
   });
 
   it.each([

@@ -22,11 +22,13 @@ import type { ModelProfile } from "@langchain/core/language_models/profile";
 import type { Runnable } from "@langchain/core/runnables";
 import { convertToOpenAITool } from "@langchain/core/utils/function_calling";
 import { getEnvironmentVariable } from "@langchain/core/utils/env";
-import { ExaoneAPIError, safeTransportError } from "./errors.js";
+import { ExaoneAPIError, redactSecret, redactSecretText, safeTransportError } from "./errors.js";
 import { convertMessagesToExaone } from "./messages.js";
 import { RETRYABLE_STATUSES, retryDelayMs, sleepWithSignal } from "./retry.js";
 import type { ChatExaoneCallOptions, ChatExaoneParams } from "./types.js";
 import { getModelProfile } from "./profiles.js";
+import { InvalidToolArguments, checkToolCompletion, isToolCompletion, recoveryForCall, recoveryJsonDiagnostic } from "./recovery-context.js";
+import type { RecoveryContext } from "./recovery-context.js";
 
 const DEFAULT_BASE_URL = "https://api.exaone.ai/v1";
 const DEFAULT_MODEL = "k-exaone_v2.5";
@@ -65,6 +67,7 @@ type ChatCompletionChunk = {
     index?: number;
     finish_reason?: string | null;
     matched_stop?: string | null;
+    logprobs?: unknown;
     delta?: Record<string, unknown>;
   }>;
   usage?: Record<string, unknown>;
@@ -175,8 +178,51 @@ export class ChatExaone extends BaseChatModel<
     return "chat";
   }
 
+  override invoke(input: BaseLanguageModelInput, options?: Partial<ChatExaoneCallOptions>): Promise<AIMessageChunk<ExaoneMessageStructure>> {
+    const recovery = recoveryForCall();
+    const response = super.invoke(input, options);
+    if (recovery?.expectedTool === undefined) return response;
+    const { expectedTool, failedUsage } = recovery;
+
+    return response.then((message) => {
+      // SDK cache hits skip the transport validators, and ToolStrategy can consume the call.
+      const call = message.tool_calls?.[0];
+      if (message.response_metadata.model_provider !== "exaone" || message.invalid_tool_calls?.length ||
+          message.tool_calls?.length !== 1 || call?.name !== expectedTool || !call.id || !isRecord(call.args)) {
+        throw new Error("EXAONE recovery did not return the original tool call.");
+      }
+      checkToolCompletion(message.response_metadata.finish_reason, message.additional_kwargs.refusal);
+      const { id, name, content, additional_kwargs, tool_call_chunks, usage_metadata } = message;
+      const fields = {
+        ...(id === undefined ? {} : { id }),
+        ...(name === undefined ? {} : { name }),
+        content,
+        additional_kwargs,
+        tool_calls: [call],
+        ...(usage_metadata === undefined ? {} : { usage_metadata }),
+        response_metadata: {
+          ...message.response_metadata,
+          exaone_tool_call_recovery: {
+            attempts: 1, ...(failedUsage === undefined ? {} : { failed_usage: failedUsage }),
+          },
+        },
+      };
+      // Keep retry usage out of the SDK's cached message; it belongs to this invocation.
+      const corrected = (AIMessageChunk.isInstance(message)
+        ? new AIMessageChunk<ExaoneMessageStructure>({ ...fields, ...(tool_call_chunks === undefined ? {} : { tool_call_chunks }) })
+        : new AIMessage<ExaoneMessageStructure>(fields)) as typeof message;
+      recovery.validated = true;
+      return corrected;
+    });
+  }
+
   override _identifyingParams(): Record<string, unknown> {
-    return { model: this.model, baseUrl: this.baseUrl, ...this.defaultParams, ...this.modelKwargs };
+    const recovery = recoveryForCall();
+    return {
+      model: this.model, baseUrl: this.baseUrl, ...this.defaultParams, ...this.modelKwargs,
+      // A cache hit bypasses the raw response validators in this model.
+      ...(recovery ? { _exaone_tool_call_recovery: [2, recovery.expectedTool ?? null, recovery.required ?? false] } : {}),
+    };
   }
 
   override _combineLLMOutput(...outputs: Array<Record<string, unknown> | undefined>): Record<string, unknown> | undefined {
@@ -260,6 +306,8 @@ export class ChatExaone extends BaseChatModel<
     options: this["ParsedCallOptions"]
   ): Promise<ChatResult> {
     const body = this.requestBody(messages, options, false);
+    const recovery = recoveryForCall();
+    const tools = recovery && recoverableTools(body, recovery);
     const response = await this.request(body, options.signal, options.maxRetries ?? this.retryCount);
     const payload = await readJsonResponse<ChatCompletionResponse>(response, this.#apiKey);
     if (payload.error !== undefined && payload.error !== null) {
@@ -269,6 +317,10 @@ export class ChatExaone extends BaseChatModel<
     if (!Array.isArray(choices) || choices.length === 0) {
       throw new Error("EXAONE Chat Completions must return at least one choice.");
     }
+    options.signal?.throwIfAborted();
+    if (recovery?.expectedTool !== undefined) {
+      validateReplacement(choices, recovery.expectedTool);
+    } else if (tools) validateRecoveryResponse(choices, this.#apiKey, tools, payload.usage);
     const usage = mapUsage(payload.usage);
     const generations = choices.map((choice) => {
       if (!isRecord(choice) || !isRecord(choice.message)) {
@@ -306,11 +358,17 @@ export class ChatExaone extends BaseChatModel<
     runManager?: Parameters<BaseChatModel<ChatExaoneCallOptions>["_streamResponseChunks"]>[2]
   ): AsyncGenerator<ChatGenerationChunk> {
     const body = this.requestBody(messages, options, true);
+    const recovery = recoveryForCall();
+    const tools = recovery && recoverableTools(body, recovery);
     const response = await this.request(body, options.signal, options.maxRetries ?? this.retryCount);
     if (!response.body) throw new Error("EXAONE returned an empty streaming response.");
 
     const seenMetadata = new Map<string, unknown>();
-    for await (const payload of parseSse<ChatCompletionChunk>(response.body, options.signal, this.#apiKey)) {
+    const stream = parseSse<ChatCompletionChunk>(response.body, options.signal, this.#apiKey, recovery !== undefined);
+    const payloads = recovery && tools
+      ? guardRecoveryStream(stream, response, this.#apiKey, tools, recovery)
+      : stream;
+    for await (const payload of payloads) {
       for (const originalChunk of streamResponseChunks(payload, response, this.#apiKey)) {
         deduplicateStreamMetadata(originalChunk.message.response_metadata, seenMetadata);
         const generationChunk = (options.outputVersion ?? this.outputVersion) === "v1"
@@ -853,6 +911,261 @@ function validateAssistantTextFields(source: Record<string, unknown>): void {
   }
 }
 
+function validateReplacement(choices: unknown[], name: string): void {
+  const choice = choices[0];
+  if (choices.length !== 1 || !isRecord(choice) || !isRecord(choice.message) ||
+      !isToolCompletion(choice.finish_reason, choice.message.refusal) ||
+      !Array.isArray(choice.message.tool_calls) || choice.message.tool_calls.length !== 1) {
+    throw new Error("EXAONE recovery must return exactly one completed tool call.");
+  }
+  const [call] = toolCallEntries(choice.message.tool_calls, "response");
+  if (call && typeof call.id === "string" && call.id && isRecord(call.function) &&
+      call.function.name === name && typeof call.function.arguments === "string") {
+    try {
+      if (isRecord(JSON.parse(call.function.arguments))) return;
+    } catch { /* Do not propagate parser errors containing the raw input. */ }
+  }
+  throw new Error("EXAONE recovery must return the original tool with a valid JSON object.");
+}
+
+function recoverableTools(body: Record<string, unknown>, recovery: RecoveryContext): ReadonlySet<string> {
+  const names = new Set<string>();
+  for (const tool of Array.isArray(body.tools) ? body.tools : []) {
+    if (isRecord(tool) && isRecord(tool.function) && typeof tool.function.name === "string") names.add(tool.function.name);
+  }
+  const choice = body.tool_choice;
+  const named = isRecord(choice) && choice.type === "function" && isRecord(choice.function) ? choice.function.name : undefined;
+  const expected = recovery.expectedTool;
+  if (expected !== undefined && (!names.has(expected) || (recovery.required ? choice !== "required" : named !== expected))) {
+    throw new Error("The effective EXAONE request does not allow the tool correction.");
+  }
+  if (choice == null || choice === "auto" || choice === "required") return names;
+  return new Set(typeof named === "string" && names.has(named) ? [named] : []);
+}
+
+function validateRecoveryResponse(choices: unknown[], key: string, tools: ReadonlySet<string>, usage?: unknown): void {
+  if (choices.length > 1) {
+    validateMultipleRecoveryChoices(choices, key, tools, usage);
+    return;
+  }
+  if (choices.length !== 1 || !isRecord(choices[0])) return;
+  const choice = choices[0];
+  if (!isRecord(choice.message)) return;
+  const message = choice.message;
+  if (!Array.isArray(message.tool_calls)) return;
+  validateAssistantTextFields(message);
+  const entries = toolCallEntries(message.tool_calls, "response");
+  if (!entries.length) return;
+  checkToolCompletion(choice.finish_reason, message.refusal);
+  const malformed = entries.flatMap(malformedRecoveryCall);
+  if (!malformed.length) return;
+  if (malformed.length !== 1 || entries.length !== 1) {
+    throw new Error("Cannot recover a response with multiple tool calls.");
+  }
+  const call = malformed[0]!;
+  throwInvalidRecoveryCall(call, message, key, tools, usage);
+}
+
+function validateMultipleRecoveryChoices(choices: unknown[], key: string, tools: ReadonlySet<string>, usage: unknown): void {
+  for (const choice of choices) {
+    try {
+      validateRecoveryResponse([choice], key, tools, usage);
+    } catch (error) {
+      if (error instanceof InvalidToolArguments) throw new Error("Cannot recover multiple completion choices.");
+      throw error;
+    }
+  }
+}
+
+interface MalformedRecoveryCall { id: string; name: string; args: string; diagnostic: string }
+
+function malformedRecoveryCall(call: Record<string, unknown>): MalformedRecoveryCall[] {
+  if (!isRecord(call.function) || typeof call.function.arguments !== "string") return [];
+  // Preserve the SDK's existing treatment of empty arguments (notably for zero-argument tools).
+  if (!call.function.arguments.trim()) return [];
+  try {
+    JSON.parse(call.function.arguments);
+    return [];
+  } catch (error) {
+    if (typeof call.id !== "string" || !call.id || typeof call.function.name !== "string" || !call.function.name) {
+      throw new Error("Cannot recover malformed tool arguments without a call ID and name.");
+    }
+    return [{ id: call.id, name: call.function.name, args: call.function.arguments,
+      diagnostic: recoveryJsonDiagnostic(error, call.function.arguments) }];
+  }
+}
+
+function throwInvalidRecoveryCall(
+  call: MalformedRecoveryCall, message: Record<string, unknown>, key: string, tools: ReadonlySet<string>, usage: unknown
+): never {
+  if ([call.args, call.name, call.id].some((value) => redactSecretText(value, key) !== value)) {
+    throw new Error("Cannot recover tool arguments containing credentials.");
+  }
+  if (!tools.has(call.name)) throw new Error("The effective EXAONE request does not allow the tool correction.");
+  if (message.audio != null || message.annotations != null || message.function_call != null) {
+    throw new Error("Cannot recover tool calls with unsupported assistant content.");
+  }
+  const reasoning = responseReasoning(message, "assistant");
+  throw new InvalidToolArguments({
+    id: call.id,
+    name: call.name,
+    arguments: call.args,
+    diagnostic: call.diagnostic,
+    content: typeof message.content === "string" ? message.content : "",
+    ...(reasoning === undefined ? {} : { reasoning }),
+    ...(isRecord(usage) ? { usage: redactSecret(usage, key) as Record<string, unknown> } : {}),
+  });
+}
+
+async function* guardRecoveryStream(
+  stream: AsyncIterable<ChatCompletionChunk>, response: Response, key: string, tools: ReadonlySet<string>, recovery: RecoveryContext,
+): AsyncGenerator<ChatCompletionChunk> {
+  const router = new RecoveryPayloadRouter(Boolean(recovery.bufferResponse) || recovery.expectedTool !== undefined);
+  for await (const payload of stream) yield* router.accept(payload);
+  const payloads = router.finish();
+  validateRecoveryPayloads(payloads, response, key, tools, recovery.expectedTool, router);
+  yield* payloads;
+}
+
+function validateRecoveryPayloads(
+  payloads: ChatCompletionChunk[], response: Response, key: string, tools: ReadonlySet<string>, expectedTool: string | undefined,
+  router: RecoveryPayloadRouter,
+): void {
+  const state: RecoveryStreamState = { message: { content: "", reasoning_content: "" }, calls: new Map() };
+  for (const payload of payloads) {
+    // Validate every fragment with the same parser used by the ordinary path.
+    for (const _chunk of streamResponseChunks(payload, response, key)) { /* validation only */ }
+    accumulateRecoveryPayload(state, payload);
+  }
+  state.message.tool_calls = [...state.calls.values()];
+  if (router.refusal !== undefined) state.message.refusal = router.refusal;
+  const choices = [{ finish_reason: router.finishReason, message: state.message }];
+  if (expectedTool !== undefined) {
+    if (state.multipleIdFragments) throw new Error("EXAONE recovery returned an ambiguous streamed tool call ID.");
+    validateReplacement(choices, expectedTool);
+    return;
+  }
+  try {
+    validateRecoveryResponse(choices, key, tools, state.usage);
+  } catch (error) {
+    if (error instanceof InvalidToolArguments && state.multipleIdFragments) {
+      throw new Error("Cannot recover a tool call with ambiguous streamed ID fragments.");
+    }
+    if (error instanceof InvalidToolArguments && router.exposed) {
+      throw new Error("EXAONE returned malformed tool arguments after output was exposed.");
+    }
+    throw error;
+  }
+}
+
+class RecoveryPayloadRouter {
+  exposed = false;
+  refusal?: string;
+  finishReason?: string;
+  private leading: ChatCompletionChunk[] = [];
+  private readonly pending: ChatCompletionChunk[] = [];
+
+  constructor(private readonly bufferResponse: boolean) {}
+
+  accept(payload: ChatCompletionChunk): ChatCompletionChunk[] {
+    let choice = payload.error == null ? getStreamChoice(payload.choices) : undefined;
+    const delta = choice?.delta ?? {};
+    if (choice && this.recordCompletion(choice.finish_reason, delta.refusal)) {
+      const { finish_reason: _finish, ...rest } = choice;
+      choice = rest;
+      payload = { ...payload, choices: [choice] };
+    }
+    if (this.bufferResponse) {
+      this.pending.push(payload);
+      return [];
+    }
+    const hasTools = Array.isArray(delta.tool_calls) ? delta.tool_calls.length > 0 : delta.tool_calls != null;
+    if (!hasStreamOutput(delta)) {
+      if (hasTools || this.pending.length) this.pending.push(payload);
+      else if (this.exposed || payload.error != null) return [payload];
+      else this.leading.push(payload);
+      return [];
+    }
+    if (choice && (hasTools || (this.pending.length && choice.finish_reason != null))) {
+      const [early, tool] = splitRecoveryPayload(payload, choice, delta);
+      this.pending.push(tool);
+      payload = early;
+    }
+    this.exposed = true;
+    return [...this.leading.splice(0), payload];
+  }
+
+  finish(): ChatCompletionChunk[] { return [...this.leading, ...this.pending]; }
+
+  /** Record the finish reason and report repetitions before the SDK merges chunks. */
+  private recordCompletion(finish: string | null | undefined, refusal: unknown): boolean {
+    if (typeof refusal === "string" && refusal) this.refusal = refusal;
+    if (finish == null) return false;
+    if (this.finishReason === undefined) {
+      this.finishReason = finish;
+      return false;
+    }
+    if (this.finishReason !== finish) throw new Error("EXAONE returned conflicting stream finish reasons.");
+    return true;
+  }
+}
+
+function hasStreamOutput(delta: Record<string, unknown>): boolean {
+  return ["content", "reasoning_content", "reasoning", "refusal", "function_call"].some((key) => Boolean(delta[key]));
+}
+
+function splitRecoveryPayload(
+  payload: ChatCompletionChunk, choice: NonNullable<ChatCompletionChunk["choices"]>[number], delta: Record<string, unknown>,
+): [ChatCompletionChunk, ChatCompletionChunk] {
+  const { tool_calls, ...earlyDelta } = delta;
+  const { usage: _usage, ...earlyPayload } = payload;
+  const { finish_reason: _finish, matched_stop: _stop, ...earlyChoice } = choice;
+  const { logprobs: _logprobs, ...heldChoice } = choice;
+  return [
+    { ...earlyPayload, choices: [{ ...earlyChoice, delta: earlyDelta }] },
+    { ...payload, choices: [{ ...heldChoice, delta: tool_calls === undefined ? {} : { tool_calls } }] },
+  ];
+}
+
+interface RecoveryStreamState {
+  message: Record<string, unknown>;
+  calls: Map<number, { id: string; type: string; function: { name: string; arguments: string } }>;
+  usage?: unknown;
+  multipleIdFragments?: boolean;
+}
+
+function accumulateRecoveryPayload(state: RecoveryStreamState, payload: ChatCompletionChunk): void {
+  if (payload.usage != null) state.usage = payload.usage;
+  if (!Array.isArray(payload.choices) || payload.choices.length !== 1) return;
+  const choice = payload.choices[0];
+  if (!choice || !isRecord(choice.delta)) return;
+  const delta = choice.delta;
+  if (typeof delta.content === "string") state.message.content = String(state.message.content) + delta.content;
+  const reasoning = responseReasoning(delta, "stream delta");
+  if (reasoning) state.message.reasoning_content = String(state.message.reasoning_content) + reasoning;
+  for (const key of ["audio", "annotations", "function_call"]) {
+    if (delta[key] != null) state.message[key] = delta[key];
+  }
+  if (Array.isArray(delta.tool_calls)) delta.tool_calls.forEach((fragment) => accumulateRecoveryCall(state, fragment));
+}
+
+function accumulateRecoveryCall(state: RecoveryStreamState, fragment: unknown): void {
+  if (!isRecord(fragment) || typeof fragment.index !== "number" || !Number.isSafeInteger(fragment.index) || fragment.index < 0) {
+    throw new Error("EXAONE streamed tool call is missing a valid index.");
+  }
+  const call = state.calls.get(fragment.index) ?? { id: "", type: "function", function: { name: "", arguments: "" } };
+  if (typeof fragment.id === "string") {
+    if (call.id && fragment.id) state.multipleIdFragments = true;
+    call.id += fragment.id;
+  }
+  if (typeof fragment.type === "string") call.type = fragment.type;
+  if (isRecord(fragment.function)) {
+    if (typeof fragment.function.name === "string") call.function.name += fragment.function.name;
+    if (typeof fragment.function.arguments === "string") call.function.arguments += fragment.function.arguments;
+  }
+  state.calls.set(fragment.index, call);
+}
+
 function createAssistantMessage(
   source: Record<string, unknown>,
   response: ChatCompletionResponse,
@@ -891,7 +1204,9 @@ function parseAssistantToolCalls(rawCalls: Record<string, unknown>[]): ReturnTyp
   for (const raw of rawCalls) {
     const [parsed, rejected] = defaultToolCallParser([raw]);
     if (rejected.length) {
-      invalid.push(...rejected);
+      const fn = raw.function as { arguments: string };
+      const detail = invalidJsonDetail(fn.arguments);
+      invalid.push(...rejected.map((call) => ({ ...call, error: detail })));
       continue;
     }
     const fn = raw.function as { name: string; arguments: string };
@@ -902,6 +1217,20 @@ function parseAssistantToolCalls(rawCalls: Record<string, unknown>[]): ReturnTyp
     }
   }
   return [valid, invalid];
+}
+
+function invalidJsonDetail(args: string): string {
+  try {
+    JSON.parse(args);
+  } catch (error) {
+    // Runtime error messages may include argument text; retain only the numeric position.
+    if (error instanceof SyntaxError && error.message === "Unexpected end of JSON input") {
+      return `Unexpected end of JSON at UTF-16 offset ${args.length}.`;
+    }
+    const match = error instanceof SyntaxError ? /\bposition (\d+)\b/.exec(error.message) : null;
+    if (match) return `Invalid JSON at UTF-16 offset ${match[1]}.`;
+  }
+  return "Arguments were not valid JSON.";
 }
 
 function responseMetadata(
@@ -1020,7 +1349,9 @@ async function readErrorBody(response: Response, apiKey: string): Promise<unknow
   }
 }
 
-async function* parseSse<T>(body: ReadableStream<Uint8Array>, signal: AbortSignal | undefined, apiKey: string): AsyncGenerator<T> {
+async function* parseSse<T>(
+  body: ReadableStream<Uint8Array>, signal: AbortSignal | undefined, apiKey: string, requireDone = false,
+): AsyncGenerator<T> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
@@ -1045,8 +1376,7 @@ async function* parseSse<T>(body: ReadableStream<Uint8Array>, signal: AbortSigna
       yield* parsed.events;
       if (parsed.done) return;
       if (streamEnded) {
-        const finalPayload = ssePayload(buffer);
-        if (finalPayload && finalPayload !== "[DONE]") yield parseResponseJson<T>(finalPayload);
+        yield* finalSseFrame<T>(buffer, requireDone);
         return;
       }
     }
@@ -1058,6 +1388,13 @@ async function* parseSse<T>(body: ReadableStream<Uint8Array>, signal: AbortSigna
     if (!streamEnded) await reader.cancel().catch(() => undefined);
     reader.releaseLock();
   }
+}
+
+function finalSseFrame<T>(buffer: string, requireDone: boolean): T[] {
+  const payload = ssePayload(buffer);
+  if (payload === "[DONE]") return [];
+  if (requireDone) throw new Error("EXAONE recovery stream ended before [DONE].");
+  return payload ? [parseResponseJson<T>(payload)] : [];
 }
 
 function normalizeSseChunk(text: string, pendingCR: boolean): { text: string; pendingCR: boolean } {
