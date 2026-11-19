@@ -1,15 +1,13 @@
 # Roadmap
 
-The linked issues track acceptance criteria. See [model and server compatibility](COMPATIBILITY.md) for model-card configurations and known limits.
+See [model and server compatibility](COMPATIBILITY.md) for model-card configurations and known limits.
 
 ## Self-hosted endpoints
 
-- [K-EXAONE 2.0 compatibility](https://github.com/ykoh42/exaone-integrations/issues/6)
-- [EXAONE 4.5 compatibility](https://github.com/ykoh42/exaone-integrations/issues/7)
-- [Verify both models on running inference servers](https://github.com/ykoh42/exaone-integrations/issues/8)
+- Verify K-EXAONE 2.0 on vLLM and SGLang.
+- Verify EXAONE 4.5 on vLLM and SGLang, including image input.
 
 ## Reasoning and tools
 
-- [Recover misplaced reasoning](https://github.com/ykoh42/exaone-integrations/issues/3)
-- [Evaluate schema-guided tool argument recovery](https://github.com/ykoh42/exaone-integrations/issues/4)
-- [Preserve streamed tool calls](https://github.com/ykoh42/exaone-integrations/issues/5)
+- Evaluate misplaced reasoning in model output.
+- Verify Strands cancellation during tool approval with a released SDK containing the upstream fix.
