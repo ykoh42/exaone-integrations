@@ -189,7 +189,7 @@ export function convertMessagesToExaone(messages: BaseMessage[]): ExaoneRequestM
 }
 
 function formatMessage(message: BaseMessage): ExaoneRequestMessage {
-  const type = message.getType();
+  const type = message.type;
   const multimodal = type === "human" ? userContent(message) : undefined;
   const { text, reasoning } = multimodal === undefined ? textFromContent(message, type === "ai") : { text: "", reasoning: "" };
   const result: ExaoneRequestMessage = {

@@ -9,7 +9,7 @@ Python 3.10 or newer and Node.js 22 or newer are required. Create an environment
 ```bash
 cd packages/strands-exaone-py/examples/strands-cli
 python3 -m venv .venv
-.venv/bin/python -m pip install 'strands-exaone' 'strands-harness~=0.3.4'
+.venv/bin/python -m pip install 'strands-exaone' 'strands-harness~=0.4.0'
 npm install --no-package-lock
 export EXAONE_API_KEY='your-api-key'
 ```

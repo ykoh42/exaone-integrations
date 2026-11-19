@@ -176,7 +176,7 @@ const agent = new Agent({
 await agent.invoke('Use the tool to get the number, then add 3.')
 ```
 
-The provider assembles streamed tool-call arguments and validates each completed call before exposing it to Strands. Hosted and self-hosted endpoints follow the same rules. Nonblank arguments must be a valid JSON object, and blank arguments follow Strands' rules. The Harness validates the object against the tool schema. The provider accepts text, reasoning, tool calls, and text or JSON tool results. Unsupported content types and reasoning signatures in the received history are rejected.
+The provider assembles streamed tool-call arguments and validates each completed call before exposing it to Strands. Hosted and self-hosted endpoints follow the same rules. Nonblank arguments must be a valid JSON object, and blank arguments follow Strands' rules. The Harness validates the object against the tool schema. The provider accepts text, reasoning, tool calls, and text or JSON tool results. Unsupported content types and reasoning signatures in the received history are rejected. Strands SDK 1.25 may restore unrecognized session data as `UnknownBlock`. These blocks stay in the SDK session and are omitted from EXAONE requests.
 
 Because Chat Completions tool messages have no separate status field, tool results marked as errors are sent with an `[ERROR] ` prefix. Successful results are sent without a prefix.
 

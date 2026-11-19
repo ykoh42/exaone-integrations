@@ -2,8 +2,13 @@ import type { ImageBlock, Message, StreamOptions, ToolResultBlock } from '@stran
 
 type WireMessage = Record<string, unknown>
 
+function modelContent<T extends { readonly type: string }>(blocks: readonly T[]): T[] {
+  // SDK 1.25 retains unrecognized blocks in restored sessions for serialization only.
+  return blocks.filter((block) => block.type !== 'unknownBlock')
+}
+
 function toolResult(block: ToolResultBlock): WireMessage {
-  const content = block.content.map((part) => {
+  const content = modelContent(block.content).map((part) => {
     switch (part.type) {
       case 'textBlock': return part.text
       case 'jsonBlock': return JSON.stringify(part.json)
@@ -13,11 +18,11 @@ function toolResult(block: ToolResultBlock): WireMessage {
   return { role: 'tool', tool_call_id: block.toolUseId, content: block.status === 'error' ? `[ERROR] ${content}` : content }
 }
 
-function assistantMessage(message: Message): WireMessage {
+function assistantMessage(blocks: Message['content']): WireMessage {
   const text: string[] = []
   const reasoning: string[] = []
   const toolCalls: WireMessage[] = []
-  for (const block of message.content) {
+  for (const block of blocks) {
     switch (block.type) {
       case 'textBlock': text.push(block.text); break
       case 'reasoningBlock':
@@ -49,10 +54,10 @@ function imagePart(block: ImageBlock): WireMessage {
   return { type: 'image_url', image_url: { url } }
 }
 
-function userMessages(message: Message): WireMessage[] {
+function userMessages(blocks: Message['content']): WireMessage[] {
   const results: WireMessage[] = []
   const content: WireMessage[] = []
-  for (const block of message.content) {
+  for (const block of blocks) {
     switch (block.type) {
       case 'textBlock': content.push({ type: 'text', text: block.text }); break
       case 'imageBlock': content.push(imagePart(block)); break
@@ -87,8 +92,10 @@ function systemMessages(system: StreamOptions['systemPrompt']): WireMessage[] {
 export function formatMessages(messages: Message[], options?: StreamOptions): WireMessage[] {
   const result: WireMessage[] = systemMessages(options?.systemPrompt)
   for (const message of messages) {
-    if (message.role === 'assistant') result.push(assistantMessage(message))
-    else if (message.role === 'user') result.push(...userMessages(message))
+    const blocks = modelContent(message.content)
+    if (!blocks.length && message.content.length) continue
+    if (message.role === 'assistant') result.push(assistantMessage(blocks))
+    else if (message.role === 'user') result.push(...userMessages(blocks))
     else throw new TypeError('Unsupported EXAONE message role')
   }
   return result

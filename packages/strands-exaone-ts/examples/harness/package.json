@@ -8,8 +8,8 @@
     "check": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
-    "@strands-agents/harness": "~0.3.4",
-    "@strands-agents/sdk": "1.24.0",
+    "@strands-agents/harness": "~0.4.0",
+    "@strands-agents/sdk": "1.25.0",
     "strands-exaone": "file:../..",
     "tsx": "^4.23.13",
     "zod": "^4.6.6"

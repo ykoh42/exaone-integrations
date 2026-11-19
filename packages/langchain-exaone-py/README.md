@@ -16,7 +16,7 @@ export EXAONE_API_KEY='your-api-key'
 
 ## Install
 
-The package requires Python 3.10 or newer and `langchain-core` 1.3.3 or newer within the 1.x line. Install it from PyPI:
+The package requires Python 3.10 or newer and `langchain-core` 1.3.3 or newer within the 1.x line. On Python 3.10, the installer selects a compatible Core version from 1.7.x or earlier. Core 1.8 and newer require Python 3.11 or newer. Install the provider from PyPI:
 
 ```bash
 pip install -U langchain-exaone

@@ -418,7 +418,7 @@ describe("tool-call recovery", () => {
       const calls = messages.flatMap((message: any) => message.tool_calls ?? []);
       expect(calls).toHaveLength(1);
       expect(calls[0]).toMatchObject({ id: "corrected", name: "record", args: { amount: 123 } });
-      const results = messages.filter((message: any) => message.getType() === "tool");
+      const results = messages.filter((message: any) => message.type === "tool");
       expect(results).toHaveLength(1);
       expect(results[0].tool_call_id).toBe("corrected");
       expect(JSON.stringify(messages)).not.toContain("failure-only-content");
@@ -460,7 +460,7 @@ describe("tool-call recovery", () => {
             if (mode === "invoke") {
               const state = await fixture.agent.invoke(input);
               return state.messages.map((message: any) => ({
-                type: message.getType(), content: message.content,
+                type: message.type, content: message.content,
                 tool_calls: message.tool_calls, invalid_tool_calls: message.invalid_tool_calls,
               }));
             }
@@ -468,7 +468,7 @@ describe("tool-call recovery", () => {
             const messages = [];
             for await (const [message] of stream) {
               const item = message as AIMessage;
-              messages.push({ type: message.getType(), content: message.content,
+              messages.push({ type: message.type, content: message.content,
                 tool_calls: item.tool_calls, invalid_tool_calls: item.invalid_tool_calls });
             }
             return messages;
@@ -586,8 +586,8 @@ describe("tool-call recovery", () => {
       const stream = await agent.stream({ messages: [{ role: "user", content: "Record 123." }] }, { streamMode: "messages" });
       const messages = [];
       for await (const [message] of stream) {
-        messages.push({ type: message.getType(), content: message.content,
-          ...(message.getType() === "ai" ? { tool_calls: (message as AIMessage).tool_calls } : {}) });
+        messages.push({ type: message.type, content: message.content,
+          ...(message.type === "ai" ? { tool_calls: (message as AIMessage).tool_calls } : {}) });
       }
       return messages;
     };

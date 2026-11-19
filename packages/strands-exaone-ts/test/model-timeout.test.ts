@@ -20,6 +20,7 @@ afterEach(() => vi.useRealTimers())
 describe('request timeout lifetime', () => {
   it.each(['fetch', 'metadata'] as const)('keeps a standalone Node process alive until a stalled %s times out', (stage) => {
     const path = fileURLToPath(new URL('../dist/index.js', import.meta.url))
+    const cwd = fileURLToPath(new URL('..', import.meta.url))
     const script = `
       import { pathToFileURL } from 'node:url';
       import { Message } from '@strands-agents/sdk';
@@ -34,7 +35,7 @@ describe('request timeout lifetime', () => {
       try { for await (const _event of model.stream([Message.fromMessageData({role:'user',content:[{text:'hi'}]})])) {} }
       catch (error) { process.stdout.write(error.name); }
     `
-    expect(execFileSync(process.execPath, ['--input-type=module', '-e', script, path], { encoding: 'utf8', timeout: 3000 })).toBe('TimeoutError')
+    expect(execFileSync(process.execPath, ['--input-type=module', '-e', script, path], { cwd, encoding: 'utf8', timeout: 3000 })).toBe('TimeoutError')
   })
 
   it('waits through the full unsigned 32-bit range without an early timeout', async () => {
