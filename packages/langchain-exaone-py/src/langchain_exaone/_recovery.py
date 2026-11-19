@@ -19,7 +19,6 @@ class RecoveryState:
 
     failure: tuple[MalformedToolArguments, AIMessage] | None = field(default=None, repr=False)
     expected_tool: str | None = None
-    buffer_response: bool = False
     required: bool = False
 
 
@@ -67,7 +66,7 @@ def _contains_secret(text: str, secret: str) -> bool:
 
 
 class MalformedToolArguments(ValueError):
-    """A single malformed tool invocation, detected before response exposure."""
+    """A single malformed tool invocation, withheld from the SDK."""
 
     def __init__(self, message: AIMessage, detail: str, secret: str) -> None:
         super().__init__("EXAONE returned malformed tool arguments")
@@ -126,9 +125,7 @@ def check_tool_completion(has_calls: bool, finish: Any, refusal: Any) -> None:
         raise ValueError("EXAONE returned tool calls without a completed tool response")
 
 
-def check_message(
-    message: AIMessage, secret: str, *, tools: frozenset[str], allow_retry: bool = True, exposed: bool = False
-) -> None:
+def check_message(message: AIMessage, secret: str, *, tools: frozenset[str], allow_retry: bool = True) -> None:
     """Signal a recoverable syntax error without exposing it as a model result."""
     invalid = message.invalid_tool_calls
     check_tool_completion(
@@ -156,8 +153,6 @@ def check_message(
     state = recovery_state.get()
     if state is None:
         return
-    if exposed:
-        raise ValueError("EXAONE returned malformed tool arguments after output was exposed")
     error = MalformedToolArguments(message, detail, secret)
     state.failure = error, message
     raise error from None
@@ -209,7 +204,8 @@ class RecoveryStream:
         self.state = state
         self.tools = tools
         self.exposed = False
-        self.buffer_response = state.buffer_response or state.expected_tool is not None
+        self.content: list[str] = []
+        self.reasoning: list[str] = []
         self.leading: list[dict[str, Any]] = []
         self.pending: list[dict[str, Any]] = []
         self.refusal = False
@@ -222,25 +218,31 @@ class RecoveryStream:
             choice = {**choice}
             del choice["finish_reason"]
             payload = {**payload, "choices": [choice]}
-        if self.buffer_response:
-            self.pending.append(payload)
-            return []
+        self._remember_text(delta)
         has_tools = bool(delta.get("tool_calls"))
         has_output = any(delta.get(field) for field in ("content", "reasoning_content", "reasoning", "refusal"))
         if not has_output:
-            if has_tools or self.pending:
+            if has_tools or self.pending or payload.get("usage") is not None:
                 self.pending.append(payload)
             elif self.exposed or payload.get("error") is not None:
                 return [payload]
             else:
                 self.leading.append(payload)
             return []
-        if has_tools or (self.pending and choice.get("finish_reason") is not None):
+        if has_tools or payload.get("usage") is not None or (self.pending and choice.get("finish_reason") is not None):
             payload, tools = _split_recovery_payload(payload, choice, delta)
             self.pending.append(tools)
         self.exposed = True
         leading, self.leading = self.leading, []
         return [*leading, payload]
+
+    def _remember_text(self, delta: dict[str, Any]) -> None:
+        if not self.tools or self.state.expected_tool is not None:
+            return
+        if isinstance(content := delta.get("content"), str) and content:
+            self.content.append(content)
+        if isinstance(thought := delta.get("reasoning_content") or delta.get("reasoning"), str) and thought:
+            self.reasoning.append(thought)
 
     def finish(self, complete: bool) -> list[dict[str, Any]]:
         if not complete:
@@ -282,13 +284,11 @@ def _split_recovery_payload(
     return early, {**payload, "choices": [tool_choice]}
 
 
-def check_stream(payloads: list[dict[str, Any]], secret: str, router: RecoveryStream) -> None:
+def check_stream(payloads: list[dict[str, Any]], secret: str, router: RecoveryStream) -> str | None:
     """Check complete streamed tool arguments, not intermediate fragments."""
     calls: dict[int, dict[str, str]] = {}
     id_fragments: dict[int, int] = {}
     finish, refusal, expected = router.finish_reason, router.refusal, router.state.expected_tool
-    content: list[str] = []
-    reasoning: list[str] = []
     usage: dict[str, Any] | None = None
     for payload in payloads:
         if isinstance(payload.get("usage"), dict):
@@ -304,11 +304,6 @@ def check_stream(payloads: list[dict[str, Any]], secret: str, router: RecoverySt
         delta = choice.get("delta")
         if not isinstance(delta, dict):
             return _incomplete_recovery_stream(expected)
-        if isinstance(delta.get("content"), str):
-            content.append(delta["content"])
-        thought = delta.get("reasoning_content") or delta.get("reasoning")
-        if isinstance(thought, str):
-            reasoning.append(thought)
         fragments = delta.get("tool_calls") or []
         if not isinstance(fragments, list):
             return _incomplete_recovery_stream(expected)
@@ -333,7 +328,7 @@ def check_stream(payloads: list[dict[str, Any]], secret: str, router: RecoverySt
         if any(count > 1 for count in id_fragments.values()):
             raise ValueError("EXAONE recovery returned an ambiguous streamed tool call ID")
         check_replacement(expected, list(calls.values()), finish, refusal)
-        return
+        return next(iter(calls.values()))["args"]
     if any(count > 1 and _has_malformed_json([calls[index]["args"]]) for index, count in id_fragments.items()):
         raise ValueError("EXAONE returned malformed arguments with an ambiguous streamed tool call ID")
     if len(calls) > 1 and _has_malformed_json([call["args"] for call in calls.values()]):
@@ -342,9 +337,54 @@ def check_stream(payloads: list[dict[str, Any]], secret: str, router: RecoverySt
         return
     call = next(iter(calls.values()))
     message = AIMessage(
-        content="".join(content),
-        additional_kwargs={"reasoning_content": "".join(reasoning)} if reasoning else {},
+        content="".join(router.content),
+        additional_kwargs={"reasoning_content": "".join(router.reasoning)} if router.reasoning else {},
         response_metadata={"finish_reason": finish, "usage": usage},
         invalid_tool_calls=[{"id": call["id"], "name": call["name"], "args": call["args"], "error": None}],
     )
-    check_message(message, secret, tools=router.tools, exposed=router.exposed)
+    check_message(message, secret, tools=router.tools)
+    return None
+
+
+def correction_prompt(name: str, raw: str, diagnostic: str) -> str:
+    data = json.dumps({"raw_arguments": raw, "parse_error": diagnostic}, ensure_ascii=False, separators=(",", ":"))
+    return (
+        "Error: Invalid tool-call JSON. Tool not executed. The previous tool call is a placeholder.\n"
+        f"{data}\nCall {name} once with a valid JSON object."
+    )
+
+
+def correction_request(body: dict[str, Any], failed: AIMessage, error: MalformedToolArguments) -> dict[str, Any]:
+    call = failed.invalid_tool_calls[0]
+    name, ident = call["name"], call["id"]
+    assistant = {
+        "role": "assistant",
+        "content": failed.content,
+        "tool_calls": [{"id": ident, "type": "function", "function": {"name": name, "arguments": "{}"}}],
+    }
+    if reasoning := failed.additional_kwargs.get("reasoning_content"):
+        assistant["reasoning_content"] = reasoning
+    feedback = {"role": "tool", "tool_call_id": ident, "content": correction_prompt(name, call["args"], error.detail)}
+    return {
+        **body,
+        "messages": [*body["messages"], assistant, feedback],
+        "tool_choice": {"type": "function", "function": {"name": name}},
+    }
+
+
+def replace_arguments(payloads: list[dict[str, Any]], call: Any, arguments: str) -> None:
+    """Replace the original fragments while keeping their original call ID and envelope."""
+    first = True
+    for payload in payloads:
+        _, delta = _stream_parts(payload)
+        if calls := delta.pop("tool_calls", None):
+            if first:
+                first = False
+                delta["tool_calls"] = [
+                    {
+                        "id": call["id"],
+                        "index": calls[0]["index"],
+                        "type": "function",
+                        "function": {"name": call["name"], "arguments": arguments},
+                    }
+                ]

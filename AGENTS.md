@@ -8,6 +8,6 @@
 - Keep the provider's community-maintained status clear.
 - Cover protocol changes with representative fixtures. Distinguish fixture coverage from live API observations and report unverified behavior.
 - Run live EXAONE checks serially within the account's limits. Use synthetic inputs and avoid load tests. Never commit credentials, real response text, or reasoning; logprobs may contain generated tokens.
-- Retry only before output is exposed; never replay a partially delivered stream or tool call.
+- Never replay a partially delivered stream or tool call. Transport retries run only before that request exposes output. An opted-in correction may make a separate request after text or reasoning has streamed, provided the original tool call has been withheld. Emit only its validated replacement arguments under the original tool call ID.
 - Record unexpected API behavior and its reproduction conditions in local `docs/`; keep credential-redacted request and response captures there when the user requests them. These working files must stay out of Git.
 - See `CONTRIBUTING.md` and the package READMEs for current setup and verification commands.

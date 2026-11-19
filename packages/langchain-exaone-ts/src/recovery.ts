@@ -1,17 +1,9 @@
 import { AIMessage, ToolMessage } from "@langchain/core/messages";
 import type { BaseMessage } from "@langchain/core/messages";
-import { InvalidToolArguments, checkToolCompletion, withRecovery } from "./recovery-context.js";
+import { InvalidToolArguments, checkToolCompletion, correctionPrompt, namedChoiceUnsupported, withRecovery } from "./recovery-context.js";
 import type { RecoveryContext } from "./recovery-context.js";
-import { ExaoneAPIError } from "./errors.js";
 
 type Choice = "auto" | "none" | "required" | { type: "function"; function: { name: string } };
-
-function namedChoiceUnsupported(error: unknown): boolean {
-  if (!(error instanceof ExaoneAPIError) || ![400, 422, 501].includes(error.status)) return false;
-  if (error.code === "unsupported_tool_choice" || (error.param === "tool_choice" && error.code === "unsupported_value")) return true;
-  return /named (?:function|tool)|(?:function|object)[- ](?:type|valued) tool_choice/i.test(error.message) &&
-    /not support|unsupported/i.test(error.message);
-}
 
 function checkModelResponse(message: AIMessage): AIMessage {
   const metadata = message.response_metadata;
@@ -31,13 +23,8 @@ async function invokeCorrection<T>(name: string, retry: (choice: Choice) => Prom
   }
 }
 
-/**
- * Return configuration for LangChain's `createMiddleware`.
- *
- * A single malformed tool call is retried once before prior output is exposed.
- * Use bufferResponse to withhold the entire response until validation.
- */
-export function toolCallRecovery({ bufferResponse = false }: { bufferResponse?: boolean } = {}) {
+/** Enable correction for a single malformed JSON tool call. */
+export function toolCallRecovery() {
   return {
     name: "ExaoneToolCallRecovery",
     async wrapModelCall<T extends {
@@ -47,7 +34,7 @@ export function toolCallRecovery({ bufferResponse = false }: { bufferResponse?: 
       handler: (request: T) => AIMessage | Promise<AIMessage>,
     ): Promise<AIMessage> {
       try {
-        return checkModelResponse(await withRecovery({ bufferResponse }, async () => handler(request)));
+        return checkModelResponse(await withRecovery({}, async () => handler(request)));
       } catch (error) {
         if (!(error instanceof InvalidToolArguments)) throw error;
         request.runtime?.signal?.throwIfAborted();
@@ -57,12 +44,10 @@ export function toolCallRecovery({ bufferResponse = false }: { bufferResponse?: 
           additional_kwargs: call.reasoning === undefined ? {} : { reasoning_content: call.reasoning },
           tool_calls: [{ id: call.id, name: call.name, args: {} }],
         });
-        const diagnostic = JSON.stringify({ raw_arguments: call.arguments, parse_error: call.diagnostic });
         const result = new ToolMessage({
           tool_call_id: call.id,
           status: "error",
-          content: "Error: Invalid tool-call JSON. Tool not executed. The previous tool call is a placeholder.\n" +
-            `${diagnostic}\nCall ${call.name} once with a valid JSON object.`,
+          content: correctionPrompt(call),
         });
         const retry = async (toolChoice: Choice) => {
           const state: RecoveryContext = {

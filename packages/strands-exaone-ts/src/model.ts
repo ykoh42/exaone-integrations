@@ -46,7 +46,7 @@ interface AccumulatedCall {
 }
 type TextKind = 'reasoning' | 'text'
 
-function recoverableTools(request: Record<string, unknown>, expected?: string, required = false): ReadonlySet<string> {
+function recoverableTools(request: Record<string, unknown>): ReadonlySet<string> {
   const tools = Array.isArray(request.tools) ? request.tools : []
   const names = new Set<string>()
   for (const tool of tools) {
@@ -54,9 +54,6 @@ function recoverableTools(request: Record<string, unknown>, expected?: string, r
   }
   const choice = request.tool_choice
   const named = isRecord(choice) && choice.type === 'function' && isRecord(choice.function) ? choice.function.name : undefined
-  if (expected !== undefined && (!names.has(expected) || (required ? choice !== 'required' : named !== expected))) {
-    throw new ModelError('The effective EXAONE request does not allow the tool correction')
-  }
   if (choice == null || choice === 'auto' || choice === 'required') return names
   return new Set(typeof named === 'string' && names.has(named) ? [named] : [])
 }
@@ -375,7 +372,7 @@ class EventMapper {
 
   accept(event: WireResponse, streaming: boolean): ModelStreamEvent[] {
     this.validateResponse(event)
-    this.responseMetadata.accept(event)
+    if (this.recoveryToolName === undefined) this.responseMetadata.accept(event)
     if (isRecord(event.usage)) this.usage = event.usage
     const result: ModelStreamEvent[] = []
     for (const choice of event.choices ?? []) result.push(...this.acceptChoice(choice, streaming))
@@ -387,10 +384,42 @@ class EventMapper {
     if ((event.choices?.length ?? 0) > 1) throw new ModelError('EXAONE returned multiple choices, which Strands cannot represent')
   }
 
+  private readonly recoveryText: string[] = []
+  private readonly recoveryReasoning: string[] = []
+
+  recoveryMessages(error: InvalidToolArgumentsError): Record<string, unknown>[] {
+    const assistant: Record<string, unknown> = {
+      role: 'assistant', content: this.recoveryText.join(''),
+      tool_calls: [{ id: error.callId, type: 'function', function: { name: error.toolName, arguments: '{}' } }],
+    }
+    if (this.recoveryReasoning.length) assistant.reasoning_content = this.recoveryReasoning.join('')
+    const diagnostic = JSON.stringify({ raw_arguments: error.rawArguments, parse_error: error.diagnostic })
+    return [assistant, {
+      role: 'tool', tool_call_id: error.callId,
+      content: '[ERROR] Error: Invalid tool-call JSON. Tool not executed. The previous tool call is a placeholder.\n'
+        + diagnostic + '\nCall ' + error.toolName + ' once with a valid JSON object.',
+    }]
+  }
+
+  replaceToolArguments(correction: EventMapper, key: string): void {
+    if (correction.finished === 'length') {
+      this.calls.clear()
+      this.finished = 'length'
+      return
+    }
+    correction.finish(key)
+    this.calls.values().next().value!.arguments = correction.calls.values().next().value!.arguments
+  }
+
   private acceptChoice(choice: WireChoice, streaming: boolean): ModelStreamEvent[] {
     if ((choice.index ?? 0) !== 0) throw new ModelError('EXAONE returned multiple choices, which Strands cannot represent')
     const delta = choice.delta ?? choice.message ?? {}
-    const result = this.textEvents('reasoning', reasoningText(delta))
+    const reasoning = reasoningText(delta)
+    if (this.recoveryTools?.size) {
+      if (reasoning) this.recoveryReasoning.push(reasoning)
+      if (delta.content) this.recoveryText.push(delta.content)
+    }
+    const result = this.textEvents('reasoning', reasoning)
     this.acceptRefusal(delta.refusal)
     if (typeof delta.content === 'string' && delta.content.trim().length > 0) this.hasNonWhitespaceContent = true
     result.push(...this.textEvents('text', delta.content))
@@ -499,7 +528,23 @@ function validTokenCount(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
 }
 
-function metadataEvent(mapper: EventMapper, response: Response, key: string): { event: ModelStreamEvent; metadata: ExaoneMetadata } {
+type MetadataEvent = Extract<ModelStreamEvent, { type: 'modelMetadataEvent' }>
+
+function modelUsage(usage: Record<string, unknown> | undefined): MetadataEvent['usage'] {
+  const prompt = usage?.prompt_tokens
+  const completion = usage?.completion_tokens
+  const total = usage?.total_tokens
+  if (!validTokenCount(prompt) || !validTokenCount(completion) || !validTokenCount(total)) return undefined
+  const result: NonNullable<MetadataEvent['usage']> = { inputTokens: prompt, outputTokens: completion, totalTokens: total }
+  if (isRecord(usage?.prompt_tokens_details)) {
+    const { cached_tokens: read, cache_write_tokens: write } = usage.prompt_tokens_details
+    if (validTokenCount(read)) result.cacheReadInputTokens = read
+    if (validTokenCount(write)) result.cacheWriteInputTokens = write
+  }
+  return result
+}
+
+function metadataEvent(mapper: EventMapper, response: Response, key: string): { event: MetadataEvent; metadata: ExaoneMetadata } {
   const usage = mapper.usage
   const metadata: ExaoneMetadata = { status: response.status, rateLimit: rateHeaders(response.headers) }
   const requestId = response.headers.get('x-request-id')
@@ -507,26 +552,26 @@ function metadataEvent(mapper: EventMapper, response: Response, key: string): { 
   if (usage) metadata.usage = usage
   metadata.response = mapper.responseMetadata.snapshot()
   const safeMetadata = redactMetadata(metadata, key) as ExaoneMetadata
-  const prompt = usage?.prompt_tokens
-  const completion = usage?.completion_tokens
-  const total = usage?.total_tokens
-  const event: ModelStreamEvent = { type: 'modelMetadataEvent', trace: { exaone: safeMetadata } }
-  if (validTokenCount(prompt) && validTokenCount(completion) && validTokenCount(total)) {
-    event.usage = { inputTokens: prompt, outputTokens: completion, totalTokens: total }
-    const details = usage?.prompt_tokens_details
-    if (details && typeof details === 'object' && !Array.isArray(details)) {
-      const { cached_tokens: read, cache_write_tokens: write } = details as Record<string, unknown>
-      if (validTokenCount(read)) event.usage.cacheReadInputTokens = read
-      if (validTokenCount(write)) event.usage.cacheWriteInputTokens = write
-    }
-  }
+  const event: MetadataEvent = { type: 'modelMetadataEvent', trace: { exaone: safeMetadata } }
+  const counts = modelUsage(usage)
+  if (counts) event.usage = counts
   return { event, metadata: safeMetadata }
 }
 
-/** Include a hidden failed attempt in SDK usage when both responses report it. */
-function addRecoveryUsage(event: ModelStreamEvent, metadata: ExaoneMetadata, failed: { usage?: Record<string, unknown> }): void {
-  metadata.recovery = { failedAttempts: [failed] }
-  if (event.type !== 'modelMetadataEvent' || !event.usage || !failed.usage) return
+/** Keep the original response metadata and include both requests in SDK usage. */
+function addRecoveryUsage(event: MetadataEvent, metadata: ExaoneMetadata, failed: InvalidToolArgumentsError,
+  correction: { usage: Record<string, unknown> | undefined }, key: string,
+): void {
+  const correctionUsage = redactMetadata(correction.usage, key) as Record<string, unknown> | undefined
+  metadata.recovery = {
+    failedAttempts: [failed.usage === undefined ? {} : { usage: failed.usage }],
+    ...(correctionUsage === undefined ? {} : { correctionUsage }),
+  }
+  const original = event.usage
+  const corrected = modelUsage(correction.usage)
+  if (!corrected) return
+  event.usage = corrected
+  if (!original || !failed.usage) return
   const previous = failed.usage
   const counts = [previous.prompt_tokens, previous.completion_tokens, previous.total_tokens]
   if (!counts.every(validTokenCount)) return
@@ -639,6 +684,21 @@ async function fetchResponse(config: ExaoneModelConfig, body: string | undefined
   }
 }
 
+function namedChoiceUnsupported(error: unknown): boolean {
+  if (!(error instanceof ExaoneAPIError) || ![400, 422, 501].includes(error.status)) return false
+  if (error.code === 'unsupported_tool_choice' || (error.param === 'tool_choice' && error.code === 'unsupported_value')) return true
+  return /named (?:function|tool)|(?:function|object)[- ](?:type|valued) tool_choice/i.test(error.message) &&
+    /not support|unsupported/i.test(error.message)
+}
+
+function correctionError(error: unknown): unknown {
+  // The agent's transport retry may not replay the original invocation.
+  if (error instanceof ModelNetworkError || error instanceof ModelThrottledError || error instanceof ContextWindowOverflowError) {
+    return new ModelError('EXAONE tool-call correction failed', { cause: error })
+  }
+  return error
+}
+
 /**
  * EXAONE model provider for Strands Agents.
  *
@@ -655,11 +715,6 @@ async function fetchResponse(config: ExaoneModelConfig, body: string | undefined
 export class ExaoneModel extends Model<ExaoneModelConfig> {
   #config: ExaoneModelConfig
   #recovery = false
-  #bufferRecovery = false
-  #recoveryToolName: string | undefined
-  #recoveryRequiresAny = false
-  #failedAttempt: { usage?: Record<string, unknown> } | undefined
-  #deferredMetadataCallback: ExaoneModelConfig['onMetadata']
   constructor(config: ExaoneModelConfig = {}) {
     super()
     this.#config = { modelId: 'k-exaone_v2.5', ...copyConfig(config) }
@@ -695,61 +750,19 @@ export class ExaoneModel extends Model<ExaoneModelConfig> {
       }),
     })
   }
-  /**
-   * Stream an EXAONE response as Strands model events.
-   *
-   * @param messages - Conversation history to send to the model.
-   * @param options - System prompt, tools, structured output, and cancellation options.
-   * @yields Strands model events translated from the response.
-   */
   /** @internal Create an isolated model for recovery without changing the agent's model. */
-  recoveryModel(failedAttempt?: { usage?: Record<string, unknown>; toolName: string; required: boolean }, bufferResponse = false): ExaoneModel {
+  recoveryModel(): ExaoneModel {
     const model = new ExaoneModel(this.#config)
     model.#recovery = true
-    model.#bufferRecovery = bufferResponse || this.#config.stream === false || failedAttempt !== undefined
-    model.#failedAttempt = failedAttempt === undefined ? undefined : failedAttempt.usage === undefined ? {} : { usage: failedAttempt.usage }
-    model.#recoveryToolName = failedAttempt?.toolName
-    model.#recoveryRequiresAny = failedAttempt?.required ?? false
-    if (model.#bufferRecovery) {
-      model.#deferredMetadataCallback = model.#config.onMetadata
-      delete model.#config.onMetadata
-    }
     return model
   }
 
+  /** Stream an EXAONE response as Strands model events. */
   override async *stream(messages: Message[], options?: StreamOptions): AsyncGenerator<ModelStreamEvent> {
-    if (!this.#bufferRecovery) { yield* this.#stream(messages, options); return }
-    const events: ModelStreamEvent[] = []
-    const timeout = requestTimeout(this.#config.timeoutMs)
-    try {
-      for await (const event of this.#stream(messages, options)) events.push(event)
-      yield* this.#deliverEvents(events, options?.cancelSignal, timeout?.signal)
-    } catch (error) {
-      if (timeout?.signal.aborted) throw timeout.signal.reason
-      if (error instanceof InvalidToolArgumentsError) error.events = events
-      throw error
-    } finally { timeout?.dispose() }
-  }
-
-  async *#deliverEvents(events: ModelStreamEvent[], cancellation?: AbortSignal, timeout?: AbortSignal): AsyncGenerator<ModelStreamEvent> {
-    for (const event of events) {
-      cancellation?.throwIfAborted()
-      timeout?.throwIfAborted()
-      if (event.type === 'modelMetadataEvent' && this.#deferredMetadataCallback) {
-        const trace = isRecord(event.trace) ? event.trace : {}
-        if (!isRecord(trace.exaone)) throw new ModelError('EXAONE response metadata is missing')
-        const signals = [cancellation, timeout].filter((item): item is AbortSignal => item != null)
-        await notifyMetadata(this.#deferredMetadataCallback, structuredClone(trace.exaone) as unknown as ExaoneMetadata, AbortSignal.any(signals))
-      }
-      yield event
-    }
-  }
-
-  async *#stream(messages: Message[], options?: StreamOptions): AsyncGenerator<ModelStreamEvent> {
     const config = { ...this.#config }
     const key = getKey(config)
     const request = requestParameters(config, messages, options)
-    const recoveryTools = this.#recovery ? recoverableTools(request, this.#recoveryToolName, this.#recoveryRequiresAny) : undefined
+    const recoveryTools = this.#recovery ? recoverableTools(request) : undefined
     const body = requestBody(request)
     const controller = new AbortController()
     const timeout = requestTimeout(config.timeoutMs)
@@ -760,7 +773,7 @@ export class ExaoneModel extends Model<ExaoneModelConfig> {
       signal.throwIfAborted()
       if (!response.ok) await throwHttpError(response, key, signal)
       const mapper = new EventMapper(key, !!options?.toolSpecs?.length && !!options.toolChoice && 'tool' in options.toolChoice,
-        recoveryTools, this.#recoveryToolName)
+        recoveryTools)
       const messageStartState = { started: false }
       try {
         yield* withMessageStart(responseEvents(response, request.stream !== false, mapper), signal, messageStartState)
@@ -768,17 +781,66 @@ export class ExaoneModel extends Model<ExaoneModelConfig> {
         if (signal.aborted) throw signal.reason
         if (error instanceof ResponseReadError) {
           const cause = safeResponseReadCause(error.cause)
-          if (messageStartState.started && !this.#bufferRecovery) throw new ModelError('EXAONE response stream failed after output was exposed', { cause })
+          if (messageStartState.started) throw new ModelError('EXAONE response stream failed after output was exposed', { cause })
           throw new ModelNetworkError('EXAONE response stream failed', { cause })
         }
         throw error
       }
-      yield* withMessageStart(mapper.finish(key), signal, messageStartState)
+      const completed = await this.#finish(mapper, request, config, key, signal)
+      yield* withMessageStart(completed.events, signal, messageStartState)
       const metadata = metadataEvent(mapper, response, key)
-      if (this.#failedAttempt) addRecoveryUsage(metadata.event, metadata.metadata, this.#failedAttempt)
+      if (completed.correction) {
+        addRecoveryUsage(metadata.event, metadata.metadata, completed.correction.failure, completed.correction, key)
+      }
       if (config.onMetadata) await notifyMetadata(config.onMetadata, structuredClone(metadata.metadata), signal)
       signal.throwIfAborted()
       yield metadata.event
     } finally { timeout?.dispose(); controller.abort() }
   }
+
+  async #finish(mapper: EventMapper, request: Record<string, unknown>, config: ExaoneModelConfig, key: string, signal: AbortSignal) {
+    try {
+      return { events: mapper.finish(key) }
+    } catch (error) {
+      if (!(error instanceof InvalidToolArgumentsError)) throw error
+      const usage = await this.#correct(mapper, error, request, config, key, signal)
+      return { events: mapper.finish(key), correction: { usage, failure: error } }
+    }
+  }
+
+  async #correct(original: EventMapper, error: InvalidToolArgumentsError, request: Record<string, unknown>,
+    config: ExaoneModelConfig, key: string, signal: AbortSignal,
+  ): Promise<Record<string, unknown> | undefined> {
+    const corrected: Record<string, unknown> = {
+      ...request, messages: [...(request.messages as Record<string, unknown>[]), ...original.recoveryMessages(error)],
+      tool_choice: { type: 'function', function: { name: error.toolName } },
+    }
+    const send = async () => {
+      signal.throwIfAborted()
+      const body = requestBody(corrected)
+      const response = await sendWithRetry(config, signal, () => fetchResponse(config, body, key, signal))
+      if (!response.ok) await throwHttpError(response, key, signal)
+      return response
+    }
+    let response: Response
+    try { response = await send() } catch (rejection) {
+      if (!namedChoiceUnsupported(rejection)) throw correctionError(rejection)
+      corrected.tool_choice = 'required'
+      try { response = await send() } catch (failure) { throw correctionError(failure) }
+    }
+    const mapper = new EventMapper(key, corrected.tool_choice !== 'required', new Set(), error.toolName)
+    try {
+      for await (const _ of responseEvents(response, request.stream !== false, mapper)) signal.throwIfAborted()
+    } catch (failure) {
+      if (signal.aborted) throw signal.reason
+      if (failure instanceof ResponseReadError) {
+        throw new ModelError('EXAONE correction response stream failed', { cause: safeResponseReadCause(failure.cause) })
+      }
+      throw failure
+    }
+    signal.throwIfAborted()
+    original.replaceToolArguments(mapper, key)
+    return mapper.usage
+  }
+
 }

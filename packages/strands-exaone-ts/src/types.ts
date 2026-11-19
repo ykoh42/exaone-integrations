@@ -58,8 +58,8 @@ export interface ExaoneModelConfig extends BaseModelConfig {
  * Some fields can contain sensitive text or encoded data even after the API key is redacted.
  */
 export interface ExaoneMetadata {
-  /** Metadata for a failed model response hidden by opt-in tool-call recovery. */
-  recovery?: { failedAttempts: Array<{ usage?: Record<string, unknown> }> }
+  /** Per-request usage for opt-in tool-call recovery. */
+  recovery?: { failedAttempts: Array<{ usage?: Record<string, unknown> }>; correctionUsage?: Record<string, unknown> }
   /** Successful HTTP response status. */
   status: number
   /** Request ID from the response headers, when present. */

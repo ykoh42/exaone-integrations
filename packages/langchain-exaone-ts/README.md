@@ -147,21 +147,21 @@ const agent = await createDeepAgent({
 })
 ```
 
-Text and reasoning stream as they arrive. Tool chunks are released after the arguments have been checked. Recovery can retry one malformed call before any output is emitted. To wait for validation before streaming any part of the response, use `toolCallRecovery({ bufferResponse: true })`.
+Text and reasoning stream as they arrive. Tool arguments are checked before they are sent to the agent. If a single completed call contains broken JSON, the provider requests a correction and emits only the validated arguments under the original tool call ID.
 
 Recovery sends the original arguments and parser diagnostic in a matched tool-error message. The preceding assistant tool-call arguments use an explicitly identified `{}` placeholder. The tool runs only after the model returns a valid call. The system prompt, user messages and tool definitions are retained. An incomplete, filtered, or refused response cannot run a tool. Responses with multiple choices or tool calls are rejected if any call has malformed JSON. Server acceptance of this recovery exchange and successful correction depend on the endpoint and model.
 
 If LangChain's response cache is configured, the middleware uses a separate cache key for validated responses. The key is local to LangChain and is omitted from API requests.
 
-Recovery uses the effective EXAONE request after SDK middleware has applied tool selection. It stops before sending a correction if the tool was removed or the correction's tool choice was overridden. Register recovery after routing middleware that switches providers or makes its own model calls, so the correction applies to the selected EXAONE model call.
+Streaming recovery uses the effective EXAONE request after SDK middleware has applied tool selection. Streamed usage includes both attempts when the server reports both. With non-streaming model calls, the correction also passes through SDK middleware. Register recovery after routing middleware that switches providers or makes its own model calls, so the correction applies to the selected EXAONE model call.
 
 The tool result contains `raw_arguments` and `parse_error`. Diagnostic line and column numbers refer to the original argument text.
 
-Only the correction request selects the failed tool by name. If the endpoint explicitly rejects named tool choice before emitting a response, the middleware tries `tool_choice="required"` once. Recovery succeeds only with a completed reply containing exactly one call to the original tool with a valid JSON object as its arguments. The SDK still validates the tool schema before execution.
+Only the correction request selects the failed tool by name. If the endpoint explicitly rejects named tool choice before emitting a response, the provider tries `tool_choice="required"` once. Recovery succeeds only with a completed reply containing exactly one call to the original tool with a valid JSON object as its arguments. The SDK still validates the tool schema before execution.
 
 Empty or whitespace-only arguments follow LangChain's existing behavior and do not trigger recovery. LangChain may treat an empty streamed input as `{}` and run a zero-argument or defaulted tool; an empty input alone does not show whether the server omitted arguments. The middleware still rejects tool calls ending due to length.
 
-The failed model call is observable via LangChain error callbacks and tracing, even when recovery succeeds. Raw arguments are accessible to the middleware and sent back to the model, so apply your normal tracing and data-handling settings. When supplied by the server, usage for the failed attempt is recorded in the recovered assistant message's `response_metadata.exaone_tool_call_recovery.failed_usage`; standard usage fields still describe the successful call. In streaming runs, inspect the agent's `updates` stream or final state for this metadata; individual `messages` chunks can be emitted before middleware attaches it. Plain model calls and agents without the middleware retain their existing behavior.
+The recovered assistant message includes `response_metadata.exaone_tool_call_recovery`. For streams, `usage_metadata` combines the reported counts from both requests and the recovery metadata records `failed_usage` and `correction_usage` separately. `response_metadata.usage` belongs to the original response. For non-streaming calls, LangChain can report the failed attempt through error callbacks and tracing, and the returned message's usage describes the successful request. Tool-result feedback and tracing may contain model-generated arguments.
 
 LangChain can parse incomplete streamed JSON as valid tool arguments. If you dispatch tools yourself, reject `length` finishes and check the assembled `tool_call_chunks[].args` with `JSON.parse`.
 

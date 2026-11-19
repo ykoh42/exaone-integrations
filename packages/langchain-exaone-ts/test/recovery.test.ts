@@ -10,7 +10,7 @@ import { toolCallRecovery } from "../src/recovery.js";
 
 type Scenario = "normal" | "invalid" | "mixed" | "repeated" | "length" | "length-valid" | "length-empty" | "length-whitespace" | "split" | "repeated-id" |
   "empty" | "whitespace" | "empty-object" | "fallback" | "bad-request" | "no-tool" | "wrong-tool" | "extra-tool" | "blank" | "array" | "multiline" |
-  "tool-only" | "live-text" | "duplicate-finish";
+  "tool-only" | "live-text" | "duplicate-finish" | "legacy-original" | "legacy-correction";
 type TestToolChoice = "auto" | "required" | { type: "function"; function: { name: string } };
 const namedRecord = { type: "function", function: { name: "record" } };
 const multilineArguments = '{\n"note":"😀```","amount":123,,}';
@@ -24,7 +24,6 @@ function harness(
   options?: { strict: boolean; toolChoice: TestToolChoice },
   failedUsage?: Record<string, unknown>, apiKey = "fixture-key",
   emptyTool?: "zero" | "defaulted",
-  bufferResponse = true,
 ) {
   const requests: Array<Record<string, any>> = [];
   const executed: number[] = [];
@@ -63,7 +62,8 @@ function harness(
         start(controller) {
           controller.enqueue(encoder.encode(frame({ content: "Checking.", tool_calls: [{ ...calls![0], index: 0 }] })));
           releaseResponse = () => {
-            controller.enqueue(encoder.encode(`${frame({}, "tool_calls")}data: [DONE]\n\n`));
+            const usage = { choices: [], usage: { prompt_tokens: 4, completion_tokens: 6, total_tokens: 10 } };
+            controller.enqueue(encoder.encode(`${frame({}, "tool_calls")}data: ${JSON.stringify(usage)}\n\ndata: [DONE]\n\n`));
             controller.close();
             releaseResponse = undefined;
           };
@@ -83,8 +83,11 @@ function harness(
         frames.push({ id: "fixture", choices: [{ index: 0,
           delta: { tool_calls: [{ index: 0, ...(scenario === "repeated-id" ? { id: "original" } : {}), function: { arguments: "123,}" } }] } }] });
       } else {
+        const legacy = (scenario === "legacy-original" && n === 1) || (scenario === "legacy-correction" && n === 2);
         frames.push({ id: "fixture", choices: [{ index: 0,
-          delta: { tool_calls: calls.map((item, index) => ({ ...item, index })) } }] });
+          delta: { ...(scenario === "live-text" && n === 2 ? { content: "Private correction preamble." } : {}),
+            ...(legacy ? { content: "Synthetic text.", function_call: { name: "legacy", arguments: "{}" } } : {}),
+            tool_calls: calls.map((item, index) => ({ ...item, index })) } }] });
       }
     } else {
       frames.push({ id: "fixture", choices: [{ index: 0, delta: { content: "done" } }] });
@@ -93,6 +96,9 @@ function harness(
     if (n === 1 && scenario === "duplicate-finish") frames.push(terminal);
     frames.push(terminal);
     if (n === 1 && failedUsage) frames.push({ id: "fixture", choices: [], usage: failedUsage });
+    if (n === 2 && scenario === "live-text") {
+      frames.push({ choices: [], usage: { prompt_tokens: 7, completion_tokens: 8, total_tokens: 15 } });
+    }
     return new Response(`${frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join("")}data: [DONE]\n\n`,
       { headers: { "content-type": "text/event-stream" } });
   };
@@ -116,7 +122,7 @@ function harness(
   const agent = createAgent({ model: (wrapped ? model.withConfig({ tags: ["fixture"] }) : model) as typeof model,
     tools: [record], systemPrompt: "synthetic system",
     ...(checkpointer === undefined ? {} : { checkpointer }),
-    middleware: enabled ? [...(settings ? [settings] : []), createMiddleware(toolCallRecovery({ bufferResponse }))] : [] });
+    middleware: enabled ? [...(settings ? [settings] : []), createMiddleware(toolCallRecovery())] : [] });
   return { agent, requests, executed, finishResponse: () => releaseResponse?.() };
 }
 
@@ -270,31 +276,52 @@ describe("tool-call recovery", () => {
     },
   );
 
-  it("streams text before the tool result is known and never retries after exposure", async () => {
-    const { agent, requests, executed, finishResponse } = harness("live-text", true, false, undefined, undefined, undefined,
-      "fixture-key", undefined, false);
+  it("streams text immediately and completes the same message after correcting the tool", async () => {
+    const { agent, requests, executed, finishResponse } = harness("live-text");
     const events = await agent.stream({ messages: [{ role: "user", content: "Record 123." }] },
       { streamMode: "messages", signal: AbortSignal.timeout(4000) });
-    const received: unknown[] = [];
+    const textIds: Array<string | undefined> = [];
+    const toolIds: Array<string | undefined> = [];
+    const usage: unknown[] = [];
     try {
-      await expect(async () => {
-        for await (const event of events) {
-          received.push(event);
-          if (event[0].content === "Checking.") finishResponse();
+      for await (const [message] of events) {
+        expect(message.content).not.toBe("Private correction preamble.");
+        if ("usage_metadata" in message && message.usage_metadata) {
+          usage.push({ raw: message.response_metadata?.usage, combined: message.usage_metadata,
+            correction: message.response_metadata?.exaone_tool_call_recovery });
         }
-      }).rejects.toThrow("after output was exposed");
+        if (message.content === "Checking.") {
+          textIds.push(message.id);
+          finishResponse();
+        }
+        if ("tool_call_chunks" in message && Array.isArray(message.tool_call_chunks) && message.tool_call_chunks.length) {
+          toolIds.push(message.id);
+        }
+      }
     } finally {
       finishResponse();
     }
-    expect(JSON.stringify(received)).toContain("Checking.");
-    expect(JSON.stringify(received)).not.toContain("123,}");
-    expect(requests).toHaveLength(1);
+    expect(textIds).toHaveLength(1);
+    expect(toolIds).toEqual(textIds);
+    expect(requests).toHaveLength(3);
+    expect(executed).toEqual([123]);
+    expect(usage).toMatchObject([{ raw: { total_tokens: 10 }, combined: { total_tokens: 25 },
+      correction: { correction_usage: { total_tokens: 15 } } }]);
+  });
+
+  it.each(["legacy-original", "legacy-correction"] as const)("blocks mixed tool calls during %s", async (scenario) => {
+    const { agent, requests, executed } = harness(scenario);
+    await expect(async () => {
+      const events = await agent.stream({ messages: [{ role: "user", content: "Record 123." }] }, { streamMode: "messages" });
+      for await (const _event of events) { /* consume until validation fails */ }
+    }).rejects.toThrow(scenario === "legacy-original" ? "unsupported assistant content" : "legacy function call");
     expect(executed).toEqual([]);
+    expect(requests).toHaveLength(scenario === "legacy-original" ? 1 : 2);
   });
 
   it("recovers a tool-only stream without buffering ordinary text", async () => {
     const { agent, requests, executed } = harness("tool-only", true, false, undefined, undefined, undefined,
-      "fixture-key", undefined, false);
+      "fixture-key", undefined);
     const events = await agent.stream({ messages: [{ role: "user", content: "Record 123." }] }, { streamMode: "messages" });
     for await (const _event of events) { /* consume to completion */ }
     expect(requests.map((request) => request.tool_choice)).toEqual([undefined, namedRecord, undefined]);
@@ -553,7 +580,10 @@ describe("tool-call recovery", () => {
           if (mode === "invoke") await agent.invoke(input);
           else for await (const event of await agent.stream(input, { streamMode: "messages" })) exposed.push(event);
         }).rejects.toThrow();
-        expect(exposed).toEqual([]);
+        expect(exposed.length > 0).toBe(mode === "stream");
+        expect(JSON.stringify(exposed)).not.toContain("corrected-reasoning");
+        expect(exposed.every((item) => !Array.isArray(item) ||
+          !Array.isArray(item[0]?.tool_call_chunks) || item[0].tool_call_chunks.length === 0)).toBe(true);
         expect(executed).toEqual([]);
         expect(requests).toHaveLength(2);
       }
@@ -581,7 +611,7 @@ describe("tool-call recovery", () => {
 
   it("preserves the normal stream message shapes", async () => {
     const plain = harness("normal", false);
-    const guarded = harness("normal", true, false, undefined, undefined, undefined, "fixture-key", undefined, false);
+    const guarded = harness("normal", true, false, undefined, undefined, undefined, "fixture-key", undefined);
     const collect = async (agent: typeof plain.agent) => {
       const stream = await agent.stream({ messages: [{ role: "user", content: "Record 123." }] }, { streamMode: "messages" });
       const messages = [];
@@ -595,7 +625,7 @@ describe("tool-call recovery", () => {
     expect(guarded.requests).toEqual(plain.requests);
   });
 
-  it("keeps streamed malformed output private until recovery", async () => {
+  it("streams original reasoning and keeps malformed arguments and correction reasoning private", async () => {
     const { agent, requests, executed } = harness("invalid");
     const stream = await agent.stream({ messages: [{ role: "user", content: "Record 123." }] }, { streamMode: "messages" });
     const output: unknown[] = [];
@@ -603,7 +633,8 @@ describe("tool-call recovery", () => {
     expect(requests).toHaveLength(3);
     expect(executed).toEqual([123]);
     expect(JSON.stringify(output)).not.toContain('{"amount":123,}');
-    expect(JSON.stringify(output)).not.toContain("failure-only-reasoning");
+    expect(JSON.stringify(output)).toContain("failure-only-reasoning");
+    expect(JSON.stringify(output)).not.toContain("corrected-reasoning");
     const retry = requests[1]!.messages;
     expect(retry.filter((message: any) => message.role === "user")).toHaveLength(1);
     const assistant = retry.find((message: any) => message.role === "assistant");
@@ -666,6 +697,39 @@ describe("tool-call recovery", () => {
     })).rejects.toThrow();
     expect(requests).toHaveLength(1);
     expect(executed).toEqual([]);
+  });
+
+  it("preserves streamed text and never runs a tool after cancellation during correction", async () => {
+    const controller = new AbortController();
+    const invoked: number[] = [];
+    let requests = 0;
+    const record = tool(({ amount }) => { invoked.push(amount); return "done"; }, {
+      name: "record", description: "Synthetic", schema: z.object({ amount: z.number() }),
+    });
+    const fetcher: typeof fetch = async (_url, init) => {
+      requests++;
+      if (requests === 2) {
+        controller.abort();
+        init?.signal?.throwIfAborted();
+      }
+      const frames = [
+        { choices: [{ index: 0, delta: { content: "Original preamble." } }] },
+        { choices: [{ index: 0, delta: { tool_calls: [{ ...call("original", '{"amount":123,}'), index: 0 }] },
+          finish_reason: "tool_calls" }] },
+      ];
+      return new Response(frames.map((frame) => 'data: ' + JSON.stringify(frame) + '\n\n').join("") + "data: [DONE]\n\n");
+    };
+    const agent = createAgent({ model: new ChatExaone({ apiKey: "fixture", fetch: fetcher, maxRetries: 0 }),
+      tools: [record], middleware: [createMiddleware(toolCallRecovery())] });
+    const visible: unknown[] = [];
+    await expect(async () => {
+      const events = await agent.stream({ messages: [{ role: "user", content: "Record 123." }] },
+        { signal: controller.signal, streamMode: "messages" });
+      for await (const [chunk] of events) if (chunk.content) visible.push(chunk.content);
+    }).rejects.toThrow();
+    expect(visible).toEqual(["Original preamble."]);
+    expect(requests).toBe(2);
+    expect(invoked).toEqual([]);
   });
 
   it("isolates simultaneous guarded and unguarded invocations of the same model", async () => {

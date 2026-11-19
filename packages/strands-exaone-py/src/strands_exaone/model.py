@@ -10,6 +10,7 @@ import inspect
 import json
 import math
 import os
+import re
 import ssl
 import threading
 import time
@@ -307,7 +308,7 @@ def _named_tool(choice: Any) -> str | None:
     return None
 
 
-def _recoverable_tools(body: dict[str, Any], expected: str | None, *, required: bool) -> frozenset[str]:
+def _recoverable_tools(body: dict[str, Any]) -> frozenset[str]:
     tools = body.get("tools")
     names = frozenset(
         tool["function"]["name"]
@@ -318,10 +319,6 @@ def _recoverable_tools(body: dict[str, Any], expected: str | None, *, required: 
     )
     choice = body.get("tool_choice")
     named = _named_tool(choice)
-    if expected is not None:
-        correct_choice = choice == "required" if required else named == expected
-        if expected not in names or not correct_choice:
-            raise ExaoneError("The effective EXAONE request does not allow the tool correction")
     if choice in (None, "auto", "required"):
         return names
     return frozenset({named}) if named is not None and named in names else frozenset()
@@ -414,7 +411,7 @@ def _recovery_usage(usage: Usage | None, failed: dict[str, Any]) -> Usage | None
     """Include a hidden failed attempt only when both token counts are known."""
     prior = _standard_usage(failed)
     if usage is None or prior is None:
-        return usage
+        return usage if usage is not None else prior
     combined = dict(usage)
     for name in ("inputTokens", "outputTokens", "totalTokens"):
         total = usage[name] + prior[name]
@@ -458,6 +455,17 @@ def _validate_output(output_model: type[T], content: str) -> T:
         # Validation errors can contain generated text; do not retain them as context.
         pass
     raise ExaoneError("Structured output did not match the requested schema")
+
+
+def _named_choice_unsupported(error: ExaoneError) -> bool:
+    if error.status_code not in {400, 422, 501}:
+        return False
+    if error.code == "unsupported_tool_choice" or (error.param == "tool_choice" and error.code == "unsupported_value"):
+        return True
+    message = str(error).lower()
+    return bool(re.search(r"named (?:function|tool)|(?:function|object)[- ](?:type|valued) tool_choice", message)) and (
+        "not support" in message or "unsupported" in message
+    )
 
 
 class ExaoneModel(Model):
@@ -641,7 +649,6 @@ class ExaoneModel(Model):
                 messages,
                 system_prompt,
                 system_prompt_content,
-                recovery_tool_id=getattr(self, "_recovery_tool_id", None),
             ),
             "stream": stream,
         }
@@ -752,6 +759,8 @@ class ExaoneModel(Model):
         metadata: ResponseMetadata,
         signal: threading.Event | None,
         deadline: float | None,
+        failed: dict[str, Any] | None = None,
+        correction_usage: dict[str, Any] | None = None,
     ) -> None:
         _check_cancel(signal, deadline)
         if callback is not None:
@@ -765,9 +774,11 @@ class ExaoneModel(Model):
                     "usage": safe_usage,
                     "response": safe_response,
                 }
-                failed = getattr(self, "_recovery_failed_usage", None)
                 if failed is not None:
-                    info["recovery"] = {"failed_attempts": [{"usage": deepcopy(failed)}]}
+                    info["recovery"] = {
+                        "failed_attempts": [{"usage": deepcopy(failed)}],
+                        "correction_usage": redact(correction_usage, self._api_key),
+                    }
                 result = callback(info)
                 if inspect.isawaitable(result):
                     await _cancellable(result, signal, deadline)
@@ -818,6 +829,7 @@ class ExaoneModel(Model):
             yield event
 
     @override
+    @_safe_transport_errors
     async def stream(
         self,
         messages: Messages,
@@ -829,164 +841,23 @@ class ExaoneModel(Model):
         cancel_signal: threading.Event | None = None,
         **kwargs: Any,
     ) -> AsyncGenerator[StreamEvent, None]:
-        """Stream a conversation with the EXAONE model.
-
-        Args:
-            messages: Conversation messages to send to the model.
-            tool_specs: Tool specifications available to the model.
-            system_prompt: System prompt to provide to the model.
-            tool_choice: Selection strategy for tool invocation.
-            system_prompt_content: System prompt blocks, when supplied by Strands.
-            cancel_signal: Signal used to cancel in-flight requests and retry waits.
-            **kwargs: Additional arguments, including an optional ``metadata_callback``.
-
-        Yields:
-            Strands model events translated from the EXAONE response.
-
-        Raises:
-            ExaoneError: If the service returns an error or an invalid response.
-            ExaoneThrottledError: If the service returns HTTP 429 after retries.
-            ExaoneContextWindowError: If the input exceeds the model context window.
-            TimeoutError: If the configured operation deadline expires.
-        """
-        recovery = getattr(self, "_recovery_enabled", False)
-        buffered = recovery and (
-            not self._config["stream"]
-            or getattr(self, "_recovery_buffer_response", False)
-            or getattr(self, "_recovery_tool_name", None) is not None
-        )
-        callback = kwargs.get("metadata_callback", self._callback)
-        captured_metadata: list[dict[str, Any]] = []
-        if buffered and callback is not None:
-            kwargs = {**kwargs, "metadata_callback": captured_metadata.append}
-        source = self._stream_unbuffered(
+        """Translate one model invocation into Strands streaming events."""
+        config = self._config
+        body = self._request(
             messages,
             tool_specs,
             system_prompt,
-            tool_choice=tool_choice,
-            system_prompt_content=system_prompt_content,
-            cancel_signal=cancel_signal,
-            **kwargs,
-        )
-        if not buffered:
-            async with aclosing(self._live_recovery_stream(source) if recovery else source) as live:
-                async for event in live:
-                    yield event
-            return
-        async with aclosing(self._buffer_recovery_stream(source, callback, captured_metadata, cancel_signal)) as held:
-            async for event in held:
-                yield event
-
-    async def _buffer_recovery_stream(
-        self,
-        source: AsyncGenerator[StreamEvent, None],
-        callback: MetadataCallback | None,
-        captured_metadata: list[dict[str, Any]],
-        cancel_signal: threading.Event | None,
-    ) -> AsyncGenerator[StreamEvent, None]:
-        deadline = _operation_deadline(self._config["timeout"])
-        events: list[StreamEvent] = []
-        try:
-            async with aclosing(source):
-                async for event in source:
-                    events.append(event)
-        except MalformedToolCallError as error:
-            if self._prepare_recovery_error(error, events):
-                raise
-        else:
-            for event in events:
-                _check_cancel(cancel_signal, deadline)
-                if "metadata" in event and callback is not None and captured_metadata:
-                    await self._deliver_recovery_metadata(callback, captured_metadata.pop(), cancel_signal, deadline)
-                yield event
-            if callback is not None and captured_metadata:
-                await self._deliver_recovery_metadata(callback, captured_metadata.pop(), cancel_signal, deadline)
-            return
-        raise ExaoneError("Invalid tool arguments in EXAONE response")
-
-    async def _live_recovery_stream(
-        self, source: AsyncGenerator[StreamEvent, None]
-    ) -> AsyncGenerator[StreamEvent, None]:
-        """Hold the response start until text or a validated tool event arrives."""
-        start: StreamEvent | None = None
-        exposed = False
-        try:
-            async with aclosing(source):
-                async for event in source:
-                    if "messageStart" in event:
-                        start = event
-                        continue
-                    exposed = True
-                    if start is not None:
-                        yield start
-                        start = None
-                    yield event
-        except MalformedToolCallError as error:
-            if not exposed and self._prepare_recovery_error(error, []):
-                raise
-        else:
-            return
-        raise ExaoneError("Invalid tool arguments in EXAONE response")
-
-    def _prepare_recovery_error(self, error: MalformedToolCallError, buffered: list[StreamEvent]) -> bool:
-        values = (error.arguments, error.name, error.call_id)
-        if any(redact(value, self._api_key) != value for value in values):
-            return False
-        error.buffered_events = cast(list[dict[str, Any]], buffered)
-        return True
-
-    async def _deliver_recovery_metadata(
-        self, callback: MetadataCallback, info: dict[str, Any], signal: threading.Event | None, deadline: float | None
-    ) -> None:
-        """Invoke the user's metadata callback at its original event boundary."""
-        _check_cancel(signal, deadline)
-        try:
-            result = callback(info)
-            if inspect.isawaitable(result):
-                await _cancellable(result, signal, deadline)
-        except (httpx.HTTPError, httpx.InvalidURL, httpx.CookieConflict, httpx.StreamError) as error:
-            safe = _copy_transport_error(error, self._api_key)
-            BaseException.__setattr__(safe, "_exaone_events_exposed", True)
-            raise safe from None
-        except (ModelThrottledException, ContextWindowOverflowException) as error:
-            wrapped = ExaoneError("EXAONE metadata callback failed")
-            BaseException.__setattr__(wrapped, "_exaone_events_exposed", True)
-            raise wrapped from error
-        except Exception as error:
-            BaseException.__setattr__(error, "_exaone_events_exposed", True)
-            raise
-        _check_cancel(signal, deadline)
-
-    @_safe_transport_errors
-    async def _stream_unbuffered(
-        self,
-        messages: Messages,
-        tool_specs: list[ToolSpec] | None = None,
-        system_prompt: str | None = None,
-        *,
-        tool_choice: ToolChoice | None = None,
-        system_prompt_content: list[SystemContentBlock] | None = None,
-        cancel_signal: threading.Event | None = None,
-        **kwargs: Any,
-    ) -> AsyncGenerator[StreamEvent, None]:
-        """Translate one HTTP response into unbuffered Strands events."""
-        config = self._config
-        streaming = config["stream"]
-        body = self._request(
-            messages, tool_specs, system_prompt, system_prompt_content, tool_choice, stream=streaming, config=config
+            system_prompt_content,
+            tool_choice,
+            stream=config["stream"],
+            config=config,
         )
         callback = kwargs.get("metadata_callback", self._callback)
-        recovery = getattr(self, "_recovery_enabled", False)
-        expected = getattr(self, "_recovery_tool_name", None)
+        recover = getattr(self, "_recover_tool_calls", False)
         decoder = StreamDecoder(
             named_tool_choice=tool_choice is not None and "tool" in tool_choice,
-            diagnose_tool_calls=recovery,
-            recovery_tool_name=expected,
-            recoverable_tools=_recoverable_tools(
-                body, expected, required=getattr(self, "_recovery_requires_any", False)
-            )
-            if recovery
-            else frozenset(),
+            diagnose_tool_calls=recover,
+            recoverable_tools=_recoverable_tools(body) if recover else frozenset(),
         )
         metadata = ResponseMetadata(enabled=callback is not None)
         started = time.monotonic()
@@ -995,29 +866,143 @@ class ExaoneModel(Model):
             response = await self._send(client, body, cancel_signal, config, deadline)
             try:
                 _check_cancel(cancel_signal, deadline)
-                yield {"messageStart": {"role": "assistant"}}
-                if streaming:
-                    events = self._decode_stream(response, decoder, cancel_signal, metadata, deadline)
-                else:
-                    events = self._decode_nonstream(response, decoder, cancel_signal, metadata, deadline)
-                async for event in events:
-                    _check_cancel(cancel_signal, deadline)
-                    yield cast(StreamEvent, event)
-                for event in decoder.finish(require_done=streaming, secret=self._api_key):
-                    _check_cancel(cancel_signal, deadline)
-                    yield cast(StreamEvent, event)
-                usage = _standard_usage(decoder.usage)
-                failed_usage = getattr(self, "_recovery_failed_usage", None)
-                if failed_usage is not None:
-                    usage = _recovery_usage(usage, failed_usage)
-                latency_ms = round((time.monotonic() - started) * 1000) if usage is not None else None
-                await self._metadata(callback, response, decoder.usage, metadata, cancel_signal, deadline)
-                if usage is not None:
-                    _check_cancel(cancel_signal, deadline)
-                    assert latency_ms is not None
-                    yield {"metadata": {"usage": usage, "metrics": {"latencyMs": latency_ms}}}
+                if not recover:
+                    yield {"messageStart": {"role": "assistant"}}
+                async with aclosing(
+                    self._read_events(response, decoder, config, metadata, cancel_signal, deadline)
+                ) as source:
+                    async for event in self._start_message(source, cancel_signal, deadline, started=not recover):
+                        yield event
             finally:
                 await response.aclose()
+            async with aclosing(
+                self._finish_message(
+                    client,
+                    response,
+                    body,
+                    decoder,
+                    metadata,
+                    callback,
+                    config,
+                    cancel_signal,
+                    deadline,
+                    started,
+                    recover,
+                )
+            ) as events:
+                async for event in events:
+                    yield event
+
+    async def _read_events(
+        self,
+        response: httpx.Response,
+        decoder: StreamDecoder,
+        config: dict[str, Any],
+        metadata: ResponseMetadata,
+        signal: threading.Event | None,
+        deadline: float | None,
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        try:
+            read = self._decode_stream if config["stream"] else self._decode_nonstream
+            async for event in read(response, decoder, signal, metadata, deadline):
+                yield event
+        finally:
+            await response.aclose()
+
+    async def _start_message(
+        self,
+        source: AsyncIterator[dict[str, Any]],
+        signal: threading.Event | None,
+        deadline: float | None,
+        *,
+        started: bool,
+    ) -> AsyncGenerator[StreamEvent, None]:
+        # The same start is used for both the original text and the final tool block.
+        async for event in source:
+            _check_cancel(signal, deadline)
+            if not started:
+                started = True
+                yield {"messageStart": {"role": "assistant"}}
+            _check_cancel(signal, deadline)
+            yield cast(StreamEvent, event)
+
+    async def _finish_message(
+        self,
+        client: httpx.AsyncClient,
+        response: httpx.Response,
+        body: dict[str, Any],
+        decoder: StreamDecoder,
+        metadata: ResponseMetadata,
+        callback: MetadataCallback | None,
+        config: dict[str, Any],
+        signal: threading.Event | None,
+        deadline: float | None,
+        started: float,
+        recover: bool,
+    ) -> AsyncGenerator[StreamEvent, None]:
+        emitted = not recover or decoder.active is not None
+        failure: MalformedToolCallError | None = None
+        try:
+            for event in decoder.finish(require_done=config["stream"], secret=self._api_key):
+                if not emitted:
+                    emitted = True
+                    yield {"messageStart": {"role": "assistant"}}
+                _check_cancel(signal, deadline)
+                yield cast(StreamEvent, event)
+        except MalformedToolCallError as error:
+            failure = error
+        correction_usage = None
+        if failure is not None:
+            try:
+                correction_usage = await self._correct_tool(client, body, decoder, failure, config, signal, deadline)
+            except (ModelThrottledException, ContextWindowOverflowException) as request_error:
+                # The SDK must not retry or compact the original, partially delivered turn.
+                raise ExaoneError("EXAONE tool-call correction failed") from request_error
+            if not emitted:
+                yield {"messageStart": {"role": "assistant"}}
+            for event in decoder.finish(require_done=config["stream"], secret=self._api_key):
+                _check_cancel(signal, deadline)
+                yield cast(StreamEvent, event)
+
+        usage = _standard_usage(decoder.usage)
+        failed = failure.usage if failure is not None else None
+        if failed is not None:
+            usage = _recovery_usage(_standard_usage(correction_usage), failed)
+        latency_ms = round((time.monotonic() - started) * 1000)
+        await self._metadata(callback, response, decoder.usage, metadata, signal, deadline, failed, correction_usage)
+        if usage is not None:
+            yield {"metadata": {"usage": usage, "metrics": {"latencyMs": latency_ms}}}
+
+    async def _correct_tool(
+        self,
+        client: httpx.AsyncClient,
+        body: dict[str, Any],
+        original: StreamDecoder,
+        error: MalformedToolCallError,
+        config: dict[str, Any],
+        signal: threading.Event | None,
+        deadline: float | None,
+    ) -> dict[str, Any] | None:
+        named = {"type": "function", "function": {"name": error.name}}
+        request = {**body, "messages": [*body["messages"], *original.recovery_messages(error)], "tool_choice": named}
+        try:
+            response = await self._send(client, request, signal, config, deadline)
+        except ExaoneError as rejection:
+            if not _named_choice_unsupported(rejection):
+                raise
+            request["tool_choice"] = "required"
+            response = await self._send(client, request, signal, config, deadline)
+        correction = StreamDecoder(
+            named_tool_choice=request["tool_choice"] != "required",
+            recovery_tool_name=error.name,
+            diagnose_tool_calls=True,
+        )
+        metadata = ResponseMetadata(enabled=False)
+        async with aclosing(self._read_events(response, correction, config, metadata, signal, deadline)) as events:
+            async for _ in events:
+                pass
+        original.replace_tool_arguments(correction, require_done=config["stream"], secret=self._api_key)
+        return correction.usage
 
     @override
     @_safe_transport_errors

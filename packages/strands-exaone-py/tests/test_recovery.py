@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from functools import partial
 from typing import Any
 
 import httpx
@@ -67,11 +66,13 @@ async def test_agent_recovers_only_when_enabled(enabled: bool, arguments: str, m
         requests.append(json.loads(request.content))
         number = len(requests)
         if number == 1:
-            data = completion(arguments, text="discarded" if malformed else None)
+            data = completion(arguments, text="original preamble" if malformed else None)
             if malformed:
                 data["choices"][0]["message"]["reasoning_content"] = "synthetic thought"
         elif number == 2 and malformed:
-            data = completion('{"amount":123}')
+            data = completion('{"amount":123}', text="private correction preamble")
+            data["choices"][0]["message"]["reasoning_content"] = "private correction reasoning"
+            data["choices"][0]["message"]["tool_calls"][0]["id"] = "correction-id"
         else:
             data = completion(None, finish="stop", text="done")
         if not stream:
@@ -96,7 +97,7 @@ async def test_agent_recovers_only_when_enabled(enabled: bool, arguments: str, m
         model = ExaoneModel(api_key="fixture", http_client=client, stream=stream, metadata_callback=metadata.append)
         agent = Agent(model=model, tools=[transfer], system_prompt="synthetic system", callback_handler=callback)
         if enabled:
-            agent.add_middleware(InvokeModelStage, partial(recover_tool_calls, buffer_response=True))
+            agent.add_middleware(InvokeModelStage, recover_tool_calls)
         if malformed and not enabled:
             with pytest.raises(ExaoneError, match="Invalid tool arguments"):
                 await agent.invoke_async("synthetic user request")
@@ -132,7 +133,12 @@ async def test_agent_recovers_only_when_enabled(enabled: bool, arguments: str, m
         assert instruction.startswith("Call transfer once")
         assert requests[1]["messages"][-2]["tool_calls"][0]["function"]["arguments"] == "{}"
         assert requests[1]["messages"][-2]["reasoning_content"] == "synthetic thought"
-        assert "discarded" not in content
+        assert content == ["original preamble", "done"]
+        followup = requests[2]["messages"]
+        assert followup[-2]["content"] == "original preamble"
+        assert followup[-2]["reasoning_content"] == "synthetic thought"
+        assert followup[-2]["tool_calls"][0]["id"] == followup[-1]["tool_call_id"] == "call_1"
+        assert "private correction" not in json.dumps(followup)
         assert "The previous tool call is a placeholder." not in json.dumps(requests[2]["messages"])
         assert all(
             call["function"]["arguments"] != "{}"
@@ -202,7 +208,7 @@ async def test_only_a_completed_original_tool_counts_as_recovery(scenario: str) 
 
 
 @pytest.mark.parametrize("fallback", [False, True])
-async def test_recovery_validates_the_result_from_a_routed_model(fallback: bool) -> None:
+async def test_correction_never_exposes_a_wrong_tool_or_its_text(fallback: bool) -> None:
     choices: list[Any] = []
     executions: list[int] = []
     visible: list[str] = []
@@ -237,15 +243,9 @@ async def test_recovery_validates_the_result_from_a_routed_model(fallback: bool)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         model = ExaoneModel(api_key="fixture", http_client=client, stream=False)
-        routed = ExaoneModel(api_key="fixture", http_client=client, stream=False)
         agent = Agent(model=model, tools=[transfer, other], callback_handler=callback, retry_strategy=None)
         agent.add_middleware(InvokeModelStage, recover_tool_calls)
 
-        async def route_correction(context: Any, next_fn: Any) -> Any:
-            async for event in next_fn(context.replace(model=routed) if context.tool_choice else context):
-                yield event
-
-        agent.add_middleware(InvokeModelStage, route_correction)
         with pytest.raises(ExaoneError, match="original tool"):
             await agent.invoke_async("Record 123.")
         assert choices == [None, NAMED_TRANSFER, *(["required"] if fallback else [])]
@@ -253,9 +253,7 @@ async def test_recovery_validates_the_result_from_a_routed_model(fallback: bool)
         assert visible == []
 
 
-@pytest.mark.parametrize(
-    "case", ["tool_only", "visible_text", "ambiguous_correction", "filtered_initial", "filtered_correction"]
-)
+@pytest.mark.parametrize("case", ["tool_only", "visible_text", "ambiguous_correction", "filtered_initial"])
 async def test_live_recovery_only_exposes_valid_tools(case: str) -> None:
     requests: list[dict[str, Any]] = []
     executions: list[int] = []
@@ -311,18 +309,13 @@ async def test_live_recovery_only_exposes_valid_tools(case: str) -> None:
         if case.startswith("filtered"):
 
             async def filter_tools(context, next_fn):
-                if case == "filtered_initial" or context.tool_choice is not None:
+                if case == "filtered_initial":
                     context = context.replace(tool_specs=[])
                 async for event in next_fn(context):
                     yield event
 
             agent.add_middleware(InvokeModelStage, filter_tools)
-        if case == "visible_text":
-            with pytest.raises(ExaoneError, match="Invalid tool arguments"):
-                await agent.invoke_async("Record 123.")
-            assert len(requests) == 1
-            assert executions == []
-        elif case == "ambiguous_correction":
+        if case == "ambiguous_correction":
             with pytest.raises(ExaoneError, match="ambiguous"):
                 await agent.invoke_async("Record 123.")
             assert len(requests) == 2
@@ -331,13 +324,14 @@ async def test_live_recovery_only_exposes_valid_tools(case: str) -> None:
             with pytest.raises(ExaoneError, match="Invalid tool arguments|does not allow the tool correction"):
                 await agent.invoke_async("Record 123.")
             assert len(requests) == 1
-            assert bool(requests[0].get("tools")) == (case == "filtered_correction")
+            assert not requests[0].get("tools")
             assert executions == []
         else:
             await agent.invoke_async("Record 123.")
             assert len(requests) == 3
             assert requests[1]["tool_choice"] == NAMED_TRANSFER
             assert executions == [123]
+            assert visible == (["Checking.", "Done."] if case == "visible_text" else ["Done."])
 
 
 @pytest.mark.parametrize("stream", [False, True])
@@ -413,8 +407,6 @@ async def test_ambiguous_or_repeated_failures_do_not_execute_tools(case: str) ->
         agent = Agent(model=model, tools=[transfer], callback_handler=None, retry_strategy=None)
         agent.add_middleware(InvokeModelStage, recover_tool_calls)
         error_type = MaxTokensReachedException if case == "truncated" else ExaoneError
-        if case == "repeated":
-            error_type = MalformedToolCallError
         with pytest.raises(error_type):
             await agent.invoke_async("synthetic user request")
 
@@ -457,28 +449,45 @@ async def test_concurrent_agents_do_not_exchange_failed_arguments() -> None:
     assert len(requests) == 6
 
 
-async def test_cancelled_request_is_not_retried() -> None:
+@pytest.mark.parametrize("during_correction", [False, True])
+async def test_cancelled_request_is_not_retried(during_correction: bool) -> None:
     started = asyncio.Event()
     requests = 0
+    executions = []
+    text = []
+
+    @tool
+    def transfer(amount: int) -> str:
+        """Record the synthetic transfer."""
+        executions.append(amount)
+        return "done"
 
     async def transport(_: httpx.Request) -> httpx.Response:
         nonlocal requests
         requests += 1
+        if during_correction and requests == 1:
+            return httpx.Response(200, json=completion('{"amount":123,}', text="original preamble"))
         started.set()
         await asyncio.Event().wait()
         raise AssertionError("unreachable")
 
+    def callback(**event: Any) -> None:
+        if event.get("data"):
+            text.append(event["data"])
+
     async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client:
         model = ExaoneModel(api_key="fixture", http_client=client, stream=False)
-        agent = Agent(model=model, callback_handler=None, retry_strategy=None)
+        agent = Agent(model=model, tools=[transfer], callback_handler=callback, retry_strategy=None)
         agent.add_middleware(InvokeModelStage, recover_tool_calls)
         task = asyncio.create_task(agent.invoke_async("synthetic user request"))
-        await started.wait()
+        await asyncio.wait_for(started.wait(), 2)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
 
-    assert requests == 1
+    assert requests == (2 if during_correction else 1)
+    assert text == (["original preamble"] if during_correction else [])
+    assert executions == []
 
 
 async def test_buffered_delivery_honors_timeout_when_consumer_pauses() -> None:

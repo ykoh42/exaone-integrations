@@ -1,5 +1,4 @@
 import { ModelError } from '@strands-agents/sdk'
-import type { ModelStreamEvent } from '@strands-agents/sdk'
 
 /** Render a parser position in Unicode characters of the original argument text. */
 export function recoveryJsonDiagnostic(error: unknown, raw: string): string {
@@ -15,9 +14,8 @@ export function recoveryJsonDiagnostic(error: unknown, raw: string): string {
   return `${detail} (line ${lines.length}, column ${column})`
 }
 
-/** Internal failure observed before any model event has been exposed. */
+/** Internal diagnostic for a tool call withheld from the SDK. */
 export class InvalidToolArgumentsError extends ModelError {
-  #events: ModelStreamEvent[] = []
   #usage: Record<string, unknown> | undefined
   readonly #callId: string
   readonly #toolName: string
@@ -35,8 +33,6 @@ export class InvalidToolArgumentsError extends ModelError {
   get toolName(): string { return this.#toolName }
   get rawArguments(): string { return this.#rawArguments }
   get diagnostic(): string { return this.#diagnostic }
-  get events(): ModelStreamEvent[] { return this.#events }
-  set events(events: ModelStreamEvent[]) { this.#events = events }
   get usage(): Record<string, unknown> | undefined { return this.#usage }
   set usage(usage: Record<string, unknown> | undefined) { this.#usage = usage }
 }

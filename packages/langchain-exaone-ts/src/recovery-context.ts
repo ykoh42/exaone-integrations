@@ -1,9 +1,9 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { ExaoneAPIError } from "./errors.js";
 
 /** An internal, invocation-local switch. No value is sent to the server. */
 export interface RecoveryContext {
   expectedTool?: string;
-  bufferResponse?: boolean;
   required?: boolean;
   failedUsage?: Record<string, unknown>;
   validated?: boolean;
@@ -63,4 +63,18 @@ export class InvalidToolArguments extends Error {
     this.name = "InvalidToolArguments";
     Object.defineProperty(this, "details", { value: details, enumerable: false });
   }
+}
+
+export function namedChoiceUnsupported(error: unknown): boolean {
+  if (!(error instanceof ExaoneAPIError) || ![400, 422, 501].includes(error.status)) return false;
+  if (error.code === "unsupported_tool_choice" || (error.param === "tool_choice" && error.code === "unsupported_value")) return true;
+  return /named (?:function|tool)|(?:function|object)[- ](?:type|valued) tool_choice/i.test(error.message) &&
+    /not support|unsupported/i.test(error.message);
+}
+
+
+export function correctionPrompt(call: InvalidCallDetails): string {
+  const diagnostic = JSON.stringify({ raw_arguments: call.arguments, parse_error: call.diagnostic });
+  return "Error: Invalid tool-call JSON. Tool not executed. The previous tool call is a placeholder.\n"
+    + diagnostic + "\nCall " + call.name + " once with a valid JSON object.";
 }

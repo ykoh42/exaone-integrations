@@ -10,9 +10,9 @@ import { ExaoneModel, toolCallRecovery } from '../src/index.js'
 
 type Call = { id: string; type: 'function'; function: { name: string; arguments: string } }
 const call = (id: string, args: string): Call => ({ id, type: 'function', function: { name: 'transfer', arguments: args } })
-type Case = 'normal' | 'malformed' | 'repeat' | 'mixed' | 'length' | 'secret' | 'cancel' | 'partial' | 'usage_missing' |
+type Case = 'normal' | 'malformed' | 'repeat' | 'mixed' | 'length' | 'secret' | 'cancel' | 'cancel-correction' | 'partial' | 'usage_missing' |
   'fallback' | 'bad-request' | 'no-tool' | 'wrong-tool' | 'extra-tool' | 'blank' | 'array' | 'multiline' | 'tool-only' | 'live-text' |
-  'repeated-original-id' | 'repeated-correction-id' | 'refusal-with-tool' | 'filtered-initial' | 'filtered-correction' | 'correction-length' |
+  'repeated-original-id' | 'repeated-correction-id' | 'refusal-with-tool' | 'filtered-initial' | 'correction-length' |
   'routed-wrong-tool' | 'routed-required-wrong-tool'
 const namedChoice = { type: 'function', function: { name: 'transfer' } }
 const multilineArguments = '{\n"note":"😀```","amount":123,,}'
@@ -26,7 +26,7 @@ class ObservedFileStorage extends LocalFileStorage {
   }
 }
 
-async function run(scenario: Case, streaming: boolean, enabled = true, requireTool = false, sessionManager?: SessionManager, bufferResponse = true) {
+async function run(scenario: Case, streaming: boolean, enabled = true, requireTool = false, sessionManager?: SessionManager) {
   const requests: Record<string, any>[] = []
   const executions: number[] = []
   const observed: string[] = []
@@ -67,13 +67,13 @@ async function run(scenario: Case, streaming: boolean, enabled = true, requireTo
     const showReasoning = first && !normalToolCall && !['tool-only', 'repeated-correction-id'].includes(scenario)
     const refusal = first && scenario === 'refusal-with-tool'
     const message = calls
-      ? { content: refusal ? 'Synthetic reply.' : null, ...(refusal ? { refusal: 'Declined.' } : {}),
+      ? { content: refusal ? 'Synthetic reply.' : correcting ? 'private correction preamble' : null, ...(refusal ? { refusal: 'Declined.' } : {}),
           ...(showReasoning ? { reasoning_content: 'synthetic reasoning' } : {}), tool_calls: calls }
       : { content: 'complete' }
     const usage = first && scenario === 'usage_missing' ? undefined : first
       ? { prompt_tokens: 7, completion_tokens: 5, total_tokens: 12, prompt_tokens_details: { cached_tokens: 2, cache_write_tokens: 1 } }
       : { prompt_tokens: 9, completion_tokens: 6, total_tokens: 15, prompt_tokens_details: { cached_tokens: 3, cache_write_tokens: 0 } }
-    if (first && scenario === 'cancel') controller.abort()
+    if ((first && scenario === 'cancel') || (correcting && scenario === 'cancel-correction')) controller.abort()
     if (!streaming) return new Response(JSON.stringify({ choices: [{ index: 0, message, finish_reason: finish }], usage }))
     const delta = { ...message, ...(calls ? { tool_calls: calls.map((item, index) => ({ ...item, index })) } : {}) }
     if ((first && scenario === 'repeated-original-id') || (correcting && scenario === 'repeated-correction-id')) {
@@ -114,17 +114,10 @@ async function run(scenario: Case, streaming: boolean, enabled = true, requireTo
     if (event.event.type === 'modelContentBlockDeltaEvent' && event.event.delta.type === 'textDelta') finishResponse?.()
   })
   if (requireTool) agent.addMiddleware(InvokeModelStage.Input, (context) => context.messages.length === 1 ? { ...context, toolChoice: { any: {} } } : context)
-  if (enabled) agent.addMiddleware(InvokeModelStage, toolCallRecovery({ bufferResponse }))
-  if (routed) {
-    const correctionModel = new ExaoneModel({ apiKey: 'fixture+key', fetch: fetcher, stream: streaming, maxRetries: 0 })
+  if (enabled) agent.addMiddleware(InvokeModelStage, toolCallRecovery())
+  if (scenario === 'filtered-initial') {
     agent.addMiddleware(InvokeModelStage, async function* (context, next) {
-      return yield* next(context.toolChoice ? { ...context, model: correctionModel } : context)
-    })
-  }
-  if (scenario === 'filtered-initial' || scenario === 'filtered-correction') {
-    agent.addMiddleware(InvokeModelStage, async function* (context, next) {
-      const filter = scenario === 'filtered-initial' || context.toolChoice != null
-      return yield* next(filter ? { ...context, toolSpecs: [] } : context)
+      return yield* next({ ...context, toolSpecs: [] })
     })
   }
   let failure: unknown
@@ -140,14 +133,14 @@ describe('toolCallRecovery', () => {
     expect(result.failure).toMatchObject({ message: expect.stringContaining('original tool') })
     expect(result.requests.map((request) => request.tool_choice)).toEqual([undefined, namedChoice, ...(fallback ? ['required'] : [])])
     expect(result.executions).toEqual([])
-    expect(result.observed).toEqual([])
+    expect(result.observed).not.toContain('modelMessageStopEvent')
   })
 
-  it.each(['filtered-initial', 'filtered-correction'] as const)('honors downstream tool filtering (%s)', async (scenario) => {
-    const result = await run(scenario, false)
+  it('honors tool filtering on the effective model request', async () => {
+    const result = await run('filtered-initial', false)
     expect(result.failure).toBeDefined()
     expect(result.requests).toHaveLength(1)
-    expect(Boolean(result.requests[0]?.tools)).toBe(scenario === 'filtered-correction')
+    expect(result.requests[0]?.tools).toBeUndefined()
     expect(result.executions).toEqual([])
   })
 
@@ -160,7 +153,7 @@ describe('toolCallRecovery', () => {
 
   it.each([false, true])('blocks refused tool calls with text only when recovery is enabled (stream=%s)', async (streaming) => {
     const plain = await run('refusal-with-tool', streaming, false)
-    const guarded = await run('refusal-with-tool', streaming, true, false, undefined, false)
+    const guarded = await run('refusal-with-tool', streaming, true, false)
     expect(plain.failure).toBeUndefined()
     expect(plain.requests).toHaveLength(2)
     expect(plain.executions).toEqual([123])
@@ -170,34 +163,36 @@ describe('toolCallRecovery', () => {
   })
 
   it.each(['repeated-original-id', 'repeated-correction-id'] as const)('rejects an ambiguous tool call ID (%s)', async (scenario) => {
-    const result = await run(scenario, true, true, false, undefined, false)
+    const result = await run(scenario, true, true, false)
     expect(result.failure).toMatchObject({ message: expect.stringContaining('ambiguous') })
     expect(result.requests).toHaveLength(scenario === 'repeated-original-id' ? 1 : 2)
     expect(result.executions).toEqual([])
     expect(result.observed).toEqual([])
   })
 
-  it('streams text before the tool result is known and never retries after exposure', async () => {
-    const result = await run('live-text', true, true, false, undefined, false)
-    expect(result.failure).toMatchObject({ message: expect.stringContaining('after output was exposed') })
-    expect(result.observed).toContain('modelContentBlockDeltaEvent')
-    expect(result.requests).toHaveLength(1)
-    expect(result.executions).toEqual([])
+  it('streams text immediately and completes the same message after correcting the tool', async () => {
+    const result = await run('live-text', true)
+    expect(result.failure).toBeUndefined()
+    expect(result.exposedBeforeRetry).toBeGreaterThan(0)
+    expect(result.requests).toHaveLength(3)
+    expect(result.executions).toEqual([123])
+    expect(result.observed.filter((event) => event === 'modelMessageStartEvent')).toHaveLength(2)
+    expect(result.requests[2]?.messages.at(-2)).toMatchObject({ content: 'Checking.' })
   })
 
   it('recovers a tool-only stream without buffering ordinary text', async () => {
-    const result = await run('tool-only', true, true, false, undefined, false)
+    const result = await run('tool-only', true, true, false)
     expect(result.failure).toBeUndefined()
     expect(result.exposedBeforeRetry).toBe(0)
     expect(result.requests.map((request) => request.tool_choice)).toEqual([undefined, namedChoice, undefined])
     expect(result.executions).toEqual([123])
   })
 
-  it.each([false, true])('recovers before model events are exposed (stream=%s)', async (streaming) => {
+  it.each([false, true])('keeps original events and corrects only tool arguments (stream=%s)', async (streaming) => {
     const result = await run('malformed', streaming)
     expect(result.failure).toBeUndefined()
     expect(result.requests).toHaveLength(3)
-    expect(result.exposedBeforeRetry).toBe(0)
+    expect(result.exposedBeforeRetry).toBeGreaterThan(0)
     expect(result.executions).toEqual([123])
     expect(result.metadata[0].recovery.failedAttempts[0].usage).toMatchObject({ prompt_tokens: 7, completion_tokens: 5, total_tokens: 12 })
     expect(result.sdkUsage[0]).toMatchObject({ inputTokens: 16, outputTokens: 11, totalTokens: 27, cacheReadInputTokens: 5, cacheWriteInputTokens: 1 })
@@ -224,24 +219,23 @@ describe('toolCallRecovery', () => {
     const finalRequest = result.requests[2]?.messages
     const finalCalls = finalRequest.filter((message: any) => message.role === 'assistant').flatMap((message: any) => message.tool_calls ?? [])
     const finalResults = finalRequest.filter((message: any) => message.role === 'tool')
-    expect(finalCalls).toEqual([call('corrected', '{"amount":123}')])
+    expect(finalCalls).toEqual([call('failed', '{"amount":123}')])
     expect(finalResults).toHaveLength(1)
-    expect(finalResults[0].tool_call_id).toBe('corrected')
-    expect(JSON.stringify(finalRequest)).not.toContain('synthetic reasoning')
-    expect(JSON.stringify(finalRequest)).not.toContain('"failed"')
+    expect(finalResults[0].tool_call_id).toBe('failed')
+    expect(JSON.stringify(finalRequest)).toContain('synthetic reasoning')
     expect(JSON.stringify(finalRequest)).not.toContain('{"amount":123,}')
     const serializedHistory = JSON.stringify(result.agentMessages)
-    expect(serializedHistory).not.toContain('"failed"')
-    expect(serializedHistory).not.toContain('synthetic reasoning')
+    expect(serializedHistory).toContain('synthetic reasoning')
+    expect(serializedHistory).not.toContain('private correction preamble')
     expect(serializedHistory).not.toContain('{"amount":123,}')
     const blocks = result.agentMessages.flatMap((message) => message.content)
-    expect(blocks.filter((block) => 'toolUse' in block)).toEqual([{ toolUse: { name: 'transfer', toolUseId: 'corrected', input: { amount: 123 } } }])
-    expect(blocks.filter((block) => 'toolResult' in block)).toMatchObject([{ toolResult: { toolUseId: 'corrected', status: 'success' } }])
+    expect(blocks.filter((block) => 'toolUse' in block)).toEqual([{ toolUse: { name: 'transfer', toolUseId: 'failed', input: { amount: 123 } } }])
+    expect(blocks.filter((block) => 'toolResult' in block)).toMatchObject([{ toolResult: { toolUseId: 'failed', status: 'success' } }])
   })
 
   it.each([false, true])('preserves normal requests and event ordering (stream=%s)', async (streaming) => {
     const baseline = await run('normal', streaming, false)
-    const guarded = await run('normal', streaming, true, false, undefined, false)
+    const guarded = await run('normal', streaming, true, false)
     expect(guarded.failure).toBeUndefined()
     expect(guarded.requests).toEqual(baseline.requests)
     expect(guarded.observed).toEqual(baseline.observed)
@@ -269,6 +263,14 @@ describe('toolCallRecovery', () => {
     const result = await run('cancel', false)
     expect(result.requests).toHaveLength(1)
     expect(result.executions).toEqual([])
+  })
+
+  it('never publishes the tool when cancellation races with the correction response', async () => {
+    const result = await run('cancel-correction', true)
+    expect(result.requests).toHaveLength(2)
+    expect(result.exposedBeforeRetry).toBeGreaterThan(0)
+    expect(result.executions).toEqual([])
+    expect(result.observed).not.toContain('modelMessageStopEvent')
   })
 
   it.each([false, true])('leaves correction of incomplete JSON to the model (stream=%s)', async (streaming) => {
@@ -325,11 +327,11 @@ describe('toolCallRecovery', () => {
   })
 
   it.each(['no-tool', 'wrong-tool', 'extra-tool', 'blank', 'array'] as const)(
-    'rejects an invalid correction before emitting events (%s)', async (scenario) => {
+    'rejects an invalid correction before emitting its tool or text (%s)', async (scenario) => {
       for (const stream of [false, true]) {
         const result = await run(scenario, stream)
         expect(result.failure).toBeDefined()
-        expect(result.observed).toEqual([])
+        expect(result.observed).not.toContain('modelMessageStopEvent')
         expect(result.executions).toEqual([])
         expect(result.requests).toHaveLength(2)
       }
@@ -365,8 +367,6 @@ describe('toolCallRecovery', () => {
       expect(first.executions).toEqual([123])
       expect(storage.writes.length).toBeGreaterThan(1)
       for (const snapshot of storage.writes) {
-        expect(snapshot).not.toContain('"failed"')
-        expect(snapshot).not.toContain('synthetic reasoning')
         expect(snapshot).not.toContain('123,}')
       }
 
@@ -374,11 +374,9 @@ describe('toolCallRecovery', () => {
       expect(keys.length).toBeGreaterThan(0)
       const stored = await Promise.all(keys.map(async (key) => new TextDecoder().decode(await storage.read(key) ?? new Uint8Array())))
       for (const snapshot of stored) {
-        expect(snapshot).not.toContain('"failed"')
-        expect(snapshot).not.toContain('synthetic reasoning')
         expect(snapshot).not.toContain('123,}')
       }
-      expect(stored.some((snapshot) => snapshot.includes('corrected'))).toBe(true)
+      expect(stored.some((snapshot) => snapshot.includes('failed'))).toBe(true)
 
       const resumedRequests: Record<string, any>[] = []
       const resumedExecutions: number[] = []
@@ -400,15 +398,12 @@ describe('toolCallRecovery', () => {
       expect(messages.filter((message: any) => message.role === 'user').map((message: any) => message.content))
         .toEqual(['Call transfer using amount 123', 'Continue after resuming.'])
       const calls = messages.filter((message: any) => message.role === 'assistant').flatMap((message: any) => message.tool_calls ?? [])
-      expect(calls).toEqual([call('corrected', '{"amount":123}')])
-      expect(messages.filter((message: any) => message.role === 'tool')).toMatchObject([{ tool_call_id: 'corrected' }])
-      expect(JSON.stringify(messages)).not.toContain('"failed"')
+      expect(calls).toEqual([call('failed', '{"amount":123}')])
+      expect(messages.filter((message: any) => message.role === 'tool')).toMatchObject([{ tool_call_id: 'failed' }])
       expect(JSON.stringify(messages)).not.toContain('123,}')
       expect(resumedExecutions).toEqual([])
       expect(resumedStorage.writes.length).toBeGreaterThan(0)
       for (const snapshot of resumedStorage.writes) {
-        expect(snapshot).not.toContain('"failed"')
-        expect(snapshot).not.toContain('synthetic reasoning')
         expect(snapshot).not.toContain('123,}')
       }
     } finally {

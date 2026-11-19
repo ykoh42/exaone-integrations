@@ -10,8 +10,9 @@ import random
 import re
 import time
 from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import aclosing, asynccontextmanager, contextmanager
 from copy import deepcopy
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from functools import wraps
@@ -49,13 +50,17 @@ from pydantic import ConfigDict, Field, SecretStr, ValidationInfo, field_validat
 
 from langchain_exaone._profiles import get_model_profile
 from langchain_exaone._recovery import (
+    MalformedToolArguments,
+    RecoveryState,
     RecoveryStream,
     check_completed_message,
     check_message,
     check_stream,
+    correction_request,
     recoverable_tools,
     recovery_state,
     reject_json_constant,
+    replace_arguments,
 )
 
 _RETRYABLE_STATUSES = {408, 429, 500, 502, 503, 504}
@@ -183,8 +188,9 @@ def _safe_transport_errors(method: Any) -> Any:
         async def wrap_async_generator(self: Any, *args: Any, **kwargs: Any) -> AsyncIterator[Any]:
             safe_error: Exception | None = None
             try:
-                async for item in method(self, *args, **kwargs):
-                    yield item
+                async with aclosing(method(self, *args, **kwargs)) as events:
+                    async for item in events:
+                        yield item
             except _HTTPX_ERRORS as error:
                 safe_error = _copy_transport_error(error, self.api_key.get_secret_value())
             if safe_error is not None:
@@ -262,6 +268,10 @@ def _api_error(status: int, headers: Mapping[str, str], body: bytes, api_key: st
         payload = json.loads(body)
     except (ValueError, UnicodeDecodeError):
         payload = {}
+    return _api_error_from_payload(status, headers, payload, api_key)
+
+
+def _api_error_from_payload(status: int, headers: Mapping[str, str], payload: Any, api_key: str) -> ExaoneAPIError:
     envelope = payload if isinstance(payload, dict) else {}
     nested_error = envelope.get("error")
     error = nested_error if isinstance(nested_error, dict) else envelope
@@ -460,6 +470,17 @@ def _tool_arguments(arguments: dict[str, Any], original: Any) -> str:
     return json.dumps(arguments, ensure_ascii=False)
 
 
+def _named_choice_unsupported(error: ExaoneAPIError) -> bool:
+    if error.status_code not in {400, 422, 501}:
+        return False
+    if error.code == "unsupported_tool_choice" or (error.param == "tool_choice" and error.code == "unsupported_value"):
+        return True
+    message = str(error).lower()
+    return bool(re.search(r"named (?:function|tool)|(?:function|object)[- ](?:type|valued) tool_choice", message)) and (
+        "not support" in message or "unsupported" in message
+    )
+
+
 def _usage_metadata(usage: Mapping[str, Any] | None) -> dict[str, Any] | None:
     if not usage:
         return None
@@ -486,6 +507,29 @@ def _usage_metadata(usage: Mapping[str, Any] | None) -> dict[str, Any] | None:
     if type(reasoning_tokens) is int and reasoning_tokens >= 0:
         result["output_token_details"] = {"reasoning": reasoning_tokens}
     return result
+
+
+@dataclass(frozen=True)
+class _CorrectionUsage:
+    usage: dict[str, Any] | None
+    recovery: dict[str, Any]
+    wire_usage: dict[str, Any] | None
+
+
+def _combined_recovery_usage(
+    original: Mapping[str, Any] | None, corrected: Mapping[str, Any] | None
+) -> dict[str, Any] | None:
+    left, right = _usage_metadata(original), _usage_metadata(corrected)
+    if left is None or right is None:
+        return right if left is None else left
+    combined = add_usage(left, right)
+    for field in ("input_token_details", "output_token_details"):
+        details = combined.get(field, {})
+        for name in set(details) - (left.get(field, {}).keys() & right.get(field, {}).keys()):
+            del details[name]
+        if not details:
+            combined.pop(field, None)
+    return combined
 
 
 def _tool_calls(raw_calls: Any, *, strict_json: bool = False) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -1126,35 +1170,12 @@ class ChatEXAONE(BaseChatModel):
         **kwargs: Any,
     ) -> Iterator[ChatGenerationChunk]:
         key, body = self._key(), self._body(messages, stop, True, kwargs)
+        seen_metadata: dict[str, Any] = {}
         with self._sync_client() as client:
-            for attempt in range(self.max_retries + 1):
-                with client.stream(
-                    "POST",
-                    f"{self.base_url.rstrip('/')}/chat/completions",
-                    headers={"Authorization": f"Bearer {key}"},
-                    json=body,
-                ) as response:
-                    if response.is_error:
-                        error = self._raise_api_error(response, key)
-                        if error.status_code in _RETRYABLE_STATUSES and attempt < self.max_retries:
-                            delay = self._delay(error, attempt)
-                            if delay is not None:
-                                time.sleep(delay)
-                                continue
-                        raise error
-                    seen_metadata: dict[str, Any] = {}
-                    complete = [False]
-                    payloads = _decode_sse(response.iter_lines(), complete)
-                    state = recovery_state.get()
-                    if state is not None:
-                        router = RecoveryStream(state, recoverable_tools(body, state))
-                        payloads = self._guard_stream(payloads, complete, router, key)
-                    for payload in payloads:
-                        for chunk in self._stream_payload(payload, run_manager, key):
-                            self._deduplicate_stream_metadata(chunk, seen_metadata)
-                            yield chunk
-                    return
-        raise RuntimeError("EXAONE retry loop exited without a response")
+            for payload in self._stream_turn(client, body, key):
+                for chunk in self._stream_payload(payload, run_manager, key):
+                    self._deduplicate_stream_metadata(chunk, seen_metadata)
+                    yield chunk
 
     @_safe_transport_errors
     async def _astream(
@@ -1165,61 +1186,170 @@ class ChatEXAONE(BaseChatModel):
         **kwargs: Any,
     ) -> AsyncIterator[ChatGenerationChunk]:
         key, body = self._key(), self._body(messages, stop, True, kwargs)
-        async with self._async_client() as client:
-            for attempt in range(self.max_retries + 1):
-                async with client.stream(
-                    "POST",
-                    f"{self.base_url.rstrip('/')}/chat/completions",
-                    headers={"Authorization": f"Bearer {key}"},
-                    json=body,
-                ) as response:
-                    if response.is_error:
-                        error = await self._araise_api_error(response, key)
-                        if error.status_code in _RETRYABLE_STATUSES and attempt < self.max_retries:
-                            delay = self._delay(error, attempt)
-                            if delay is not None:
-                                await asyncio.sleep(delay)
-                                continue
-                        raise error
-                    seen_metadata: dict[str, Any] = {}
-                    complete = [False]
-                    payloads = _decode_sse_async(response.aiter_lines(), complete)
-                    state = recovery_state.get()
-                    if state is not None:
-                        router = RecoveryStream(state, recoverable_tools(body, state))
-                        payloads = self._aguard_stream(payloads, complete, router, key)
-                    async for payload in payloads:
-                        for chunk in self._stream_payload(payload, None, key):
-                            self._deduplicate_stream_metadata(chunk, seen_metadata)
-                            yield chunk
-                            if run_manager is not None:
-                                await run_manager.on_llm_new_token(chunk.text, chunk=chunk)
-                    return
-        raise RuntimeError("EXAONE retry loop exited without a response")
+        seen_metadata: dict[str, Any] = {}
+        async with self._async_client() as client, aclosing(self._astream_turn(client, body, key)) as events:
+            async for payload in events:
+                for chunk in self._stream_payload(payload, None, key):
+                    self._deduplicate_stream_metadata(chunk, seen_metadata)
+                    yield chunk
+                    if run_manager is not None:
+                        await run_manager.on_llm_new_token(chunk.text, chunk=chunk)
 
-    def _guard_stream(
-        self, payloads: Iterator[dict[str, Any]], complete: list[bool], router: RecoveryStream, key: str
+    def _stream_wire(
+        self, client: httpx.Client, body: dict[str, Any], key: str, complete: list[bool]
     ) -> Iterator[dict[str, Any]]:
-        for payload in payloads:
-            yield from router.accept(payload)
-        yield from self._validate_held_payloads(router.finish(complete[0]), router, key)
+        for attempt in range(self.max_retries + 1):
+            with client.stream(
+                "POST",
+                f"{self.base_url.rstrip('/')}/chat/completions",
+                headers={"Authorization": f"Bearer {key}"},
+                json=body,
+            ) as response:
+                if not response.is_error:
+                    for payload in _decode_sse(response.iter_lines(), complete):
+                        if payload.get("error") is not None:
+                            raise _api_error_from_payload(response.status_code, response.headers, payload, key)
+                        yield payload
+                    return
+                error = self._raise_api_error(response, key)
+            if error.status_code not in _RETRYABLE_STATUSES or attempt == self.max_retries:
+                raise error
+            delay = self._delay(error, attempt)
+            if delay is None:
+                raise error
+            time.sleep(delay)
 
-    async def _aguard_stream(
-        self, payloads: AsyncIterator[dict[str, Any]], complete: list[bool], router: RecoveryStream, key: str
+    async def _astream_wire(
+        self, client: httpx.AsyncClient, body: dict[str, Any], key: str, complete: list[bool]
     ) -> AsyncIterator[dict[str, Any]]:
-        async for payload in payloads:
-            for item in router.accept(payload):
-                yield item
-        for item in self._validate_held_payloads(router.finish(complete[0]), router, key):
-            yield item
+        for attempt in range(self.max_retries + 1):
+            async with client.stream(
+                "POST",
+                f"{self.base_url.rstrip('/')}/chat/completions",
+                headers={"Authorization": f"Bearer {key}"},
+                json=body,
+            ) as response:
+                if not response.is_error:
+                    async for payload in _decode_sse_async(response.aiter_lines(), complete):
+                        if payload.get("error") is not None:
+                            raise _api_error_from_payload(response.status_code, response.headers, payload, key)
+                        yield payload
+                    return
+                error = await self._araise_api_error(response, key)
+            if error.status_code not in _RETRYABLE_STATUSES or attempt == self.max_retries:
+                raise error
+            delay = self._delay(error, attempt)
+            if delay is None:
+                raise error
+            await asyncio.sleep(delay)
 
-    def _validate_held_payloads(
-        self, payloads: list[dict[str, Any]], router: RecoveryStream, key: str
-    ) -> list[dict[str, Any]]:
+    def _stream_turn(
+        self, client: httpx.Client, body: dict[str, Any], key: str
+    ) -> Iterator[dict[str, Any] | _CorrectionUsage]:
+        complete = [False]
+        state = recovery_state.get()
+        if state is None:
+            yield from self._stream_wire(client, body, key, complete)
+            return
+        router = RecoveryStream(state, recoverable_tools(body, state))
+        for payload in self._stream_wire(client, body, key, complete):
+            yield from router.accept(payload)
+        held = router.finish(complete[0])
+        try:
+            self._validate_held_payloads(held, router, key)
+        except MalformedToolArguments as error:
+            assert state.failure is not None
+            request = correction_request(body, state.failure[1], error)
+            for required in (False, True):
+                try:
+                    done = [False]
+                    correction = self._correction_router(state.failure[1])
+                    for payload in self._stream_wire(client, request, key, done):
+                        self._inspect_correction_frame(correction, payload, key)
+                    held = self._finish_correction(held, correction, done[0], state.failure[1], error, key)
+                    break
+                except ExaoneAPIError as rejection:
+                    if required or not _named_choice_unsupported(rejection):
+                        raise
+                    request["tool_choice"] = "required"
+        yield from held
+
+    async def _astream_turn(
+        self, client: httpx.AsyncClient, body: dict[str, Any], key: str
+    ) -> AsyncIterator[dict[str, Any] | _CorrectionUsage]:
+        complete = [False]
+        state = recovery_state.get()
+        async with aclosing(self._astream_wire(client, body, key, complete)) as wire:
+            if state is None:
+                async for payload in wire:
+                    yield payload
+                return
+            router = RecoveryStream(state, recoverable_tools(body, state))
+            async for payload in wire:
+                for item in router.accept(payload):
+                    yield item
+        held = router.finish(complete[0])
+        try:
+            self._validate_held_payloads(held, router, key)
+        except MalformedToolArguments as error:
+            assert state.failure is not None
+            request = correction_request(body, state.failure[1], error)
+            for required in (False, True):
+                try:
+                    done = [False]
+                    correction = self._correction_router(state.failure[1])
+                    async with aclosing(self._astream_wire(client, request, key, done)) as wire:
+                        async for payload in wire:
+                            self._inspect_correction_frame(correction, payload, key)
+                    held = self._finish_correction(held, correction, done[0], state.failure[1], error, key)
+                    break
+                except ExaoneAPIError as rejection:
+                    if required or not _named_choice_unsupported(rejection):
+                        raise
+                    request["tool_choice"] = "required"
+        for payload in held:
+            yield payload
+
+    def _validate_held_payloads(self, payloads: list[dict[str, Any]], router: RecoveryStream, key: str) -> str | None:
         for payload in payloads:
             list(self._stream_payload(payload, None, key))
-        check_stream(payloads, key, router)
-        return payloads
+        return check_stream(payloads, key, router)
+
+    @staticmethod
+    def _correction_router(failed: AIMessage) -> RecoveryStream:
+        return RecoveryStream(RecoveryState(expected_tool=failed.invalid_tool_calls[0]["name"]), frozenset())
+
+    def _inspect_correction_frame(self, router: RecoveryStream, payload: dict[str, Any], key: str) -> None:
+        for early in router.accept(payload):
+            list(self._stream_payload(early, None, key))
+
+    def _finish_correction(
+        self,
+        held: list[dict[str, Any]],
+        router: RecoveryStream,
+        complete: bool,
+        failed: AIMessage,
+        error: MalformedToolArguments,
+        key: str,
+    ) -> list[dict[str, Any] | _CorrectionUsage]:
+        call = failed.invalid_tool_calls[0]
+        payloads = router.finish(complete)
+        arguments = self._validate_held_payloads(payloads, router, key)
+        assert arguments is not None
+        replace_arguments(held, call, arguments)
+        original_usage = next((p["usage"] for p in reversed(held) if isinstance(p.get("usage"), dict)), None)
+        corrected_usage = next((p["usage"] for p in reversed(payloads) if isinstance(p.get("usage"), dict)), None)
+        usage = _combined_recovery_usage(original_usage, corrected_usage)
+        for payload in held:
+            payload.pop("usage", None)
+        return [
+            *held,
+            _CorrectionUsage(
+                usage,
+                {"attempts": 1, "failed_usage": error.usage, "correction_usage": _redact_secret(corrected_usage, key)},
+                _redact_secret(original_usage, key),
+            ),
+        ]
 
     @staticmethod
     def _deduplicate_stream_metadata(chunk: ChatGenerationChunk, seen: dict[str, Any]) -> None:
@@ -1252,8 +1382,18 @@ class ChatEXAONE(BaseChatModel):
                 seen[name] = deepcopy(value)
 
     def _stream_payload(
-        self, payload: Mapping[str, Any], run_manager: CallbackManagerForLLMRun | None, api_key: str
+        self, payload: Mapping[str, Any] | _CorrectionUsage, run_manager: CallbackManagerForLLMRun | None, api_key: str
     ) -> Iterator[ChatGenerationChunk]:
+        if isinstance(payload, _CorrectionUsage):
+            yield ChatGenerationChunk(
+                message=AIMessageChunk(
+                    content="",
+                    usage_metadata=payload.usage,
+                    response_metadata={"exaone_tool_call_recovery": payload.recovery, "usage": payload.wire_usage},
+                ),
+                text="",
+            )
+            return
         choices = payload.get("choices")
         if not isinstance(choices, list):
             raise ValueError("EXAONE stream event choices must be a list")

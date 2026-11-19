@@ -27,8 +27,8 @@ import { convertMessagesToExaone } from "./messages.js";
 import { RETRYABLE_STATUSES, retryDelayMs, sleepWithSignal } from "./retry.js";
 import type { ChatExaoneCallOptions, ChatExaoneParams } from "./types.js";
 import { getModelProfile } from "./profiles.js";
-import { InvalidToolArguments, checkToolCompletion, isToolCompletion, recoveryForCall, recoveryJsonDiagnostic } from "./recovery-context.js";
-import type { RecoveryContext } from "./recovery-context.js";
+import { InvalidToolArguments, checkToolCompletion, isToolCompletion, correctionPrompt, namedChoiceUnsupported, recoveryForCall, recoveryJsonDiagnostic } from "./recovery-context.js";
+import type { InvalidCallDetails, RecoveryContext } from "./recovery-context.js";
 
 const DEFAULT_BASE_URL = "https://api.exaone.ai/v1";
 const DEFAULT_MODEL = "k-exaone_v2.5";
@@ -360,16 +360,19 @@ export class ChatExaone extends BaseChatModel<
     const body = this.requestBody(messages, options, true);
     const recovery = recoveryForCall();
     const tools = recovery && recoverableTools(body, recovery);
-    const response = await this.request(body, options.signal, options.maxRetries ?? this.retryCount);
+    const signal = this.createRequestSignal(options.signal);
+    const retries = options.maxRetries ?? this.retryCount;
+    const response = await this.request(body, signal, retries, true);
     if (!response.body) throw new Error("EXAONE returned an empty streaming response.");
 
     const seenMetadata = new Map<string, unknown>();
-    const stream = parseSse<ChatCompletionChunk>(response.body, options.signal, this.#apiKey, recovery !== undefined);
-    const payloads = recovery && tools
-      ? guardRecoveryStream(stream, response, this.#apiKey, tools, recovery)
+    const stream = parseSse<ChatCompletionChunk>(response.body, signal, this.#apiKey, recovery !== undefined);
+    const payloads: AsyncIterable<RecoveryPayload> = recovery && tools
+      ? guardRecoveryStream(stream, response, this.#apiKey, tools, recovery, (call) => this.correctStream(body, call, signal, retries))
       : stream;
     for await (const payload of payloads) {
-      for (const originalChunk of streamResponseChunks(payload, response, this.#apiKey)) {
+      for (const originalChunk of modelStreamChunks(payload, response, this.#apiKey)) {
+        signal?.throwIfAborted();
         deduplicateStreamMetadata(originalChunk.message.response_metadata, seenMetadata);
         const generationChunk = (options.outputVersion ?? this.outputVersion) === "v1"
           ? standardStreamChunk(originalChunk)
@@ -385,6 +388,38 @@ export class ChatExaone extends BaseChatModel<
         );
       }
     }
+  }
+
+  private async correctStream(body: Record<string, unknown>, call: InvalidCallDetails, signal: AbortSignal | undefined, retries: number) {
+    const assistant = {
+      role: "assistant", content: call.content,
+      ...(call.reasoning === undefined ? {} : { reasoning_content: call.reasoning }),
+      tool_calls: [{ id: call.id, type: "function", function: { name: call.name, arguments: "{}" } }],
+    };
+    const feedback = { role: "tool", tool_call_id: call.id, content: correctionPrompt(call) };
+    const request: Record<string, unknown> = {
+      ...body,
+      messages: [...(body.messages as unknown[]), assistant, feedback],
+      tool_choice: { type: "function", function: { name: call.name } },
+    };
+    let response: Response;
+    try {
+      response = await this.request(request, signal, retries, true);
+    } catch (error) {
+      if (!namedChoiceUnsupported(error)) throw error;
+      signal?.throwIfAborted();
+      request.tool_choice = "required";
+      response = await this.request(request, signal, retries, true);
+    }
+    if (!response.body) throw new Error("EXAONE returned an empty correction stream.");
+    const router = new RecoveryPayloadRouter(false);
+    for await (const payload of parseSse<ChatCompletionChunk>(response.body, signal, this.#apiKey, true)) {
+      for (const early of router.accept(payload)) validateStreamFrame(early, response, this.#apiKey);
+    }
+    signal?.throwIfAborted();
+    const replacement = validateRecoveryPayloads(router.finish(), response, this.#apiKey, new Set(), call.name, router);
+    if (!replacement) throw new Error("EXAONE returned no validated correction.");
+    return replacement;
   }
 
   override async *_streamChatModelEvents(
@@ -451,9 +486,9 @@ export class ChatExaone extends BaseChatModel<
     return body;
   }
 
-  private async request(body: Record<string, unknown>, signal: AbortSignal | undefined, maxRetries: number): Promise<Response> {
+  private async request(body: Record<string, unknown>, signal: AbortSignal | undefined, maxRetries: number, hasDeadline = false): Promise<Response> {
     const url = `${this.baseUrl}/chat/completions`;
-    const requestSignal = this.createRequestSignal(signal);
+    const requestSignal = hasDeadline ? signal : this.createRequestSignal(signal);
     for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
       const response = await this.sendRequest(url, body, requestSignal, attempt, maxRetries);
       if (!response) continue;
@@ -517,6 +552,26 @@ export class ChatExaone extends BaseChatModel<
     const timeoutSignal = AbortSignal.timeout(this.timeout);
     return signal === undefined ? timeoutSignal : AbortSignal.any([signal, timeoutSignal]);
   }
+}
+
+function* modelStreamChunks(payload: RecoveryPayload, response: Response, key: string): Generator<ChatGenerationChunk> {
+  const accounting = payload[correctionAccounting];
+  if (accounting === undefined) {
+    yield* streamResponseChunks(payload, response, key);
+    return;
+  }
+  yield new ChatGenerationChunk({ text: "", message: new AIMessageChunk<ExaoneMessageStructure>({
+    content: "",
+    ...(accounting.usage === undefined ? {} : { usage_metadata: accounting.usage }),
+    response_metadata: {
+      exaone_tool_call_recovery: accounting.metadata,
+      ...(accounting.wireUsage ? { usage: accounting.wireUsage } : {}),
+    },
+  }) });
+}
+
+function validateStreamFrame(payload: ChatCompletionChunk, response: Response, key: string): void {
+  for (const _chunk of streamResponseChunks(payload, response, key)) { /* validation only */ }
 }
 
 function* streamResponseChunks(
@@ -1019,22 +1074,32 @@ function throwInvalidRecoveryCall(
 
 async function* guardRecoveryStream(
   stream: AsyncIterable<ChatCompletionChunk>, response: Response, key: string, tools: ReadonlySet<string>, recovery: RecoveryContext,
-): AsyncGenerator<ChatCompletionChunk> {
-  const router = new RecoveryPayloadRouter(Boolean(recovery.bufferResponse) || recovery.expectedTool !== undefined);
+  correct: (call: InvalidCallDetails) => Promise<{ arguments: string; usage: unknown }>,
+): AsyncGenerator<RecoveryPayload> {
+  const router = new RecoveryPayloadRouter(tools.size > 0 && recovery.expectedTool === undefined);
   for await (const payload of stream) yield* router.accept(payload);
   const payloads = router.finish();
-  validateRecoveryPayloads(payloads, response, key, tools, recovery.expectedTool, router);
+  try {
+    validateRecoveryPayloads(payloads, response, key, tools, recovery.expectedTool, router);
+  } catch (error) {
+    if (!(error instanceof InvalidToolArguments)) throw error;
+    const replacement = await correct(error.details);
+    yield* replaceStreamArguments(payloads, error.details, replacement, key);
+    return;
+  }
   yield* payloads;
 }
 
 function validateRecoveryPayloads(
   payloads: ChatCompletionChunk[], response: Response, key: string, tools: ReadonlySet<string>, expectedTool: string | undefined,
   router: RecoveryPayloadRouter,
-): void {
-  const state: RecoveryStreamState = { message: { content: "", reasoning_content: "" }, calls: new Map() };
+): { arguments: string; usage: unknown } | undefined {
+  const state: RecoveryStreamState = {
+    message: { ...router.unsupportedRecoveryFields, content: router.content.join(""), reasoning_content: router.reasoning.join("") },
+    calls: new Map(),
+  };
   for (const payload of payloads) {
-    // Validate every fragment with the same parser used by the ordinary path.
-    for (const _chunk of streamResponseChunks(payload, response, key)) { /* validation only */ }
+    validateStreamFrame(payload, response, key);
     accumulateRecoveryPayload(state, payload);
   }
   state.message.tool_calls = [...state.calls.values()];
@@ -1042,8 +1107,9 @@ function validateRecoveryPayloads(
   const choices = [{ finish_reason: router.finishReason, message: state.message }];
   if (expectedTool !== undefined) {
     if (state.multipleIdFragments) throw new Error("EXAONE recovery returned an ambiguous streamed tool call ID.");
+    if (state.message.function_call != null) throw new Error("EXAONE recovery returned a legacy function call.");
     validateReplacement(choices, expectedTool);
-    return;
+    return { arguments: state.calls.values().next().value!.function.arguments, usage: state.usage };
   }
   try {
     validateRecoveryResponse(choices, key, tools, state.usage);
@@ -1051,11 +1117,63 @@ function validateRecoveryPayloads(
     if (error instanceof InvalidToolArguments && state.multipleIdFragments) {
       throw new Error("Cannot recover a tool call with ambiguous streamed ID fragments.");
     }
-    if (error instanceof InvalidToolArguments && router.exposed) {
-      throw new Error("EXAONE returned malformed tool arguments after output was exposed.");
-    }
     throw error;
   }
+  return undefined;
+}
+
+function* replaceStreamArguments(
+  payloads: ChatCompletionChunk[], call: InvalidCallDetails, correction: { arguments: string; usage: unknown }, key: string,
+): Generator<RecoveryPayload> {
+  let written = false;
+  let originalUsage: Record<string, unknown> | undefined;
+  for (const payload of payloads) {
+    const { usage, ...frame } = payload;
+    if (usage) originalUsage = usage;
+    const choice = frame.choices?.[0];
+    const fragments = choice?.delta?.tool_calls;
+    if (choice?.delta && Array.isArray(fragments) && fragments.length) {
+      const { tool_calls: _toolCalls, ...delta } = choice.delta;
+      if (!written) {
+        written = true;
+        yield { ...frame, choices: [{ ...choice, delta: { ...delta, tool_calls: [{
+          id: call.id, type: "function", index: fragments[0]!.index,
+          function: { name: call.name, arguments: correction.arguments },
+        }] } }] };
+        continue;
+      }
+      yield { ...frame, choices: [{ ...choice, delta }] };
+    } else {
+      yield frame;
+    }
+  }
+  const correctedUsage = isRecord(correction.usage) ? correction.usage : undefined;
+  yield { choices: [], [correctionAccounting]: {
+    usage: mergeRecoveryUsage(mapUsage(originalUsage), mapUsage(correctedUsage)),
+    metadata: { attempts: 1, failed_usage: call.usage, correction_usage: redactSecret(correctedUsage, key) },
+    wireUsage: redactSecret(originalUsage, key) as Record<string, unknown> | undefined,
+  } };
+}
+
+function mergeRecoveryUsage(left?: UsageMetadata, right?: UsageMetadata): UsageMetadata | undefined {
+  if (!left || !right) return left ?? right;
+  const result: UsageMetadata = {
+    input_tokens: left.input_tokens + right.input_tokens,
+    output_tokens: left.output_tokens + right.output_tokens,
+    total_tokens: left.total_tokens + right.total_tokens,
+  };
+  if (!Object.values(result).every(validUsageCount)) return left;
+  const input: NonNullable<UsageMetadata["input_token_details"]> = {};
+  const output: NonNullable<UsageMetadata["output_token_details"]> = {};
+  for (const field of ["cache_read", "cache_creation"] as const) {
+    const a = left.input_token_details?.[field], b = right.input_token_details?.[field];
+    if (a !== undefined && b !== undefined && validUsageCount(a + b)) input[field] = a + b;
+  }
+  const a = left.output_token_details?.reasoning, b = right.output_token_details?.reasoning;
+  if (a !== undefined && b !== undefined && validUsageCount(a + b)) output.reasoning = a + b;
+  if (Object.keys(input).length) result.input_token_details = input;
+  if (Object.keys(output).length) result.output_token_details = output;
+  return result;
 }
 
 class RecoveryPayloadRouter {
@@ -1065,7 +1183,11 @@ class RecoveryPayloadRouter {
   private leading: ChatCompletionChunk[] = [];
   private readonly pending: ChatCompletionChunk[] = [];
 
-  constructor(private readonly bufferResponse: boolean) {}
+  readonly content: string[] = [];
+  readonly reasoning: string[] = [];
+  readonly unsupportedRecoveryFields: Record<string, true> = {};
+
+  constructor(private readonly rememberText: boolean) {}
 
   accept(payload: ChatCompletionChunk): ChatCompletionChunk[] {
     let choice = payload.error == null ? getStreamChoice(payload.choices) : undefined;
@@ -1075,18 +1197,15 @@ class RecoveryPayloadRouter {
       choice = rest;
       payload = { ...payload, choices: [choice] };
     }
-    if (this.bufferResponse) {
-      this.pending.push(payload);
-      return [];
-    }
+    this.captureContext(delta);
     const hasTools = Array.isArray(delta.tool_calls) ? delta.tool_calls.length > 0 : delta.tool_calls != null;
     if (!hasStreamOutput(delta)) {
-      if (hasTools || this.pending.length) this.pending.push(payload);
+      if (hasTools || this.pending.length || payload.usage != null) this.pending.push(payload);
       else if (this.exposed || payload.error != null) return [payload];
       else this.leading.push(payload);
       return [];
     }
-    if (choice && (hasTools || (this.pending.length && choice.finish_reason != null))) {
+    if (choice && (hasTools || payload.usage != null || (this.pending.length && choice.finish_reason != null))) {
       const [early, tool] = splitRecoveryPayload(payload, choice, delta);
       this.pending.push(tool);
       payload = early;
@@ -1096,6 +1215,16 @@ class RecoveryPayloadRouter {
   }
 
   finish(): ChatCompletionChunk[] { return [...this.leading, ...this.pending]; }
+
+  private captureContext(delta: Record<string, unknown>): void {
+    for (const field of ["audio", "annotations", "function_call"]) {
+      if (delta[field] != null) this.unsupportedRecoveryFields[field] = true;
+    }
+    if (!this.rememberText) return;
+    if (typeof delta.content === "string" && delta.content) this.content.push(delta.content);
+    const reasoning = responseReasoning(delta, "stream delta");
+    if (reasoning) this.reasoning.push(reasoning);
+  }
 
   /** Record the finish reason and report repetitions before the SDK merges chunks. */
   private recordCompletion(finish: string | null | undefined, refusal: unknown): boolean {
@@ -1127,6 +1256,14 @@ function splitRecoveryPayload(
   ];
 }
 
+const correctionAccounting = Symbol("EXAONE tool call correction accounting");
+type RecoveryAccounting = {
+  usage: UsageMetadata | undefined;
+  metadata: Record<string, unknown>;
+  wireUsage: Record<string, unknown> | undefined;
+};
+type RecoveryPayload = ChatCompletionChunk & { [correctionAccounting]?: RecoveryAccounting };
+
 interface RecoveryStreamState {
   message: Record<string, unknown>;
   calls: Map<number, { id: string; type: string; function: { name: string; arguments: string } }>;
@@ -1140,12 +1277,6 @@ function accumulateRecoveryPayload(state: RecoveryStreamState, payload: ChatComp
   const choice = payload.choices[0];
   if (!choice || !isRecord(choice.delta)) return;
   const delta = choice.delta;
-  if (typeof delta.content === "string") state.message.content = String(state.message.content) + delta.content;
-  const reasoning = responseReasoning(delta, "stream delta");
-  if (reasoning) state.message.reasoning_content = String(state.message.reasoning_content) + reasoning;
-  for (const key of ["audio", "annotations", "function_call"]) {
-    if (delta[key] != null) state.message[key] = delta[key];
-  }
   if (Array.isArray(delta.tool_calls)) delta.tool_calls.forEach((fragment) => accumulateRecoveryCall(state, fragment));
 }
 

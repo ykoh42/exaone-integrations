@@ -76,7 +76,7 @@ def _json_syntax_diagnostic(arguments: str) -> str | None:
     return None
 
 
-def _raise_malformed_tool_call(item: _Tool, arguments: str, usage: dict[str, Any] | None) -> None:
+def _raise_malformed_tool_call(item: _Tool, arguments: str, usage: dict[str, Any] | None, secret: str) -> None:
     if not arguments.strip():
         return
     detail = _json_syntax_diagnostic(arguments)
@@ -84,6 +84,8 @@ def _raise_malformed_tool_call(item: _Tool, arguments: str, usage: dict[str, Any
         return
     if item.id_fragments > 1:
         raise ExaoneError("Cannot recover a tool call with ambiguous streamed ID fragments")
+    if any(redact(value, secret) != value for value in (arguments, item.name, item.ident)):
+        raise ExaoneError("Invalid tool arguments in EXAONE response")
     failure = MalformedToolCallError(item.ident, item.name, arguments, detail)
     failure.usage = {
         name: value
@@ -152,6 +154,8 @@ class StreamDecoder:
     done: bool = False
     refusal: str = ""
     has_non_whitespace_content: bool = False
+    _recovery_text: list[str] = field(default_factory=list)
+    _recovery_reasoning: list[str] = field(default_factory=list)
 
     def _switch(self, kind: str) -> Iterator[dict[str, Any]]:
         if self.active != kind:
@@ -163,12 +167,16 @@ class StreamDecoder:
     def _text_events(self, delta: dict[str, Any]) -> Iterator[dict[str, Any]]:
         reasoning = _reasoning_text(delta)
         if reasoning:
+            if self.recoverable_tools:
+                self._recovery_reasoning.append(reasoning)
             yield from self._switch("reasoning")
             yield {"contentBlockDelta": {"delta": {"reasoningContent": {"text": reasoning}}}}
         text = delta.get("content")
         if text is not None and not isinstance(text, str):
             raise ExaoneError("Invalid content delta")
         if text:
+            if self.recoverable_tools:
+                self._recovery_text.append(text)
             if text.strip():
                 self.has_non_whitespace_content = True
             yield from self._switch("text")
@@ -239,7 +247,7 @@ class StreamDecoder:
                 raise ExaoneError("Multiple finish reasons received")
             self.finish_reason = finish
 
-    def _tool_events(self, *, truncated: bool = False) -> Iterator[dict[str, Any]]:
+    def _tool_events(self, *, truncated: bool = False, secret: str = "") -> Iterator[dict[str, Any]]:
         if self.diagnose_tool_calls and self.refusal and self.tools:
             raise ExaoneError("EXAONE returned refusal text together with tool calls")
         ids: set[str] = set()
@@ -256,7 +264,7 @@ class StreamDecoder:
             # truncated call. Preserve its fragments verbatim, without repair.
             if not truncated:
                 if item.name in self.recoverable_tools and len(self.tools) == 1:
-                    _raise_malformed_tool_call(item, arguments, self.usage)
+                    _raise_malformed_tool_call(item, arguments, self.usage, secret)
                 _validate_tool_arguments(arguments)
             validated.append((item, arguments))
         for item, arguments in validated:
@@ -294,8 +302,36 @@ class StreamDecoder:
             yield {"contentBlockDelta": {"delta": {"text": self.refusal}}}
             yield {"contentBlockStop": {}}
             self.active = None
-        yield from self._tool_events(truncated=self.finish_reason == "length")
+        yield from self._tool_events(truncated=self.finish_reason == "length", secret=secret)
         yield {"messageStop": {"stopReason": "tool_use" if named_tool_stop else reasons[self.finish_reason]}}
+
+    def recovery_messages(self, error: MalformedToolCallError) -> list[dict[str, Any]]:
+        assistant = {
+            "role": "assistant",
+            "content": "".join(self._recovery_text),
+            "tool_calls": [
+                {"id": error.call_id, "type": "function", "function": {"name": error.name, "arguments": "{}"}}
+            ],
+        }
+        if self._recovery_reasoning:
+            assistant["reasoning_content"] = "".join(self._recovery_reasoning)
+        diagnostic = json.dumps(
+            {"raw_arguments": error.arguments, "parse_error": error.detail}, ensure_ascii=False, separators=(",", ":")
+        )
+        detail = (
+            "Error: Invalid tool-call JSON. Tool not executed. The previous tool call is a placeholder.\n"
+            f"{diagnostic}\nCall {error.name} once with a valid JSON object."
+        )
+        return [assistant, {"role": "tool", "tool_call_id": error.call_id, "content": detail}]
+
+    def replace_tool_arguments(self, correction: StreamDecoder, *, require_done: bool, secret: str) -> None:
+        if correction.finish_reason == "length" and (correction.done or not require_done):
+            self.tools.clear()
+            self.finish_reason = "length"
+            return
+        for _ in correction.finish(require_done=require_done, secret=secret):
+            pass
+        next(iter(self.tools.values())).arguments = next(iter(correction.tools.values())).arguments
 
     def _validate_replacement(self, named_tool_stop: bool) -> None:
         if self.finish_reason == "length":

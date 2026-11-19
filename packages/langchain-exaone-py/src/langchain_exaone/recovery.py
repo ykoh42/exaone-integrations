@@ -6,8 +6,6 @@ continues to require only langchain-core.
 
 from __future__ import annotations
 
-import json
-import re
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from typing import Any
@@ -20,20 +18,10 @@ from langchain_exaone._recovery import (
     MalformedToolArguments,
     RecoveryState,
     check_tool_completion,
+    correction_prompt,
     recovery_state,
 )
-from langchain_exaone.chat_models import ExaoneAPIError
-
-
-def _named_choice_unsupported(error: ExaoneAPIError) -> bool:
-    if error.status_code not in {400, 422, 501}:
-        return False
-    if error.code == "unsupported_tool_choice" or (error.param == "tool_choice" and error.code == "unsupported_value"):
-        return True
-    message = str(error).lower()
-    return bool(re.search(r"named (?:function|tool)|(?:function|object)[- ](?:type|valued) tool_choice", message)) and (
-        "not support" in message or "unsupported" in message
-    )
+from langchain_exaone.chat_models import ExaoneAPIError, _named_choice_unsupported
 
 
 def _check_agent_response(response: ModelResponse[Any]) -> ModelResponse[Any]:
@@ -61,15 +49,8 @@ def _retry_request(request: ModelRequest[Any], failed: AIMessage, error: Malform
             "invalid_tool_calls": [],
         }
     )
-    diagnostic = json.dumps(
-        {"raw_arguments": raw, "parse_error": error.detail}, ensure_ascii=False, separators=(",", ":")
-    )
     feedback = ToolMessage(
-        content=(
-            "Error: Invalid tool-call JSON. Tool not executed. The previous tool call is a placeholder.\n"
-            f"{diagnostic}\n"
-            f"Call {name} once with a valid JSON object."
-        ),
+        content=correction_prompt(name, raw, error.detail),
         tool_call_id=ident,
         name=name,
         status="error",
@@ -103,21 +84,13 @@ def _record_recovery(response: ModelResponse[Any], error: MalformedToolArguments
 
 
 class ToolCallRecoveryMiddleware(AgentMiddleware):
-    """Retry one malformed JSON tool call before its output reaches the agent.
-
-    The default forwards text as it arrives and only retries before exposure.
-    Set `buffer_response=True` to withhold the full response before validation.
-    """
-
-    def __init__(self, *, buffer_response: bool = False) -> None:
-        """Select whether to hold text until the model response passes validation."""
-        self.buffer_response = buffer_response
+    """Enable correction for a single malformed JSON tool call."""
 
     def wrap_model_call(
         self, request: ModelRequest[Any], handler: Callable[[ModelRequest[Any]], ModelResponse]
     ) -> ModelResponse:
         """Wrap one synchronous model invocation."""
-        state = RecoveryState(buffer_response=self.buffer_response)
+        state = RecoveryState()
         token = recovery_state.set(state)
         try:
             try:
@@ -143,7 +116,7 @@ class ToolCallRecoveryMiddleware(AgentMiddleware):
         self, request: ModelRequest[Any], handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse]]
     ) -> ModelResponse:
         """Wrap one asynchronous model invocation."""
-        state = RecoveryState(buffer_response=self.buffer_response)
+        state = RecoveryState()
         token = recovery_state.set(state)
         try:
             try:

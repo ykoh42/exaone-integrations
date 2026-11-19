@@ -238,22 +238,22 @@ import { toolCallRecovery } from 'strands-exaone'
 agent.addMiddleware(InvokeModelStage, toolCallRecovery())
 ```
 
-Text and reasoning stream as they arrive. Tool events are released after the arguments have been checked. Recovery can retry one malformed call before any output is emitted. To wait for validation before streaming any part of the response, register `toolCallRecovery({ bufferResponse: true })`.
+Text and reasoning stream as they arrive. Tool arguments are checked before they are sent to the agent. If a single completed call contains broken JSON, the provider requests a correction and emits only the validated arguments under the original tool call ID.
 
 With the middleware enabled, a refusal blocks tool execution even when the response also includes ordinary text.
-Recovery uses the actual tools and tool choice sent to EXAONE. A correction is skipped if another middleware removes that tool or overrides the correction's tool choice. A correction stopped by the output limit follows the SDK's normal max-token handling.
+Recovery uses the tools available in the effective model request. A correction stopped by the output limit follows the SDK's normal max-token handling.
 
 Recovery sends the original argument text and JSON diagnostic as a matching error tool result. For transport compatibility the failed assistant call has `{}` arguments in that retry, explicitly described as a placeholder in the tool result. The placeholder is never executed. The original system prompt and user messages are retained. Mixed calls, incomplete calls, length stops, refusals and ambiguous streamed call IDs are not automatically recovered. If recovery is unsuccessful, the error is propagated.
 
 The tool result contains `raw_arguments` and `parse_error`. Diagnostic line and column numbers refer to the original argument text.
 
-Only the correction request selects the failed tool by name. If the endpoint explicitly rejects named tool choice before emitting a response, the middleware tries `tool_choice="required"` once. Recovery succeeds only with a completed reply containing exactly one call to the original tool with a valid JSON object as its arguments. The SDK validates Zod-backed input schemas before execution. Plain JSON Schema describes the expected inputs, and the tool implementation defines its runtime validation.
+Only the correction request selects the failed tool by name. If the endpoint explicitly rejects named tool choice before emitting a response, the provider tries `tool_choice="required"` once. Recovery succeeds only with a completed reply containing exactly one call to the original tool with a valid JSON object as its arguments. The SDK validates Zod-backed input schemas before execution. Plain JSON Schema describes the expected inputs, and the tool implementation defines its runtime validation.
 
 The middleware applies to direct `ExaoneModel` instances; other model implementations and subclasses pass through unchanged.
 
 Empty or whitespace-only tool input is not automatically retried; the SDK handles it according to its existing rules, which can allow a tool's default arguments to run.
 
-On successful recovery, `onMetadata` receives `recovery.failedAttempts` with the failed response's usage if the server supplied it. When both attempts report valid token counts, the SDK model usage includes both attempts; `onMetadata.usage` remains the raw usage from the successful response. Missing usage cannot be inferred. If the retry fails before a successful response, the earlier attempt's usage is not currently reported by `onMetadata`.
+On successful recovery, `onMetadata` receives `recovery.failedAttempts` with the failed response's usage if the server supplied it. When both attempts report valid token counts, the SDK model usage includes both attempts; `onMetadata.usage` contains the original request's usage, and `recovery.correctionUsage` contains the correction request's usage. Missing usage cannot be inferred. If the retry fails before a successful response, the earlier attempt's usage is not currently reported by `onMetadata`.
 
 ## Metadata and errors
 

@@ -10,7 +10,7 @@ from strands.types.content import ContentBlock, Message, Messages, SystemContent
 from strands.types.tools import ToolChoice, ToolResult, ToolSpec, ToolUse
 
 
-def _text_of_result(result: ToolResult, *, add_error_prefix: bool = True) -> str:
+def _text_of_result(result: ToolResult) -> str:
     parts: list[str] = []
     for item in result.get("content", []):
         if "text" in item:
@@ -20,7 +20,7 @@ def _text_of_result(result: ToolResult, *, add_error_prefix: bool = True) -> str
         else:
             raise ValueError("EXAONE supports text and JSON tool results only")
     text = "\n".join(parts)
-    return f"[ERROR] {text}" if add_error_prefix and result.get("status") == "error" else text
+    return f"[ERROR] {text}" if result.get("status") == "error" else text
 
 
 def _tool_call(tool: ToolUse) -> dict[str, Any]:
@@ -58,7 +58,6 @@ def _image_part(image: dict[str, Any]) -> dict[str, Any]:
 
 def _message_parts(
     message: Message,
-    recovery_tool_id: str | None,
 ) -> tuple[list[dict[str, Any]], list[str], list[dict[str, Any]], list[dict[str, Any]]]:
     content: list[dict[str, Any]] = []
     reasoning: list[str] = []
@@ -77,7 +76,7 @@ def _message_parts(
         elif "toolResult" in block and role == "user":
             result = block["toolResult"]
             tool_id = result["toolUseId"]
-            text = _text_of_result(result, add_error_prefix=tool_id != recovery_tool_id)
+            text = _text_of_result(result)
             results.append({"role": "tool", "tool_call_id": tool_id, "content": text})
         else:
             raise ValueError(f"Unsupported EXAONE content block for {role}: {', '.join(block)}")
@@ -98,11 +97,11 @@ def _user_content(content: list[dict[str, Any]]) -> str | list[dict[str, Any]]:
     return "".join(part["text"] for part in content)
 
 
-def _format_message(message: Message, recovery_tool_id: str | None) -> list[dict[str, Any]]:
+def _format_message(message: Message) -> list[dict[str, Any]]:
     role = message["role"]
     if role not in {"user", "assistant"}:
         raise ValueError(f"Unsupported Strands message role: {role}")
-    content, reasoning, calls, results = _message_parts(message, recovery_tool_id)
+    content, reasoning, calls, results = _message_parts(message)
     if role == "assistant":
         assistant: dict[str, Any] = {"role": "assistant", "content": "".join(part["text"] for part in content)}
         if reasoning:
@@ -121,14 +120,11 @@ def format_messages(
     messages: Messages,
     system_prompt: str | None,
     system_prompt_content: list[SystemContentBlock] | None,
-    *,
-    recovery_tool_id: str | None = None,
 ) -> list[dict[str, Any]]:
     """Build ordered wire messages without losing thinking or tool result IDs."""
     output = _system_messages(system_prompt, system_prompt_content)
-    for index, message in enumerate(messages):
-        # The appended recovery result already uses the SDK's Error: form.
-        output.extend(_format_message(message, recovery_tool_id if index == len(messages) - 1 else None))
+    for message in messages:
+        output.extend(_format_message(message))
     return output
 
 

@@ -37,7 +37,7 @@ class ExaoneError(Exception):
 
 
 class MalformedToolCallError(ExaoneError):
-    """Internal diagnostic for opt-in, pre-output tool-call recovery."""
+    """Internal diagnostic for a tool call withheld from the SDK."""
 
     def __init__(self, call_id: str, name: str, arguments: str, detail: str) -> None:
         super().__init__("Invalid tool arguments in EXAONE response")
@@ -45,7 +45,6 @@ class MalformedToolCallError(ExaoneError):
         self.name = name
         self.arguments = arguments
         self.detail = detail
-        self.buffered_events: list[dict[str, Any]] = []
         self.usage: dict[str, Any] = {}
 
 

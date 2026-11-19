@@ -21,7 +21,7 @@ from langchain_core.tools import tool  # noqa: E402
 from langgraph.checkpoint.memory import MemorySaver  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
-from langchain_exaone import ChatEXAONE  # noqa: E402
+from langchain_exaone import ChatEXAONE, ExaoneAPIError  # noqa: E402
 from langchain_exaone._recovery import MalformedToolArguments  # noqa: E402
 from langchain_exaone.recovery import ToolCallRecoveryMiddleware  # noqa: E402
 
@@ -54,12 +54,13 @@ def sse(
     if message.get("tool_calls"):
         calls = message["tool_calls"]
         has_failure = include_failure_text and any("123," in call["function"]["arguments"] for call in calls)
+        reasoning = "synthetic reasoning" if has_failure else message.get("reasoning_content")
         payloads.append(
             {
                 "index": 0,
                 "delta": {
-                    "content": "hidden-failure " if has_failure else "",
-                    **({"reasoning_content": "synthetic reasoning"} if has_failure else {}),
+                    "content": "hidden-failure " if has_failure else message.get("content") or "",
+                    **({"reasoning_content": reasoning} if reasoning else {}),
                 },
             }
         )
@@ -105,6 +106,8 @@ def sse(
     records = [{"id": "synthetic", "choices": [item]} for item in payloads]
     if "usage" in data:
         records.append({"id": "synthetic", "choices": [], "usage": data["usage"]})
+    if "error" in data:
+        records.append({"id": "synthetic", "choices": [], "error": data["error"]})
     return b"".join(("data: " + json.dumps(item) + "\n\n").encode() for item in records) + b"data: [DONE]\n\n"
 
 
@@ -122,7 +125,6 @@ def run_agent(
     split_id: bool = False,
     correction: dict[str, Any] | None = None,
     named_rejection: str | None = None,
-    buffer_response: bool = True,
     include_failure_text: bool = True,
     observe_first_frame: bool = False,
     repeated_finish: bool = False,
@@ -198,7 +200,7 @@ def run_agent(
             tools=[transfer],
             system_prompt="A synthetic system prompt.",
             middleware=([StrictChoice()] if strict or named else [])
-            + ([ToolCallRecoveryMiddleware(buffer_response=buffer_response)] if enabled else [])
+            + ([ToolCallRecoveryMiddleware()] if enabled else [])
             + ([inner] if inner is not None else []),
         )
         try:
@@ -236,24 +238,51 @@ def agent_messages(output: list[Any], *, stream: bool) -> list[Any]:
 
 
 @pytest.mark.parametrize("visible_text", [False, True])
-def test_live_recovery_only_retries_before_text_is_exposed(visible_text: bool) -> None:
+def test_live_recovery_keeps_text_and_tool_in_one_message(visible_text: bool) -> None:
+    replacement = completion('{"amount":123}')
+    replacement["choices"][0]["message"].update(
+        content="Private correction text", reasoning_content="Private correction reasoning"
+    )
+    replacement["usage"] = {"prompt_tokens": 6, "completion_tokens": 7, "total_tokens": 13}
     result = run_agent(
         completion('{"amount":123,}'),
         stream=True,
-        buffer_response=False,
         include_failure_text=visible_text,
         observe_first_frame=True,
+        correction=replacement,
     )
+    assert result["error"] is None
+    assert [request.get("tool_choice") for request in result["requests"]] == [None, NAMED_TRANSFER, None]
+    assert result["executions"] == [123]
+    assert "Private correction" not in str(result["output"])
+    assert "Private correction" not in str(result["requests"][-1])
+    calls = [message for message, _ in result["output"] if getattr(message, "tool_call_chunks", None)]
+    assert len(calls) == 1
+    assert calls[0].tool_call_chunks[0]["id"] == "call_bad"
+    usage = [
+        chunk for chunk, _ in result["output"] if chunk.id == calls[0].id and getattr(chunk, "usage_metadata", None)
+    ]
+    assert len(usage) == 1
+    assert usage[0].usage_metadata == {"input_tokens": 11, "output_tokens": 14, "total_tokens": 25}
+    assert usage[0].response_metadata["usage"]["total_tokens"] == 12
+    assert usage[0].response_metadata["exaone_tool_call_recovery"]["correction_usage"]["total_tokens"] == 13
     if visible_text:
-        assert "after output was exposed" in str(result["error"])
-        assert "hidden-failure" in str(result["output"])
-        assert all(not message.tool_call_chunks for message, _ in result["output"])
-        assert len(result["requests"]) == 1
-        assert result["executions"] == []
-    else:
-        assert result["error"] is None
-        assert [request.get("tool_choice") for request in result["requests"]] == [None, NAMED_TRANSFER, None]
-        assert result["executions"] == [123]
+        text = [message for message, _ in result["output"] if "hidden-failure" in str(message.content)]
+        assert len(text) == 1 and text[0].id == calls[0].id
+
+
+@pytest.mark.parametrize("error_on_correction", [False, True])
+def test_stream_error_after_tool_finish_blocks_execution(error_on_correction: bool) -> None:
+    original = completion('{"amount":123,}')
+    correction = completion('{"amount":123}')
+    failed = correction if error_on_correction else original
+    failed["error"] = {"message": "Synthetic stream error", "code": "internal_server_error"}
+    result = run_agent(original, correction=correction, stream=True)
+    assert isinstance(result["error"], ExaoneAPIError)
+    assert result["error"].code == "internal_server_error"
+    assert len(result["requests"]) == (2 if error_on_correction else 1)
+    assert result["executions"] == []
+    assert not any(getattr(chunk, "tool_call_chunks", None) for chunk, _ in result["output"])
 
 
 @pytest.mark.parametrize("stream", [False, True])
@@ -284,24 +313,25 @@ def test_recovery_delivers_error_to_model_without_changing_user_or_system(stream
         "parse_error": f"{error.msg} (line {error.lineno}, column {error.colno})",
     }
     assert instruction.startswith("Call transfer once")
-    assert "hidden-failure" not in str(result["output"])
-    assert "hidden-failure" not in "".join(result["observed_tokens"])
-    assert len(result["observed_errors"]) == 1
-    assert isinstance(result["observed_errors"][0], MalformedToolArguments)
-    assert result["observed_errors"][0].usage == {"prompt_tokens": 5, "completion_tokens": 7, "total_tokens": 12}
-    assert not hasattr(result["observed_errors"][0], "message")
-    assert "hidden-failure" not in repr(result["observed_errors"][0])
-    if not stream:
-        assert "The previous tool call is a placeholder." not in str(result["output"])
-    else:
+    assert "The previous tool call is a placeholder." not in str(result["output"])
+    if stream:
+        assert result["observed_errors"] == []
         assert feedback[-2]["content"] == "hidden-failure "
         assert feedback[-2]["reasoning_content"] == "synthetic reasoning"
+        assert "hidden-failure" in "".join(result["observed_tokens"])
+    else:
+        assert "hidden-failure" not in str(result["output"])
+        assert len(result["observed_errors"]) == 1
+        assert isinstance(result["observed_errors"][0], MalformedToolArguments)
+        assert result["observed_errors"][0].usage == {"prompt_tokens": 5, "completion_tokens": 7, "total_tokens": 12}
+        assert not hasattr(result["observed_errors"][0], "message")
+        assert "hidden-failure" not in repr(result["observed_errors"][0])
 
 
 @pytest.mark.parametrize("stream", [False, True])
 def test_normal_request_and_output_are_unchanged(stream: bool) -> None:
     baseline = run_agent(completion('{"amount":123}'), enabled=False, stream=stream)
-    guarded = run_agent(completion('{"amount":123}'), stream=stream, buffer_response=False)
+    guarded = run_agent(completion('{"amount":123}'), stream=stream)
     assert baseline["error"] is None and guarded["error"] is None
     assert baseline["requests"] == guarded["requests"]
     assert baseline["executions"] == guarded["executions"] == [123]
@@ -329,7 +359,7 @@ def test_recovery_uses_the_final_model_request(stream: bool, scenario: str) -> N
         valid_call = completion('{"amount":123}')["choices"][0]["message"]["tool_calls"][0]
         first["choices"][0]["message"]["tool_calls"].append({**valid_call, "id": "call_valid"})
     result = run_agent(first, stream=stream, inner=Downstream(), include_failure_text=False)
-    if scenario == "routed_model":
+    if scenario == "routed_model" or (stream and scenario in {"filtered_correction", "overridden_choice"}):
         assert result["error"] is None
         assert [request.get("tool_choice") for request in result["requests"]] == [None, NAMED_TRANSFER, None]
         assert result["executions"] == [123]
@@ -424,7 +454,7 @@ def test_tool_requires_completed_response(stream: bool, finish: str | None, refu
     first["choices"][0]["finish_reason"] = finish
     if refusal:
         first["choices"][0]["message"]["refusal"] = "Declined."
-    result = run_agent(first, stream=stream, buffer_response=False)
+    result = run_agent(first, stream=stream)
     assert "without a completed tool response" in str(result["error"])
     assert len(result["requests"]) == 1
     assert result["executions"] == []
@@ -433,9 +463,8 @@ def test_tool_requires_completed_response(stream: bool, finish: str | None, refu
         assert "Declined." in str(result["output"])
 
 
-@pytest.mark.parametrize("buffer_response", [False, True])
-def test_repeated_finish_is_delivered_once_for_a_completed_tool(buffer_response: bool) -> None:
-    result = run_agent(completion('{"amount":123}'), stream=True, repeated_finish=True, buffer_response=buffer_response)
+def test_repeated_finish_is_delivered_once_for_a_completed_tool() -> None:
+    result = run_agent(completion('{"amount":123}'), stream=True, repeated_finish=True)
     assert result["error"] is None
     assert len(result["requests"]) == 2
     assert result["executions"] == [123]
@@ -446,7 +475,7 @@ def test_repeated_finish_is_delivered_once_for_a_completed_tool(buffer_response:
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
 def test_nonstandard_json_values_fail_before_tool_execution(stream: bool, constant: str) -> None:
-    result = run_agent(completion(f'{{"amount":{constant}}}'), stream=stream, buffer_response=False)
+    result = run_agent(completion(f'{{"amount":{constant}}}'), stream=stream)
     assert "unsupported JSON value" in str(result["error"])
     assert len(result["requests"]) == 1
     assert result["executions"] == []
@@ -524,22 +553,22 @@ async def test_recovery_reuses_only_validated_cache_entries(asynchronous: bool) 
             assert all("_exaone_tool_call_recovery" not in body for body in requests)
 
 
-def test_incomplete_stream_does_not_retry_or_emit_partial_output() -> None:
+def test_incomplete_stream_does_not_retry_or_emit_tool_arguments() -> None:
     result = run_agent(completion('{"amount":123,}'), stream=True, complete_stream=False)
     assert len(result["requests"]) == 1
     assert result["executions"] == []
     assert isinstance(result["error"], ValueError)
     assert "[DONE]" in str(result["error"])
-    assert "hidden-failure" not in str(result["output"])
-    assert "hidden-failure" not in "".join(result["observed_tokens"])
+    assert all(not chunk.tool_call_chunks for chunk, _ in result["output"])
+    assert result["observed_tokens"] == ["hidden-failure "]
 
 
 def test_malformed_stream_with_multiple_id_fragments_is_not_retried() -> None:
     result = run_agent(completion('{"amount":123,}'), stream=True, split_id=True)
     assert len(result["requests"]) == 1
     assert result["executions"] == []
-    assert result["output"] == []
-    assert result["observed_tokens"] == []
+    assert all(not chunk.tool_call_chunks for chunk, _ in result["output"])
+    assert result["observed_tokens"] == ["hidden-failure "]
     assert isinstance(result["error"], ValueError)
     assert "ambiguous" in str(result["error"])
     assert result["error"].__context__ is None
@@ -581,8 +610,11 @@ def test_does_not_resend_call_id_or_name_containing_credentials(stream: bool, fi
     result = run_agent(first, api_key="fixture +/", stream=stream)
     assert len(result["requests"]) == 1
     assert result["executions"] == []
-    assert result["output"] == []
-    assert result["observed_tokens"] == []
+    if stream:
+        assert all(not chunk.tool_call_chunks for chunk, _ in result["output"])
+    else:
+        assert result["output"] == []
+    assert result["observed_tokens"] == (["hidden-failure "] if stream else [])
     assert isinstance(result["error"], ValueError)
     assert result["error"].__context__ is None
     assert credential not in str(result["error"])
@@ -654,7 +686,7 @@ def test_invalid_corrections_never_execute(case: str, stream: bool) -> None:
             calls.append({**calls[0], "id": "extra"})
     result = run_agent(completion('{"amount":123,}'), stream=stream, correction=corrected)
     assert result["error"] is not None
-    assert result["observed_tokens"] == []
+    assert result["observed_tokens"] == (["hidden-failure "] if stream else [])
     assert result["executions"] == []
     assert len(result["requests"]) == 2
 
@@ -680,7 +712,7 @@ def test_named_tool_stop_finish_recovery_and_normal_path(stream: bool) -> None:
     assert messages[-2]["tool_calls"][0]["id"] == "call_bad"
     assert messages[-1]["role"] == "tool" and messages[-1]["tool_call_id"] == "call_bad"
     assert json.loads(messages[-1]["content"].split("\n")[1])["raw_arguments"] == '{"amount":123,}'
-    assert "hidden-failure" not in str(recovered["output"])
+    assert ("hidden-failure" in str(recovered["output"])) == stream
 
 
 def test_recovery_delimits_multiline_arguments_and_uses_original_character_location() -> None:
@@ -706,8 +738,11 @@ def test_mixed_valid_and_invalid_calls_fail_before_tool_execution(stream: bool) 
     assert isinstance(result["error"], ValueError)
     assert "multi-tool" in str(result["error"])
     assert result["error"].__context__ is None
-    assert result["output"] == []
-    assert result["observed_tokens"] == []
+    if stream:
+        assert all(not chunk.tool_call_chunks for chunk, _ in result["output"])
+    else:
+        assert result["output"] == []
+    assert result["observed_tokens"] == (["hidden-failure "] if stream else [])
 
 
 @pytest.mark.parametrize("stream", [False, True])
@@ -733,8 +768,11 @@ def test_multiple_malformed_calls_fail_before_tool_execution(stream: bool) -> No
     assert result["executions"] == []
     assert isinstance(result["error"], ValueError)
     assert "multi-tool" in str(result["error"])
-    assert result["output"] == []
-    assert result["observed_tokens"] == []
+    if stream:
+        assert all(not chunk.tool_call_chunks for chunk, _ in result["output"])
+    else:
+        assert result["output"] == []
+    assert result["observed_tokens"] == (["hidden-failure "] if stream else [])
 
 
 @pytest.mark.parametrize("stream", [False, True])
@@ -768,7 +806,8 @@ def test_multiple_valid_calls_keep_native_behavior(stream: bool) -> None:
     assert baseline["observed_tokens"] == guarded["observed_tokens"]
 
 
-async def test_cancellation_does_not_retry_or_execute_tool() -> None:
+@pytest.mark.parametrize("during_correction", [False, True])
+async def test_cancellation_does_not_retry_or_execute_tool(during_correction: bool) -> None:
     requests: list[httpx.Request] = []
     executions: list[int] = []
     received = asyncio.Event()
@@ -781,6 +820,8 @@ async def test_cancellation_does_not_retry_or_execute_tool() -> None:
 
     async def cancel(request: httpx.Request) -> httpx.Response:
         requests.append(request)
+        if during_correction and len(requests) == 1:
+            return httpx.Response(200, content=sse(completion('{"amount":123,}')))
         received.set()
         await asyncio.Event().wait()
         raise AssertionError("unreachable")
@@ -791,12 +832,25 @@ async def test_cancellation_does_not_retry_or_execute_tool() -> None:
             tools=[transfer],
             middleware=[ToolCallRecoveryMiddleware()],
         )
-        task = asyncio.create_task(agent.ainvoke({"messages": [{"role": "user", "content": "Record 123."}]}))
-        await received.wait()
+        user = {"messages": [{"role": "user", "content": "Record 123."}]}
+        visible = []
+        first_text = asyncio.Event()
+
+        async def consume() -> None:
+            async for chunk, _ in agent.astream(user, stream_mode="messages"):
+                if chunk.content:
+                    visible.append(chunk.content)
+                    first_text.set()
+
+        task = asyncio.create_task(consume() if during_correction else agent.ainvoke(user))
+        await asyncio.wait_for(received.wait(), 2)
+        if during_correction:
+            await asyncio.wait_for(first_text.wait(), 2)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
-    assert len(requests) == 1
+    assert len(requests) == (2 if during_correction else 1)
+    assert visible == (["hidden-failure "] if during_correction else [])
     assert executions == []
 
 
