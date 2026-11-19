@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0 (2026-11-20)
+
+- **Breaking change.** Remove the `bufferResponse` option. Use `toolCallRecovery()` with `createMiddleware`.
+- Keep text and reasoning flowing while opt-in recovery checks tool arguments. Resume the original stream with the corrected arguments and original tool-call ID.
+- Keep conversation history and prior tool results available to the correction request. Report usage from both streaming requests.
+- Reject malformed tool calls that are mixed with unsupported legacy calls.
+
 ## 0.1.5 (2026-11-20)
 
 - Start with Deep Agents and include a runnable example of opt-in tool-call recovery.

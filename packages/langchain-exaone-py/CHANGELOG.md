@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0 (2026-11-20)
+
+- **Breaking change.** Remove the `buffer_response` option. Instantiate `ToolCallRecoveryMiddleware()` without arguments.
+- Keep text and reasoning flowing while opt-in recovery checks tool arguments. Resume the original stream with the corrected arguments and original tool-call ID.
+- Keep conversation history and prior tool results available to the correction request. Report usage from both streaming requests.
+- Reject server errors received in the event stream before releasing the tool call.
+
 ## 0.1.4 (2026-11-20)
 
 - Add optional `ToolCallRecoveryMiddleware` for malformed tool arguments in LangChain agents.
