@@ -81,4 +81,10 @@ describe('Strands SDK session content', () => {
     const empty = sdk.Message.fromMessageData({ role: 'user', content: [] })
     expect(() => formatMessages([empty])).toThrow('EXAONE user messages cannot be empty')
   })
+
+  it('rejects an empty latest user turn followed by an assistant message', () => {
+    const empty = sdk.Message.fromMessageData({ role: 'user', content: [] })
+    const assistant = sdk.Message.fromMessageData({ role: 'assistant', content: [{ text: 'Done.' }] })
+    expect(() => formatMessages([empty, assistant])).toThrow('EXAONE user messages cannot be empty')
+  })
 })
