@@ -1,8 +1,9 @@
 import { tool } from "@langchain/core/tools";
 import { MemorySaver } from "@langchain/langgraph";
 import { createDeepAgent } from "deepagents";
+import { createMiddleware } from "langchain";
 import { z } from "zod";
-import { ChatExaone } from "langchain-exaone";
+import { ChatExaone, toolCallRecovery } from "langchain-exaone";
 
 const getReleaseNotes = tool(
   () => "Release 1.0: Added Korean documentation and a typed calculator tool.",
@@ -26,6 +27,7 @@ const agent = await createDeepAgent({
     tools: [getReleaseNotes],
   }],
   checkpointer: new MemorySaver(),
+  middleware: process.argv.includes("--recover-tool-calls") ? [createMiddleware(toolCallRecovery())] : [],
 });
 
 const result = await agent.invoke(

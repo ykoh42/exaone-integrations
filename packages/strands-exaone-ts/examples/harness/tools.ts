@@ -1,7 +1,7 @@
 import { createHarness } from '@strands-agents/harness'
-import { tool } from '@strands-agents/sdk'
+import { InvokeModelStage, tool } from '@strands-agents/sdk'
 import { z } from 'zod'
-import { ExaoneModel, ExaoneRetryStrategy } from 'strands-exaone'
+import { ExaoneModel, ExaoneRetryStrategy, toolCallRecovery } from 'strands-exaone'
 
 const getTicket = tool({
   name: 'get_ticket',
@@ -26,6 +26,9 @@ const agent = await createHarness({
 })
 
 try {
+  if (process.argv.includes('--recover-tool-calls')) {
+    agent.addMiddleware(InvokeModelStage, toolCallRecovery())
+  }
   for (const prompt of ['Use get_ticket to check DEMO-42.', 'Who owns that ticket? Answer in Korean.']) {
     const result = await agent.invoke(prompt)
     for (const block of result.lastMessage.content) {

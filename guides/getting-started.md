@@ -40,158 +40,16 @@ Use the raw key value; the provider adds the `Authorization: Bearer ...` header.
 
 Keep the key out of source control and browser code. For deployed applications, supply it through your backend's environment or secret manager.
 
-## Choose a package and run it
+## Run your first agent
 
-Choose the example for your framework and language. You do not need a repository checkout. The providers default to model `k-exaone_v2.5` at `https://api.exaone.ai/v1`, so normal use requires no endpoint configuration.
+The examples below use the hosted K-EXAONE 2.5 endpoint through `EXAONE_API_KEY`.
 
-Use Python 3.10 or newer for Python examples. For TypeScript, use Node.js 22 or newer and run the example through `tsx` as shown. Each invocation sends a request to EXAONE and uses your account's quota; the generated answer can vary.
+| Framework | Python | TypeScript |
+| --- | --- | --- |
+| Strands Harness | [Quick start](../packages/strands-exaone-py/README.md#quick-start) | [Quick start](../packages/strands-exaone-ts/README.md#quick-start) |
+| LangChain Deep Agents | [Quick start](../packages/langchain-exaone-py/README.md#quick-start) | [Quick start](../packages/langchain-exaone-ts/README.md#quick-start) |
 
-For Python, create and activate a virtual environment once if you do not already have one:
-
-macOS, Linux, or WSL:
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-```
-
-Windows PowerShell:
-
-```powershell
-py -m venv .venv
-.\.venv\Scripts\Activate.ps1
-```
-
-### Strands: Python
-
-Install the package in the active environment:
-
-```bash
-python -m pip install strands-exaone
-```
-
-Save this as `agent.py`:
-
-```python
-from strands import Agent
-from strands_exaone import ExaoneModel, ExaoneRetryStrategy
-
-agent = Agent(
-    model=ExaoneModel(),
-    retry_strategy=ExaoneRetryStrategy(),
-    callback_handler=None,
-)
-response = agent("Explain what an AI agent is in one sentence.")
-for block in response.message["content"]:
-    if "text" in block:
-        print(block["text"])
-```
-
-Run it in the terminal where you set the key:
-
-```bash
-python agent.py
-```
-
-See the [package reference](../packages/strands-exaone-py/README.md) and [SDK examples](../packages/strands-exaone-py/examples/sdk/) for tools, streaming, and structured output.
-
-### Strands: TypeScript
-
-In a new project directory, initialize the project and install the package and TypeScript runner:
-
-```bash
-npm init -y
-npm pkg set type=module
-npm install strands-exaone
-npm install --save-dev tsx
-```
-
-Save this as `agent.ts`:
-
-```typescript
-import { Agent } from '@strands-agents/sdk'
-import { ExaoneModel, ExaoneRetryStrategy } from 'strands-exaone'
-
-const agent = new Agent({
-  model: new ExaoneModel(),
-  retryStrategy: new ExaoneRetryStrategy(),
-  printer: false,
-})
-
-try {
-  const response = await agent.invoke('Explain what an AI agent is in one sentence.')
-  for (const block of response.lastMessage.content) {
-    if (block.type === 'textBlock') console.log(block.text)
-  }
-} finally {
-  await agent.shutdown()
-}
-```
-
-Run it in the terminal where you set the key:
-
-```bash
-npx tsx agent.ts
-```
-
-Both Strands examples use `ExaoneRetryStrategy` for Agent-level retries. The provider's own HTTP retries are disabled by default. The examples print the answer text and keep complete assistant messages, including supported reasoning, in agent history.
-
-See the [package reference](../packages/strands-exaone-ts/README.md) and [SDK examples](../packages/strands-exaone-ts/examples/sdk/) for tools, streaming, and structured output.
-
-### LangChain: Python
-
-In your Python virtual environment, install the package:
-
-```bash
-python -m pip install langchain-exaone
-```
-
-Save this as `chat.py`:
-
-```python
-from langchain_exaone import ChatEXAONE
-
-model = ChatEXAONE()
-response = model.invoke("Explain what an AI agent is in one sentence.")
-print(response.text)
-```
-
-Run it in the terminal where you set the key:
-
-```bash
-python chat.py
-```
-
-See the [package reference](../packages/langchain-exaone-py/README.md) and [LangChain examples](../packages/langchain-exaone-py/examples/langchain/) for agents, streaming, and structured output.
-
-### LangChain: TypeScript
-
-In a new project directory, initialize the project and install the package and TypeScript runner:
-
-```bash
-npm init -y
-npm pkg set type=module
-npm install langchain-exaone @langchain/core
-npm install --save-dev tsx
-```
-
-Save this as `chat.ts`:
-
-```typescript
-import { ChatExaone } from 'langchain-exaone'
-
-const model = new ChatExaone()
-const response = await model.invoke('Explain what an AI agent is in one sentence.')
-console.log(response.content)
-```
-
-Run it in the terminal where you set the key:
-
-```bash
-npx tsx chat.ts
-```
-
-See the [package reference](../packages/langchain-exaone-ts/README.md) and [LangChain examples](../packages/langchain-exaone-ts/examples/langchain/) for agents, streaming, and structured output.
+For Python, run the quick-start snippet in a virtual environment. For TypeScript, use Node.js 22 or newer, save the snippet as `agent.mts`, and run `npx tsx agent.mts` from the directory where you installed the dependencies.
 
 ## Troubleshooting
 

@@ -32,4 +32,14 @@ The default StateBackend keeps files in graph state and does not read or write h
 
 The examples read `EXAONE_API_KEY` from the environment without loading `.env` files. To use another trusted compatible endpoint, set `EXAONE_BASE_URL` to its base URL, including `/v1`.
 
+## Optional tool-call recovery
+
+Enable recovery if malformed tool arguments interrupt your agent runs. The example runs with recovery disabled by default.
+
+```bash
+npm start -- --recover-tool-calls
+```
+
+The flag attaches `toolCallRecovery()` to the parent Deep Agent. It can request one correction for eligible invalid JSON before response output is delivered. See the [provider's recovery options](../../README.md#optional-malformed-tool-recovery).
+
 See the [package README](../../README.md) for provider configuration and limitations. These examples follow the public APIs in the official [Deep Agents guide](https://docs.langchain.com/oss/javascript/deepagents/customization) and [reference guide](https://docs.langchain.com/oss/javascript/deepagents/backends), with the EXAONE provider passed explicitly in place of the default model.

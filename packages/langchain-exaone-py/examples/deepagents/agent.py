@@ -1,5 +1,6 @@
 """Plan and delegate a small task using Deep Agents' virtual filesystem."""
 
+import argparse
 import os
 
 from deepagents import create_deep_agent
@@ -7,6 +8,7 @@ from langchain_core.tools import tool
 from langgraph.checkpoint.memory import InMemorySaver
 
 from langchain_exaone import ChatEXAONE
+from langchain_exaone.recovery import ToolCallRecoveryMiddleware
 
 
 @tool
@@ -17,6 +19,9 @@ def get_release_notes() -> str:
 
 def main() -> None:
     """Create and run the release-brief agent."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--recover-tool-calls", action="store_true", help="Retry an eligible malformed tool call")
+    args = parser.parse_args()
     model = ChatEXAONE(base_url=os.getenv("EXAONE_BASE_URL", "https://api.exaone.ai/v1"))
     agent = create_deep_agent(
         model=model,
@@ -32,6 +37,7 @@ def main() -> None:
             }
         ],
         checkpointer=InMemorySaver(),
+        middleware=[ToolCallRecoveryMiddleware()] if args.recover_tool_calls else [],
     )
     result = agent.invoke(
         {

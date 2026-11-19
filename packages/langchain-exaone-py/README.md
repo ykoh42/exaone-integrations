@@ -12,31 +12,28 @@ Get a key from the [EXAONE API Platform](https://docs.exaone.ai/en/docs/overview
 export EXAONE_API_KEY='your-api-key'
 ```
 
-## Install
+## Quick start
 
-The package requires Python 3.10 or newer and `langchain-core` 1.3.3 or newer within the 1.x line. On Python 3.10, the installer selects a compatible Core version from 1.7.x or earlier. Core 1.8 and newer require Python 3.11 or newer. Install the provider from PyPI:
-
-```bash
-pip install -U langchain-exaone
-```
-
-To install from a checkout for development:
+Use Python 3.11 or newer for Deep Agents.
 
 ```bash
-pip install ./packages/langchain-exaone-py
+python -m pip install langchain-exaone 'deepagents~=0.7.37'
 ```
-
-Set `EXAONE_API_KEY` in the environment, then create the model:
 
 ```python
+from deepagents import create_deep_agent
 from langchain_exaone import ChatEXAONE
 
-model = ChatEXAONE()
-message = model.invoke("안녕하세요. K-EXAONE을 소개해 주세요.")
-print(message.text)
+agent = create_deep_agent(model=ChatEXAONE())
+result = agent.invoke({
+    "messages": [{"role": "user", "content": "Explain what an AI agent is in one sentence."}],
+})
+print(result["messages"][-1].text)
 ```
 
-The package does not load `.env` files. Use your application's secret-management setup to place the API key in the process environment, or pass `api_key` directly.
+See the [Deep Agents example](examples/deepagents/) for tool use and delegation. For the model provider alone, install `langchain-exaone` and see the [LangChain examples](examples/langchain/). The provider supports Python 3.10 and newer and `langchain-core` 1.3.3 and newer within 1.x. On Python 3.10 the installer selects Core 1.7.x or earlier.
+
+The provider reads `EXAONE_API_KEY` from the process environment. You can also pass `api_key` to `ChatEXAONE`. Load any application `.env` file before constructing the model.
 
 ## Serialization
 
@@ -111,13 +108,13 @@ Pass `strict=True` to `bind_tools()` to request strict schemas for converted too
 
 ### Optional malformed-tool recovery
 
-For LangChain agents on Python 3.11 or newer, install `langchain-exaone[recovery]` and attach the optional middleware:
+Use this optional middleware when malformed JSON tool arguments interrupt agent runs. The provider works without this middleware. Try `--recover-tool-calls` in the [Deep Agents example](examples/deepagents/#optional-tool-call-recovery). Install `langchain-exaone[recovery]` on Python 3.11 or newer when adding the middleware to your own agent:
 
 ```python
-from langchain.agents import create_agent
+from deepagents import create_deep_agent
 from langchain_exaone.recovery import ToolCallRecoveryMiddleware
 
-agent = create_agent(
+agent = create_deep_agent(
     model=ChatEXAONE(),
     tools=[get_weather],
     middleware=[ToolCallRecoveryMiddleware()],

@@ -14,33 +14,41 @@ export EXAONE_API_KEY='your-api-key'
 
 ## Quick start
 
-The package is published on npm as `strands-exaone`. It requires Node.js 22 or newer and uses `@strands-agents/sdk` 1.24.0 or newer within the 1.x line and Zod 4.5.4 or newer within major version 4 as peer dependencies. Install it in your project with:
+Use Node.js 22 or newer. Install the provider and Strands Harness.
 
 ```bash
-npm install strands-exaone
+npm install strands-exaone '@strands-agents/harness@~0.4.0'
 ```
 
 ```typescript
-import { Agent } from '@strands-agents/sdk'
+import { createHarness } from '@strands-agents/harness'
 import { ExaoneModel, ExaoneRetryStrategy } from 'strands-exaone'
 
-const model = new ExaoneModel({ preserveThinking: true })
-const agent = new Agent({ model, retryStrategy: new ExaoneRetryStrategy(), printer: false })
-const response = await agent.invoke('Explain what an AI agent is in one sentence.')
-const answer = response.lastMessage.content
-  .filter((block) => block.type === 'textBlock')
-  .map((block) => block.text)
-  .join('')
-console.log(answer)
+const agent = await createHarness({
+  model: new ExaoneModel(),
+  retryStrategy: new ExaoneRetryStrategy(),
+  builtinTools: { '*': false },
+  builtinPlugins: [],
+  session: false,
+  memory: false,
+  skills: false,
+  caching: false,
+  printer: false,
+})
+
+try {
+  const result = await agent.invoke('Explain what an AI agent is in one sentence.')
+  for (const block of result.lastMessage.content) {
+    if (block.type === 'textBlock') console.log(block.text)
+  }
+} finally {
+  await agent.shutdown()
+}
 ```
 
-The provider reads `EXAONE_API_KEY` when a request is made. You can instead pass `apiKey` to the constructor. The package does not load `.env` files automatically.
+See the [Harness examples](examples/harness/) for tools and conversation history. For the model provider alone, install `strands-exaone` and see the [Strands SDK examples](examples/sdk/). The provider supports `@strands-agents/sdk` 1.24 and newer within 1.x and Zod 4.5.4 and newer within 4.x.
 
-The configured endpoint and any custom fetch implementation receive your API key and conversation. Use a trusted endpoint and transport, and use HTTPS except for controlled local testing.
-
-The example disables the SDK's default printer and prints only text blocks. In SDK 1.24, the default printer and `String(response)` can include reasoning.
-
-For SDK tool use, streaming, structured output, Harness, and CLI walkthroughs, see the [examples](examples/).
+Load any application `.env` file before running the example, or pass `apiKey` explicitly.
 
 ## Configuration
 
@@ -138,25 +146,7 @@ Strands can summarize older conversation history during automatic context manage
 
 Check both the returned reasoning fields and visible content. The request setting alone does not guarantee that reasoning is absent from the content.
 
-```typescript
-import { Agent, tool } from '@strands-agents/sdk'
-import { z } from 'zod'
-import { ExaoneModel, ExaoneRetryStrategy } from 'strands-exaone'
-
-const getNumber = tool({
-  name: 'get_number',
-  description: 'Return the example number.',
-  inputSchema: z.object({}),
-  callback: () => '7',
-})
-
-const agent = new Agent({
-  model: new ExaoneModel({ preserveThinking: true }),
-  tools: [getNumber],
-  retryStrategy: new ExaoneRetryStrategy(),
-})
-await agent.invoke('Use the tool to get the number, then add 3.')
-```
+The [Harness tool example](examples/harness/#custom-tools-and-conversation-history) runs a custom tool and a follow-up turn.
 
 The provider assembles streamed tool-call arguments and validates each completed call before exposing it to Strands. Hosted and self-hosted endpoints follow the same rules. Nonblank arguments must be a valid JSON object, and blank arguments follow Strands' rules. The Harness validates the object against the tool schema. The provider accepts text, reasoning, tool calls, and text or JSON tool results. Unsupported content types and reasoning signatures in the received history are rejected. Strands SDK 1.25 may restore unrecognized session data as `UnknownBlock`. These blocks stay in the SDK session and are omitted from EXAONE requests.
 
@@ -241,13 +231,12 @@ When stopping an agent stream early, use SDK cancellation APIs and let the model
 
 ## Tool-call recovery
 
-To opt in to recovery from one completed tool call with malformed JSON arguments, register the model-stage middleware:
+Use this optional middleware when malformed JSON tool arguments interrupt agent runs. The provider works without this middleware. The [Harness tool example](examples/harness/#optional-tool-call-recovery) enables recovery with `--recover-tool-calls`. To enable it on the Harness agent from the quick start, register it before invoking the agent:
 
 ```typescript
-import { Agent, InvokeModelStage } from '@strands-agents/sdk'
-import { ExaoneModel, toolCallRecovery } from 'strands-exaone'
+import { InvokeModelStage } from '@strands-agents/sdk'
+import { toolCallRecovery } from 'strands-exaone'
 
-const agent = new Agent({ model: new ExaoneModel(), tools: [] })
 agent.addMiddleware(InvokeModelStage, toolCallRecovery())
 ```
 

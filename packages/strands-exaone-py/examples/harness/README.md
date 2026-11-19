@@ -54,6 +54,16 @@ Run the support-queue example to let the Harness execute `get_ticket` and answer
 
 This example uses synthetic ticket data. It disables built-in file and search tools, session persistence, memory, and skills. Harness automatic context management remains enabled. Both turns keep the complete assistant messages and supported reasoning in history.
 
+## Optional tool-call recovery
+
+Enable recovery if malformed tool arguments interrupt your agent runs. The example runs with recovery disabled by default.
+
+```bash
+.venv/bin/python tools.py --recover-tool-calls
+```
+
+The flag registers `recover_tool_calls` on the Harness agent's `InvokeModelStage`. It can request one correction for eligible invalid JSON before response output is delivered. See the [provider's recovery options](../../README.md#tool-call-recovery).
+
 ## Custom endpoint (optional)
 
 For a custom compatible server, pass its base URL including `/v1`:

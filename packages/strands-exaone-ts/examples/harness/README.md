@@ -48,4 +48,14 @@ npm run tools
 
 This example uses synthetic ticket data. It disables built-in file and search tools, session persistence, memory, and skills. Harness automatic context management remains enabled. Both turns keep the complete assistant messages and supported reasoning in history.
 
+## Optional tool-call recovery
+
+Enable recovery if malformed tool arguments interrupt your agent runs. The example runs with recovery disabled by default.
+
+```bash
+npm run tools -- --recover-tool-calls
+```
+
+The flag registers `toolCallRecovery()` on the Harness agent's `InvokeModelStage`. It can request one correction for eligible invalid JSON before response output is delivered. See the [provider's recovery options](../../README.md#tool-call-recovery).
+
 See the official [Harness quickstart](https://strandsagents.com/docs/user-guide/harness/quickstart/) for the framework APIs.

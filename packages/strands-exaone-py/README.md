@@ -12,29 +12,36 @@ export EXAONE_API_KEY='your-api-key'
 
 ## Quick start
 
-The Python distribution requires Python 3.10 or newer and `strands-agents` 1.63.x through 1.65.x. Install it from PyPI:
+Use Python 3.10 or newer. Install the provider and Strands Harness.
 
 ```bash
-python -m pip install -U strands-exaone
+python -m pip install strands-exaone 'strands-harness~=0.4.0'
 ```
 
 ```python
-from strands import Agent
 from strands_exaone import ExaoneModel, ExaoneRetryStrategy
+from strands_harness import create_harness
 
-model = ExaoneModel(preserve_thinking=True)
-agent = Agent(model=model, retry_strategy=ExaoneRetryStrategy(), callback_handler=None)
-response = agent("Explain what an AI agent is in one sentence.")
-print(response)
+agent = create_harness(
+    model=ExaoneModel(),
+    retry_strategy=ExaoneRetryStrategy(),
+    builtin_tools={"*": False},
+    builtin_plugins=[],
+    session=False,
+    memory=False,
+    skills=False,
+    caching=False,
+    callback_handler=None,
+)
+result = agent("Explain what an AI agent is in one sentence.")
+for block in result.message["content"]:
+    if "text" in block:
+        print(block["text"])
 ```
 
-The provider reads `EXAONE_API_KEY` when the model is constructed. You can instead pass `api_key=...`. The package does not load `.env` files automatically.
+See the [Harness examples](examples/harness/) for tools and conversation history. For the model provider alone, install `strands-exaone` and see the [Strands SDK examples](examples/sdk/). The provider supports `strands-agents` 1.63.x through 1.65.x.
 
-The configured endpoint and any custom HTTP client receive your API key and conversation. Use a trusted endpoint and transport, and use HTTPS except for controlled local testing.
-
-The callback handler determines whether intermediate reasoning and response text are printed. This example disables the default callback and prints only the final response; reasoning remains in conversation history for later turns.
-
-For SDK tool use, streaming, structured output, Harness, and CLI walkthroughs, see the [examples](examples/).
+Load any application `.env` file before constructing the model, or pass `api_key` explicitly.
 
 ## Configuration
 
@@ -136,25 +143,7 @@ When EXAONE returns a refusal without non-whitespace ordinary response content, 
 
 For direct `structured_output()` calls, a refusal without JSON raises `ExaoneError`; its sanitized `body` includes the refusal text. Strands tool execution uses the Chat Completions `tool_calls` field. Legacy `function_call` response fields are retained in metadata but do not trigger a Strands tool.
 
-```python
-from strands import Agent, tool
-from strands_exaone import ExaoneModel, ExaoneRetryStrategy
-
-
-@tool
-def get_number() -> int:
-    """Return the example number."""
-    return 7
-
-
-agent = Agent(
-    model=ExaoneModel(preserve_thinking=True),
-    tools=[get_number],
-    retry_strategy=ExaoneRetryStrategy(),
-    callback_handler=None,
-)
-print(agent("Use the tool to get the number, then add 3."))
-```
+The [Harness tool example](examples/harness/#custom-tools-and-conversation-history) runs a custom tool and a follow-up turn.
 
 The provider assembles streamed tool-call arguments and validates each completed call before exposing it to Strands. Hosted and self-hosted endpoints follow the same rules. Nonblank arguments must be a valid JSON object, and blank arguments follow Strands' rules. The Harness validates the object against the tool schema. The provider accepts text, reasoning, tool calls, and text or JSON tool results. Unsupported content types and reasoning signatures in the received history are rejected.
 
@@ -217,7 +206,7 @@ Handle validation failures through Strands' structured-output contract; the prov
 
 ## Tool-call recovery
 
-To let an Agent retry one malformed JSON tool call, register the optional middleware:
+Use this optional middleware when malformed JSON tool arguments interrupt agent runs. The provider works without this middleware. The [Harness tool example](examples/harness/#optional-tool-call-recovery) enables recovery with `--recover-tool-calls`. To enable it on the Harness agent from the quick start, register it before invoking the agent:
 
 ```python
 from strands.middleware import InvokeModelStage

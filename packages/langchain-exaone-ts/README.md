@@ -12,28 +12,28 @@ Get a key from the [EXAONE API Platform](https://docs.exaone.ai/en/docs/overview
 export EXAONE_API_KEY='your-api-key'
 ```
 
-## Install
-
-```bash
-npm install langchain-exaone @langchain/core
-```
-
-Requires Node.js 20.3.0 or newer and `@langchain/core` 1.2.0 or newer within the 1.x line. Set `EXAONE_API_KEY` in the process environment, or pass `apiKey` when constructing the model. The package does not load `.env` files automatically.
-
 ## Quick start
 
-```typescript
-import { ChatExaone } from 'langchain-exaone'
+Use Node.js 22 or newer for the Deep Agents example.
 
-const model = new ChatExaone()
-const response = await model.invoke('Explain what an AI agent is in one sentence.')
-
-console.log(response.content)
+```bash
+npm install langchain-exaone 'deepagents@~1.17.0' langchain @langchain/core
 ```
 
-The package uses `k-exaone_v2.5` and `https://api.exaone.ai/v1` by default. See the [examples](examples/) for LangChain agents, streaming chat, structured output, LangGraph tool loops, and Deep Agents.
+```typescript
+import { createDeepAgent } from 'deepagents'
+import { ChatExaone } from 'langchain-exaone'
 
-When the endpoint reports cache reads or writes, `usage_metadata.input_token_details` exposes them as `cache_read` and `cache_creation`. Reasoning counts are exposed under `output_token_details` when reported.
+const agent = await createDeepAgent({ model: new ChatExaone() })
+const result = await agent.invoke({
+  messages: [{ role: 'user', content: 'Explain what an AI agent is in one sentence.' }],
+})
+console.log(result.messages.at(-1)?.text)
+```
+
+See the [Deep Agents example](examples/deepagents/) for tool use and delegation. For the model provider alone, install `langchain-exaone @langchain/core` and see the [LangChain examples](examples/langchain/). The provider supports Node.js 20.3 and newer and `@langchain/core` 1.2 and newer within 1.x.
+
+Set `EXAONE_API_KEY` in the process environment or pass `apiKey` to `ChatExaone`. Load any application `.env` file before constructing the model.
 
 ## Configuration
 
@@ -133,13 +133,14 @@ Malformed non-streamed JSON includes an error and, when the runtime reports one,
 
 ### Optional malformed-tool recovery
 
-To opt in to one recovery attempt for a single malformed JSON tool call, attach this middleware to a LangChain agent:
+Use this optional middleware when malformed JSON tool arguments interrupt agent runs. The provider works without this middleware. Try `--recover-tool-calls` in the [Deep Agents example](examples/deepagents/#optional-tool-call-recovery).
 
 ```typescript
-import { createAgent, createMiddleware } from 'langchain'
+import { createDeepAgent } from 'deepagents'
+import { createMiddleware } from 'langchain'
 import { ChatExaone, toolCallRecovery } from 'langchain-exaone'
 
-const agent = createAgent({
+const agent = await createDeepAgent({
   model: new ChatExaone(),
   tools: [], // Add your LangChain tools here.
   middleware: [createMiddleware(toolCallRecovery())],
