@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.4 (2026-11-19)
+
+- Add optional `toolCallRecovery()` middleware for malformed tool arguments in LangChain agents.
+- Forward explicit tool strictness while retaining per-tool settings when omitted.
+- Align response types with numeric and string `matched_stop` values.
+- Use LangChain's standard message type field and verify newer SDK versions.
+
 ## 0.1.3 (2026-11-16)
 
 - Preserve reported cache token details in LangChain usage.
