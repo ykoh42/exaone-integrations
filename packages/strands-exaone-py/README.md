@@ -2,13 +2,9 @@
 
 Use the EXAONE Chat Completions API as a model provider for [Strands Agents](https://strandsagents.com/). This community-maintained package is not affiliated with LG AI Research or the Strands Agents project.
 
-Review and follow the terms that apply to your use of the EXAONE API.
-
 ## API key
 
-Open the [EXAONE API Platform](https://docs.exaone.ai/en/docs/overview), select **Get an API Key**, and sign in or create an EXAONE ID to follow the platform's key-issuance instructions. Each user supplies their own key. The [illustrated setup guide](https://github.com/ykoh42/exaone-integrations/blob/main/guides/getting-started.md#get-an-exaone-api-key) shows the entry screens and includes Windows PowerShell instructions.
-
-In the terminal where you will run your program, set the issued key:
+Get a key from the [EXAONE API Platform](https://docs.exaone.ai/en/docs/overview) and set it in your environment. See the [setup guide](https://github.com/ykoh42/exaone-integrations/blob/main/guides/getting-started.md#set-your-api-key) for Windows PowerShell.
 
 ```bash
 export EXAONE_API_KEY='your-api-key'
@@ -39,10 +35,6 @@ The configured endpoint and any custom HTTP client receive your API key and conv
 The callback handler determines whether intermediate reasoning and response text are printed. This example disables the default callback and prints only the final response; reasoning remains in conversation history for later turns.
 
 For SDK tool use, streaming, structured output, Harness, and CLI walkthroughs, see the [examples](examples/).
-
-## Why use this provider?
-
-The provider preserves EXAONE reasoning across Strands turns and maps model information, streaming, tools, usage and errors. Configure `ExaoneRetryStrategy` for Agent and Harness calls to honor server delay hints. The model's own HTTP retries are disabled by default.
 
 ## Configuration
 
@@ -91,8 +83,6 @@ The provider accepts both `reasoning_content` and `reasoning` in compatible serv
 
 For serving instructions and parser settings, see the [model card](https://huggingface.co/LGAI-EXAONE/K-EXAONE-2.0-750B-A37B). Its examples use forked servers; [vLLM 0.27.0](https://github.com/vllm-project/vllm/releases/tag/v0.27.0) also includes K-EXAONE 2.0 model support. Verify the specific server version and configuration you deploy.
 
-The SGLang `qwen3_coder` parser in the inspected [model-card fork](https://github.com/lkm2835/sglang/blob/918653d22b2f1ae853b81fc0f5539b7c9311487e/python/sglang/srt/function_call/qwen3_coder_detector.py#L104) and [upstream revision](https://github.com/sgl-project/sglang/blob/d9ec74eb72b856419c6eb44733e00193d28ed840/python/sglang/srt/function_call/qwen3_coder_detector.py#L112) converts the text `null` to JSON null even for a string parameter. This can cause tool validation to fail; check your server's parser version.
-
 Some servers accept `reasoning_effort` and may use it to select thinking on or off. Accepting the field does not establish that the model supports distinct reasoning-intensity levels; check the deployed server and model documentation.
 
 The configured API key is sent to the selected endpoint; if omitted, it comes from `EXAONE_API_KEY`. For a server that does not require authentication, pass a placeholder such as `api_key="EMPTY"` rather than the hosted API key. HTTP does not encrypt credentials or conversation data; use HTTPS or a trusted transport. Protocol fixtures have been tested, but K-EXAONE 2.0 model inference has not been verified by this project.
@@ -120,15 +110,7 @@ The provider sends text and image blocks in their original order. Strands Python
 
 The [EXAONE 4.5 model card](https://huggingface.co/LGAI-EXAONE/EXAONE-4.5-33B) shows vLLM and an SGLang fork with `qwen3` reasoning and `hermes` tool parsers. Select and configure these on the server, not in the provider. Image requests have been tested with synthetic protocol fixtures; actual EXAONE 4.5 model inference has not been verified.
 
-### Server-specific observations
-
-These observations use synthetic inputs and isolated server code, not running servers or EXAONE 4.5 inference. The provider preserves image/text order in its request; server processing determines what reaches the model.
-
-- **vLLM 0.27.0:** With the official 4.5 template and automatic content-format detection, default normalization moved an image before surrounding text. [`--interleave-mm-strings`](https://docs.vllm.ai/en/v0.27.0/cli/serve/#interleave-mm-strings) preserved the order in the isolated test.
-- **SGLang image/tool history:** With the model-card fork `6757c9f` and 4.5 template `570aa4b`, a first user message containing an image followed by a tool call and result could omit earlier assistant reasoning from the rendered prompt. A prior string-valued user message changed the result.
-- **SGLang streaming tools:** With automatic tool choice, the same fork could emit a tool name without arguments when the complete synthetic call and stop arrived in one final event. Missing arguments can fail validation or invoke a tool with defaults. The parser condition also occurred in SGLang 0.5.23 in isolation; this does not establish 4.5 model support. See [issue #31915](https://github.com/sgl-project/sglang/issues/31915) and [proposed fix #32167](https://github.com/sgl-project/sglang/pull/32167).
-
-The provider does not repair these server behaviors. Check your server version, template and settings; see the [compatibility matrix](https://github.com/ykoh42/exaone-integrations/blob/main/COMPATIBILITY.md#known-server-side-observations) for details.
+See the [compatibility matrix](https://github.com/ykoh42/exaone-integrations/blob/main/COMPATIBILITY.md#known-server-side-observations) for server versions, parser settings, and observed limitations.
 
 ## Model information
 
@@ -251,7 +233,7 @@ Recovery uses the actual tools and tool choice sent to EXAONE. A correction is s
 
 Recovery sends the original arguments and parser diagnostic in a matching error tool result. The preceding empty argument object is a transport placeholder and is never executed. The system prompt and user messages are retained. Truncated, mixed, incomplete and repeated failures, and ambiguous streamed call IDs, are not recovered. Recovery can add latency and model charges. Tracing may record the diagnostic and original arguments. When both attempts report usage, the SDK usage includes both. Failed-attempt usage is also supplied to `metadata_callback` under `recovery.failed_attempts` and logged at INFO. If recovery itself fails, that callback is not invoked.
 
-The tool error includes a separate JSON record with `raw_arguments` as a string and `parse_error` as the diagnostic. When available, the location is a one-based line and column in the original argument text. It refers to the decoded argument text, before JSON escaping. Recovery uses the SDK-style `Error:` content without the provider's legacy `[ERROR]` prefix.
+The tool result contains `raw_arguments` and `parse_error`. Diagnostic line and column numbers refer to the original argument text.
 
 Only the correction request selects the failed tool by name. If the endpoint explicitly rejects named tool choice before emitting a response, the middleware tries `tool_choice="required"` once. Recovery succeeds only with a completed reply containing exactly one call to the original tool with a valid JSON object as its arguments. The SDK still validates the tool schema before execution.
 

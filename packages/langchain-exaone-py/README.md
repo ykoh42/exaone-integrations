@@ -6,9 +6,7 @@ It implements LangChain's `BaseChatModel` interface and supports synchronous and
 
 ## API key
 
-Open the [EXAONE API Platform](https://docs.exaone.ai/en/docs/overview), select **Get an API Key**, and sign in or create an EXAONE ID to follow the platform's key-issuance instructions. Each user supplies their own key. The [illustrated setup guide](https://github.com/ykoh42/exaone-integrations/blob/main/guides/getting-started.md#get-an-exaone-api-key) shows the entry screens and includes Windows PowerShell instructions.
-
-In the terminal where you will run your program, set the issued key:
+Get a key from the [EXAONE API Platform](https://docs.exaone.ai/en/docs/overview) and set it in your environment. See the [setup guide](https://github.com/ykoh42/exaone-integrations/blob/main/guides/getting-started.md#set-your-api-key) for Windows PowerShell.
 
 ```bash
 export EXAONE_API_KEY='your-api-key'
@@ -39,10 +37,6 @@ print(message.text)
 ```
 
 The package does not load `.env` files. Use your application's secret-management setup to place the API key in the process environment, or pass `api_key` directly.
-
-## Why use this integration?
-
-The integration preserves EXAONE reasoning across LangChain turns, exposes model profiles and response metadata, and supports tools and structured output. Retries honor server delay hints before streaming output begins.
 
 ## Serialization
 
@@ -84,7 +78,7 @@ LangChain's streaming interface represents one completion per run. If the API re
 
 For a non-streaming response, malformed tool arguments are retained in `invalid_tool_calls` with a JSON error and location when available. This does not automatically send the error back to the model or retry the call; that behavior depends on the agent.
 
-In an experimental EXAONE 4.5 run with vLLM 0.33.0+cpu, vLLM Metal 0.33.0 (`qwen3`/`hermes`), and LangChain Core 1.8.1, incomplete streamed tool-call JSON became a partial object that passed the tool schema, and a LangChain 1.5.0 agent invoked a synthetic tool. The same behavior occurred with `langchain-openai` 1.8.0 `ChatOpenAI`. With both integrations, the agent also executed synthetic tools after `finish_reason=length` when parsed arguments passed the schema, including a case with incomplete streamed JSON. If you control tool dispatch, treat `finish_reason=length` as incomplete and stop before execution; for streamed calls, also validate the assembled raw `tool_call_chunks` arguments as complete JSON. JSON or schema validity alone cannot establish that truncated values are complete.
+LangChain can parse incomplete streamed JSON as valid tool arguments. If you dispatch tools yourself, reject `length` finishes and validate the assembled `tool_call_chunks` arguments as complete JSON.
 
 Each candidate in a non-streaming response carries the same request-level usage. `generate()` and `agenerate()` expose totals once per prompt in `llm_output["token_usage"]`, including reasoning tokens when present.
 
@@ -140,11 +134,9 @@ If LangChain's response cache is configured, the middleware uses a separate cach
 
 Recovery uses the effective EXAONE request after SDK middleware has applied tool selection. It stops before sending a correction if the tool was removed or the SDK owns the tool choice, as with `ToolStrategy` in LangChain Python. Register recovery after routing middleware that switches providers or makes its own model calls, so the correction applies to the selected EXAONE model call.
 
-The tool error includes a separate JSON record with `raw_arguments` as a string and `parse_error` as the diagnostic. When available, the location is a one-based line and column in the original argument text. It refers to the decoded argument text, before JSON escaping.
+The tool result contains `raw_arguments` and `parse_error`. Diagnostic line and column numbers refer to the original argument text.
 
 Only the correction request selects the failed tool by name. If the endpoint explicitly rejects named tool choice before emitting a response, the middleware tries `tool_choice="required"` once. Recovery succeeds only with a completed reply containing exactly one call to the original tool with a valid JSON object as its arguments. The SDK still validates the tool schema before execution.
-
-Without the middleware, LangChain's partial JSON parser can turn incomplete streamed arguments into an executable tool call. For example, an Agent can execute a tool with `amount=12` when the stream ends with the raw arguments `{"amount":12`.
 
 Empty or whitespace-only tool input is not automatically retried; LangChain handles it according to its existing rules, which can allow a tool's default arguments to run during streaming.
 
@@ -180,8 +172,6 @@ For an already-running K-EXAONE 2.0 endpoint, set `base_url` and `model` to the 
 
 For serving instructions and parser settings, see the [model card](https://huggingface.co/LGAI-EXAONE/K-EXAONE-2.0-750B-A37B). Its examples use forked servers; [vLLM 0.27.0](https://github.com/vllm-project/vllm/releases/tag/v0.27.0) also includes K-EXAONE 2.0 model support. Verify the specific server version and configuration you deploy.
 
-The SGLang `qwen3_coder` parser in the inspected [model-card fork](https://github.com/lkm2835/sglang/blob/918653d22b2f1ae853b81fc0f5539b7c9311487e/python/sglang/srt/function_call/qwen3_coder_detector.py#L104) and [upstream revision](https://github.com/sgl-project/sglang/blob/d9ec74eb72b856419c6eb44733e00193d28ed840/python/sglang/srt/function_call/qwen3_coder_detector.py#L112) converts the text `null` to JSON null even for a string parameter. This can cause tool validation to fail; check your server's parser version.
-
 Some servers accept `reasoning_effort` and may use it to select thinking on or off. Accepting the field does not establish that the model supports distinct reasoning-intensity levels; check the deployed server and model documentation.
 
 ```python
@@ -216,17 +206,7 @@ response = model.invoke([message])
 
 User images support URLs and base64 data with an image MIME type; the provider sends text and image blocks in their original order. File IDs, image tool messages, audio, and other unsupported blocks are rejected. The [EXAONE 4.5 model card](https://huggingface.co/LGAI-EXAONE/EXAONE-4.5-33B) shows vLLM and an SGLang fork with `qwen3` reasoning and `hermes` tool parsers. Configure these on the server. Image requests have been tested with synthetic protocol fixtures; actual EXAONE 4.5 image inference has not been verified.
 
-### Server-specific observations
-
-These observations use synthetic inputs and isolated server code, not running servers or EXAONE 4.5 inference. The provider preserves image/text order in its request; server processing determines what reaches the model.
-
-- **vLLM 0.27.0:** With the official 4.5 template and automatic content-format detection, default normalization moved an image before surrounding text. [`--interleave-mm-strings`](https://docs.vllm.ai/en/v0.27.0/cli/serve/#interleave-mm-strings) preserved the order in the isolated test.
-- **SGLang image/tool history:** With the model-card fork `6757c9f` and 4.5 template `570aa4b`, a first user message containing an image followed by a tool call and result could omit earlier assistant reasoning from the rendered prompt. A prior string-valued user message changed the result.
-- **SGLang streaming tools:** With automatic tool choice, the same fork could emit a tool name without arguments when the complete synthetic call and stop arrived in one final event. Missing arguments can fail validation or invoke a tool with defaults. The parser condition also occurred in SGLang 0.5.23 in isolation; this does not establish 4.5 model support. See [issue #31915](https://github.com/sgl-project/sglang/issues/31915) and [proposed fix #32167](https://github.com/sgl-project/sglang/pull/32167).
-
-The provider does not repair these server behaviors. Check your server version, template and settings; see the [compatibility matrix](https://github.com/ykoh42/exaone-integrations/blob/main/COMPATIBILITY.md#known-server-side-observations) for details.
-
-See the [K-EXAONE 2.5 API reference](https://docs.exaone.ai/ko/docs/k-exaone-2.5) for the model's request parameters and limits.
+See the [compatibility matrix](https://github.com/ykoh42/exaone-integrations/blob/main/COMPATIBILITY.md#known-server-side-observations) for server versions, parser settings, and observed limitations.
 
 ## Examples
 
