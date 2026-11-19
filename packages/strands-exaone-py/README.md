@@ -88,11 +88,11 @@ model = ExaoneModel(
 
 The provider accepts both `reasoning_content` and `reasoning` in compatible server responses and sends preserved reasoning back as `reasoning_content`. Identical values are emitted once; conflicting nonempty values are rejected. The model card lists a 262,144-token context window, but a deployment can configure a lower limit. Use the limit exposed by your deployment. Server and model compatibility depend on the versions and serving options you use.
 
-For serving instructions and parser settings, see the [model card](https://huggingface.co/LGAI-EXAONE/K-EXAONE-2.0-750B-A37B). Its examples use forked servers; [vLLM 0.27.0](https://github.com/vllm-project/vllm/releases/tag/v0.27.0) also includes K-EXAONE 2.0 model support. Verify the specific server version and configuration you deploy.
+See the [model-card serving configuration](https://github.com/ykoh42/exaone-integrations/blob/main/COMPATIBILITY.md#server-versions-and-parser-configurations).
 
 Some servers accept `reasoning_effort` and may use it to select thinking on or off. Accepting the field does not establish that the model supports distinct reasoning-intensity levels; check the deployed server and model documentation.
 
-The configured API key is sent to the selected endpoint; if omitted, it comes from `EXAONE_API_KEY`. For a server that does not require authentication, pass a placeholder such as `api_key="EMPTY"` rather than the hosted API key. HTTP does not encrypt credentials or conversation data; use HTTPS or a trusted transport. Protocol fixtures have been tested, but K-EXAONE 2.0 model inference has not been verified by this project.
+The configured API key is sent to the selected endpoint; if omitted, it comes from `EXAONE_API_KEY`. For a server that does not require authentication, pass a placeholder such as `api_key="EMPTY"` rather than the hosted API key. HTTP does not encrypt credentials or conversation data; use HTTPS or a trusted transport.
 
 ## Self-hosted EXAONE 4.5 image input
 
@@ -115,9 +115,7 @@ response = agent(
 
 The provider sends text and image blocks in their original order. Strands Python image locations such as S3 are not converted to URLs; supply bytes. Image tool results remain unsupported. The default hosted K-EXAONE 2.5 model is text-only.
 
-The [EXAONE 4.5 model card](https://huggingface.co/LGAI-EXAONE/EXAONE-4.5-33B) shows vLLM and an SGLang fork with `qwen3` reasoning and `hermes` tool parsers. Select and configure these on the server, not in the provider. Image requests have been tested with synthetic protocol fixtures; actual EXAONE 4.5 model inference has not been verified.
-
-See the [compatibility matrix](https://github.com/ykoh42/exaone-integrations/blob/main/COMPATIBILITY.md#known-server-side-observations) for server versions, parser settings, and observed limitations.
+See the [compatibility matrix](https://github.com/ykoh42/exaone-integrations/blob/main/COMPATIBILITY.md#known-server-side-observations) for server options and known limitations.
 
 ## Model information
 

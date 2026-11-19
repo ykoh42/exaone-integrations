@@ -85,7 +85,7 @@ LangChain's `output_version="v1"` standard content blocks can also be retained i
 
 For v1 messages, reasoning blocks in `content` are authoritative: removing them prevents that reasoning from being sent again. For older message formats, the provider also reads `additional_kwargs["reasoning_content"]`.
 
-Refusal text is kept separately in `additional_kwargs["refusal"]`, and v1 messages also expose a `refusal` content block. It is not merged into answer text. When reusing an assistant message that has no answer text, the provider sends its refusal as text in the next request: a refusal content block in message history was rejected by the hosted 2.5 endpoint in a compatibility check. If answer text is present, that text is sent instead.
+Refusal text is available in `additional_kwargs["refusal"]` and as a `refusal` content block in v1 messages. When reusing an assistant message, the provider sends its answer text or falls back to the refusal text if the answer is empty.
 
 ## Tools and structured output
 
@@ -145,7 +145,7 @@ You can pass additional Chat Completions fields with `model_kwargs` or per-call 
 
 When a returned EXAONE message is reused in history, edits to its LangChain `tool_calls` determine the next request. Provider-specific fields from matching original calls are retained. Response tool-call types other than function calls cannot be represented by this integration and are rejected.
 
-Legacy `function_call` fields and LangChain `FunctionMessage` results are also preserved in conversation history for compatible endpoints. A synthetic history containing both fields and a `function` role returned HTTP 400 from the default EXAONE endpoint; use the tool-calling protocol for EXAONE.
+Use `tool_calls` for hosted EXAONE 2.5. The provider can also forward legacy `function_call` and `FunctionMessage` history to compatible endpoints.
 
 ## Configuration
 
@@ -165,9 +165,9 @@ Legacy `function_call` fields and LangChain `FunctionMessage` results are also p
 | `max_retries` | `2` | Retries for transient API errors before output is returned; set to `0` to disable |
 | `timeout` | `None` | No provider-imposed HTTP timeout; pass a positive number to set one |
 
-For an already-running K-EXAONE 2.0 endpoint, set `base_url` and `model` to the server's URL and served model name. If supported by the server, `chat_template_kwargs={"enable_thinking": False}` requests non-reasoning mode. The provider accepts `reasoning` and `reasoning_content` response fields and preserves them as `reasoning_content` for later turns. Identical values are emitted once; conflicting nonempty values are rejected. Protocol fixtures have been tested; actual K-EXAONE 2.0 inference has not been verified by this project.
+For an already-running K-EXAONE 2.0 endpoint, set `base_url` and `model` to the server's URL and served model name. If supported by the server, `chat_template_kwargs={"enable_thinking": False}` requests non-reasoning mode. The provider accepts `reasoning` and `reasoning_content` response fields and preserves them as `reasoning_content` for later turns. Identical values are emitted once; conflicting nonempty values are rejected.
 
-For serving instructions and parser settings, see the [model card](https://huggingface.co/LGAI-EXAONE/K-EXAONE-2.0-750B-A37B). Its examples use forked servers; [vLLM 0.27.0](https://github.com/vllm-project/vllm/releases/tag/v0.27.0) also includes K-EXAONE 2.0 model support. Verify the specific server version and configuration you deploy.
+See the [model-card serving configuration](https://github.com/ykoh42/exaone-integrations/blob/main/COMPATIBILITY.md#server-versions-and-parser-configurations).
 
 Some servers accept `reasoning_effort` and may use it to select thinking on or off. Accepting the field does not establish that the model supports distinct reasoning-intensity levels; check the deployed server and model documentation.
 
@@ -201,9 +201,9 @@ message = HumanMessage(
 response = model.invoke([message])
 ```
 
-User images support URLs and base64 data with an image MIME type; the provider sends text and image blocks in their original order. File IDs, image tool messages, audio, and other unsupported blocks are rejected. The [EXAONE 4.5 model card](https://huggingface.co/LGAI-EXAONE/EXAONE-4.5-33B) shows vLLM and an SGLang fork with `qwen3` reasoning and `hermes` tool parsers. Configure these on the server. Image requests have been tested with synthetic protocol fixtures; actual EXAONE 4.5 image inference has not been verified.
+User images support URLs and base64 data with an image MIME type; the provider sends text and image blocks in their original order. File IDs, image tool messages, audio, and other unsupported blocks are rejected.
 
-See the [compatibility matrix](https://github.com/ykoh42/exaone-integrations/blob/main/COMPATIBILITY.md#known-server-side-observations) for server versions, parser settings, and observed limitations.
+See the [compatibility matrix](https://github.com/ykoh42/exaone-integrations/blob/main/COMPATIBILITY.md#known-server-side-observations) for server options and known limitations.
 
 ## Examples
 

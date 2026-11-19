@@ -56,9 +56,9 @@ Set `EXAONE_API_KEY` in the process environment or pass `apiKey` to `ChatExaone`
 
 Explicit call options use LangChain's snake_case request names, such as `max_tokens`, `top_p`, `reasoning_effort`, and `chat_template_kwargs`. `modelKwargs` is passed through for endpoint-specific fields. The provider owns `model`, `messages`, and `stream`; do not set them in `modelKwargs`.
 
-For an already-running K-EXAONE 2.0 endpoint, set `baseUrl` and `model` to the server's URL and served model name. If supported by the server, `enableThinking: false` requests non-reasoning mode. The provider accepts `reasoning` and `reasoning_content` response fields and preserves them as `reasoning_content` for later turns. Identical values are emitted once; conflicting nonempty values are rejected. Protocol fixtures have been tested; actual K-EXAONE 2.0 inference has not been verified by this project.
+For an already-running K-EXAONE 2.0 endpoint, set `baseUrl` and `model` to the server's URL and served model name. If supported by the server, `enableThinking: false` requests non-reasoning mode. The provider accepts `reasoning` and `reasoning_content` response fields and preserves them as `reasoning_content` for later turns. Identical values are emitted once; conflicting nonempty values are rejected.
 
-For serving instructions and parser settings, see the [model card](https://huggingface.co/LGAI-EXAONE/K-EXAONE-2.0-750B-A37B). Its examples use forked servers; [vLLM 0.27.0](https://github.com/vllm-project/vllm/releases/tag/v0.27.0) also includes K-EXAONE 2.0 model support. Verify the specific server version and configuration you deploy.
+See the [model-card serving configuration](https://github.com/ykoh42/exaone-integrations/blob/main/COMPATIBILITY.md#server-versions-and-parser-configurations).
 
 Some servers accept `reasoning_effort` and may use it to select thinking on or off. Accepting the field does not establish that the model supports distinct reasoning-intensity levels; check the deployed server and model documentation.
 
@@ -115,7 +115,7 @@ LangChain's `outputVersion: "v1"` exposes reasoning and tool calls as standard c
 
 For v1 messages, reasoning blocks in `content` are authoritative: removing them prevents that reasoning from being sent again. For older message formats, the provider also reads `additional_kwargs.reasoning_content`.
 
-Refusal text is kept separately in `additional_kwargs.refusal`, and v1 messages also expose a `refusal` content block. It is not merged into answer text. When reusing an assistant message that has no answer text, the provider sends its refusal as text in the next request: a refusal content block in message history was rejected by the hosted 2.5 endpoint in a compatibility check. If answer text is present, that text is sent instead.
+Refusal text is available in `additional_kwargs.refusal` and as a `refusal` content block in v1 messages. When reusing an assistant message, the provider sends its answer text or falls back to the refusal text if the answer is empty.
 
 Like LangChain's OpenAI integration, a normal `invoke()` returns an `AIMessage`; streaming yields `AIMessageChunk` objects. The current `BaseChatModel` TypeScript signature types `invoke()` as returning a chunk, so use chunk-specific methods such as `concat()` on streamed chunks only.
 
@@ -165,7 +165,7 @@ The failed model call is observable via LangChain error callbacks and tracing, e
 
 LangChain can parse incomplete streamed JSON as valid tool arguments. If you dispatch tools yourself, reject `length` finishes and check the assembled `tool_call_chunks[].args` with `JSON.parse`.
 
-The integration also preserves legacy `function_call` fields and LangChain `FunctionMessage` results in conversation history for compatible endpoints. A synthetic history containing both fields and a `function` role returned HTTP 400 from the default EXAONE endpoint; use the tool-calling protocol for EXAONE. The integration does not execute tools by itself.
+Use `tool_calls` for hosted EXAONE 2.5. The provider can also forward legacy `function_call` and `FunctionMessage` history to compatible endpoints.
 
 ## API compatibility
 
@@ -187,9 +187,9 @@ const message = new HumanMessage({ content: [
 const response = await model.invoke([message])
 ```
 
-User images support URLs and base64 data with an image MIME type; the provider sends text and image blocks in their original order. File IDs are unsupported. The default hosted K-EXAONE 2.5 model is text-only. The [EXAONE 4.5 model card](https://huggingface.co/LGAI-EXAONE/EXAONE-4.5-33B) shows vLLM and an SGLang fork with `qwen3` reasoning and `hermes` tool parsers. Configure these on the server. Image requests have been tested with synthetic protocol fixtures; actual EXAONE 4.5 inference has not been verified.
+User images support URLs and base64 data with an image MIME type; the provider sends text and image blocks in their original order. File IDs are unsupported. The default hosted K-EXAONE 2.5 model is text-only.
 
-See the [compatibility matrix](https://github.com/ykoh42/exaone-integrations/blob/main/COMPATIBILITY.md#known-server-side-observations) for server versions, parser settings, and observed limitations.
+See the [compatibility matrix](https://github.com/ykoh42/exaone-integrations/blob/main/COMPATIBILITY.md#known-server-side-observations) for server options and known limitations.
 
 ## Development
 
