@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.4 (2026-11-20)
+
+- Add optional `ToolCallRecoveryMiddleware` for malformed tool arguments in LangChain agents.
+- Forward explicit tool strictness using LangChain's tool converter.
+- Verify newer LangChain Core and Python versions while retaining Python 3.10 support.
+
 ## 0.1.3 (2026-11-16)
 
 - Preserve reported cache token details in LangChain usage, including aggregated usage.

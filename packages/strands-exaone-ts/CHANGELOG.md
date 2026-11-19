@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.4 (2026-11-20)
+
+- Add opt-in model-stage middleware to recover malformed tool arguments.
+- Respect Strands SDK session blocks and expired injected context while validating the latest user turn.
+- Include the Strands CLI example's TypeScript config in the npm package.
+
 ## 0.1.3 (2026-11-16)
 
 - Expose reported cache read and write counts in Strands usage metadata.

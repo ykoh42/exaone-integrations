@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.5 (2026-11-20)
+
+- Start with Deep Agents and include a runnable example of opt-in tool-call recovery.
+
 ## 0.1.4 (2026-11-19)
 
 - Add optional `toolCallRecovery()` middleware for malformed tool arguments in LangChain agents.

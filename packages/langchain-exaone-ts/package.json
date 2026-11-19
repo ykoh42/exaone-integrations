@@ -1,6 +1,6 @@
 {
   "name": "langchain-exaone",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "LangChain chat model integration for the EXAONE API",
   "type": "module",
   "main": "./dist/index.cjs",
