@@ -15,6 +15,8 @@ from langchain_exaone import ChatEXAONE, ExaoneAPIError
 
 def test_invalid_tool_json_reports_location_without_copying_argument_text() -> None:
     raw = '{"private":"synthetic-secret",}'
+    with pytest.raises(json.JSONDecodeError) as parser_error:
+        json.loads(raw)
     payload = _completion()
     payload["choices"][0]["message"]["tool_calls"] = [
         {"id": "bad", "type": "function", "function": {"name": "lookup", "arguments": raw}}
@@ -24,7 +26,8 @@ def test_invalid_tool_json_reports_location_without_copying_argument_text() -> N
 
     invalid = result.invalid_tool_calls[0]
     assert invalid["args"] == raw and invalid["id"] == "bad" and invalid["name"] == "lookup"
-    assert invalid["error"] == "Invalid JSON: Expecting property name enclosed in double quotes (line 1, column 31)."
+    error = parser_error.value
+    assert invalid["error"] == f"Invalid JSON: {error.msg} (line {error.lineno}, column {error.colno})."
     assert "synthetic-secret" not in invalid["error"]
     assert not result.tool_calls
 

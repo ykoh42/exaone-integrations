@@ -42,19 +42,16 @@ def completion(arguments: str | None, *, finish: str = "tool_calls", text: str |
 
 @pytest.mark.parametrize("enabled", [False, True])
 @pytest.mark.parametrize(
-    ("arguments", "error_location"),
+    ("arguments", "malformed"),
     [
-        ('{"amount":123}', None),
-        ('{"amount":123,}', "line 1, column 15"),
-        ('{"amount":12', "line 1, column 13"),
-        ('{\n"note":"😀```","amount":123,,}', "line 2, column 28"),
+        ('{"amount":123}', False),
+        ('{"amount":123,}', True),
+        ('{"amount":12', True),
+        ('{\n"note":"😀```","amount":123,,}', True),
     ],
 )
 @pytest.mark.parametrize("stream", [False, True])
-async def test_agent_recovers_only_when_enabled(
-    enabled: bool, arguments: str, error_location: str | None, stream: bool
-) -> None:
-    malformed = error_location is not None
+async def test_agent_recovers_only_when_enabled(enabled: bool, arguments: str, malformed: bool, stream: bool) -> None:
     requests: list[dict[str, Any]] = []
     executions: list[int] = []
     content: list[str] = []
@@ -125,8 +122,13 @@ async def test_agent_recovers_only_when_enabled(
         assert feedback["tool_call_id"] == "call_1"
         header, diagnostic, instruction = feedback["content"].split("\n")
         assert header.startswith("Error: ") and "The previous tool call is a placeholder." in header
-        assert json.loads(diagnostic)["raw_arguments"] == arguments
-        assert error_location in json.loads(diagnostic)["parse_error"]
+        with pytest.raises(json.JSONDecodeError) as parser_error:
+            json.loads(arguments)
+        error = parser_error.value
+        assert json.loads(diagnostic) == {
+            "raw_arguments": arguments,
+            "parse_error": f"{error.msg} (line {error.lineno}, column {error.colno})",
+        }
         assert instruction.startswith("Call transfer once")
         assert requests[1]["messages"][-2]["tool_calls"][0]["function"]["arguments"] == "{}"
         assert requests[1]["messages"][-2]["reasoning_content"] == "synthetic thought"

@@ -258,7 +258,10 @@ def test_live_recovery_only_retries_before_text_is_exposed(visible_text: bool) -
 
 @pytest.mark.parametrize("stream", [False, True])
 def test_recovery_delivers_error_to_model_without_changing_user_or_system(stream: bool) -> None:
-    result = run_agent(completion('{"amount":123,}'), stream=stream)
+    arguments = '{"amount":123,}'
+    with pytest.raises(json.JSONDecodeError) as parser_error:
+        json.loads(arguments)
+    result = run_agent(completion(arguments), stream=stream)
     assert result["error"] is None
     assert result["executions"] == [123]
     assert len(result["requests"]) == 3
@@ -275,8 +278,11 @@ def test_recovery_delivers_error_to_model_without_changing_user_or_system(stream
     assert feedback[-1]["role"] == "tool" and feedback[-1]["tool_call_id"] == "call_bad"
     header, diagnostic, instruction = feedback[-1]["content"].split("\n")
     assert header.startswith("Error: ") and "The previous tool call is a placeholder." in header
-    assert json.loads(diagnostic)["raw_arguments"] == '{"amount":123,}'
-    assert "line 1, column 15" in json.loads(diagnostic)["parse_error"]
+    error = parser_error.value
+    assert json.loads(diagnostic) == {
+        "raw_arguments": arguments,
+        "parse_error": f"{error.msg} (line {error.lineno}, column {error.colno})",
+    }
     assert instruction.startswith("Call transfer once")
     assert "hidden-failure" not in str(result["output"])
     assert "hidden-failure" not in "".join(result["observed_tokens"])
