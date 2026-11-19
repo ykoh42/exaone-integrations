@@ -807,6 +807,30 @@ describe("ChatExaone", () => {
     expect(result.response_metadata.usage).toEqual(usage);
   });
 
+  it.each([53, "<eot>"])("preserves matched_stop %s in a completion", async (matched_stop) => {
+    const response = Response.json({ choices: [{
+      index: 0,
+      message: { role: "assistant", content: "ok" },
+      finish_reason: "stop",
+      matched_stop,
+    }] });
+    const model = new ChatExaone({ apiKey: "fixture", fetch: mockFetch([response]) });
+    const result = await model.invoke("hello");
+    expect(result.response_metadata.matched_stop).toBe(matched_stop);
+  });
+
+  it.each([53, "<eot>"])("preserves matched_stop %s after merging stream chunks", async (matched_stop) => {
+    const frames = [
+      { choices: [{ index: 0, delta: { content: "ok" } }] },
+      { choices: [{ index: 0, delta: {}, finish_reason: "stop", matched_stop }] },
+    ];
+    const model = new ChatExaone({ apiKey: "fixture", fetch: mockFetch([sseResponse(frames)]) });
+    const chunks = [];
+    for await (const chunk of await model.stream("hello")) chunks.push(chunk);
+    const result = chunks.reduce((left, right) => left.concat(right));
+    expect(result.response_metadata.matched_stop).toBe(matched_stop);
+  });
+
   it("aggregates repeated response metadata once across streaming chunks", async () => {
     const frames = ["a", "b"].map((content) => ({ id: "response-id", model: "custom-model", created: 123, object: "chat.completion.chunk", choices: [{ index: 0, delta: { content } }] }));
     const model = new ChatExaone({ apiKey: "fixture", fetch: mockFetch([sseResponse(frames)]) });

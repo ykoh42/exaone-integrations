@@ -43,15 +43,18 @@ function nativeResponseFormat(method: string, name: string, schema: unknown, str
   } };
 }
 
+type ChatCompletionChoiceMetadata = {
+  finish_reason?: string | null;
+  matched_stop?: number | string | null;
+  logprobs?: unknown;
+};
+
 type ChatCompletionResponse = {
   id?: string;
   model?: string;
   created?: number;
-  choices?: Array<{
+  choices?: Array<ChatCompletionChoiceMetadata & {
     index?: number;
-    finish_reason?: string | null;
-    matched_stop?: string | null;
-    logprobs?: unknown;
     message?: Record<string, unknown>;
   }>;
   usage?: Record<string, unknown>;
@@ -63,11 +66,8 @@ type ChatCompletionChunk = {
   id?: string;
   model?: string;
   created?: number;
-  choices?: Array<{
+  choices?: Array<ChatCompletionChoiceMetadata & {
     index?: number;
-    finish_reason?: string | null;
-    matched_stop?: string | null;
-    logprobs?: unknown;
     delta?: Record<string, unknown>;
   }>;
   usage?: Record<string, unknown>;
@@ -1235,7 +1235,7 @@ function invalidJsonDetail(args: string): string {
 
 function responseMetadata(
   response: ChatCompletionResponse | ChatCompletionChunk,
-  choice: { finish_reason?: string | null; matched_stop?: string | null; logprobs?: unknown } | undefined,
+  choice: ChatCompletionChoiceMetadata | undefined,
   headers: Headers
 ): Record<string, unknown> {
   const metadata: Record<string, unknown> = {
