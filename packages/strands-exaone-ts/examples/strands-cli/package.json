@@ -2,11 +2,18 @@
   "name": "strands-exaone-cli-example",
   "private": true,
   "type": "module",
+  "scripts": {
+    "check": "tsc --noEmit -p tsconfig.json"
+  },
   "dependencies": {
     "@strands-agents/cli": "~0.3.0",
-    "@strands-agents/harness": "~0.4.0",
+    "@strands-agents/harness": "^0.3.4",
     "@strands-agents/sdk": "1.25.0",
     "strands-exaone": "file:../..",
     "zod": "^4.6.6"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "typescript": "~6.0.3"
   }
 }

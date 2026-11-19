@@ -290,6 +290,8 @@ jobs:
             directory: packages/strands-exaone-ts/examples/sdk
           - provider: strands-exaone
             directory: packages/strands-exaone-ts/examples/harness
+          - provider: strands-exaone
+            directory: packages/strands-exaone-ts/examples/strands-cli
           - provider: langchain-exaone
             directory: packages/langchain-exaone-ts/examples/langchain
           - provider: langchain-exaone

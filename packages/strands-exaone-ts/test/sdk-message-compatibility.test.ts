@@ -1,6 +1,7 @@
 import * as sdk from '@strands-agents/sdk'
 import { describe, expect, it } from 'vitest'
 import { ExaoneModel } from '../src/index.js'
+import { formatMessages } from '../src/messages.js'
 
 function captureRequests(messages: sdk.Message[] = []) {
   const requests: Record<string, unknown>[][] = []
@@ -38,6 +39,13 @@ describe('Strands SDK session content', () => {
     expect(agent.messages[1]?.toJSON().content).toEqual([futureBlock])
   })
 
+  it.skipIf(!('UnknownBlock' in sdk))('rejects an unsupported role even when its restored content is unknown', () => {
+    const message = sdk.Message.fromJSON({
+      role: 'system', content: [{ futureBlock: { text: 'Synthetic saved data.' } }],
+    } as unknown as sdk.MessageData)
+    expect(() => formatMessages([message])).toThrow('Unsupported EXAONE message role')
+  })
+
   it.skipIf(!('InjectedBlock' in sdk))('receives the SDK-rendered injection only on its current user turn', async () => {
     const first = {
       role: 'user',
@@ -53,5 +61,24 @@ describe('Strands SDK session content', () => {
       { role: 'user', content: 'Second.' },
     ])
     expect(agent.messages[0]?.toJSON().content).toEqual(first.content)
+  })
+
+  it.skipIf(!('InjectedBlock' in sdk))('continues after an injected-only user turn expires', async () => {
+    const first = {
+      role: 'user', content: [{ injected: { text: 'SDK-provided context.', source: 'fixture' } }],
+    } as sdk.MessageData
+    const { agent, requests } = captureRequests()
+    await agent.invoke([sdk.Message.fromJSON(first)])
+    await agent.invoke('Second.')
+    expect(requests).toEqual([
+      [{ role: 'user', content: 'SDK-provided context.' }],
+      [{ role: 'assistant', content: 'Done.' }, { role: 'user', content: 'Second.' }],
+    ])
+    expect(agent.messages[0]?.toJSON().content).toEqual(first.content)
+  })
+
+  it('rejects an empty current user turn from a direct model caller', () => {
+    const empty = sdk.Message.fromMessageData({ role: 'user', content: [] })
+    expect(() => formatMessages([empty])).toThrow('EXAONE user messages cannot be empty')
   })
 })

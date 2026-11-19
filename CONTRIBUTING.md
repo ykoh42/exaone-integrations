@@ -46,7 +46,7 @@ Python distribution files are selected explicitly in each package's `pyproject.t
 
 ## Examples
 
-Each example directory has its own setup instructions and framework dependencies. CI lints the Python examples and independently installs and type-checks the five TypeScript example projects. To check a TypeScript example locally, follow its README and run `npm run check` from that directory. Running an example uses the configured EXAONE account; type-checking does not make API requests.
+Each example directory has its own setup instructions and framework dependencies. CI lints the Python examples and independently installs and type-checks the TypeScript example projects. To check a TypeScript example locally, follow its README and run `npm run check` from that directory. Running an example uses the configured EXAONE account; type-checking does not make API requests.
 
 For TypeScript watch mode, run `npm run test:watch`.
 

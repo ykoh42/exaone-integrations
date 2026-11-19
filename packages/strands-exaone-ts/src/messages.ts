@@ -91,12 +91,15 @@ function systemMessages(system: StreamOptions['systemPrompt']): WireMessage[] {
 /** Convert Strands text, reasoning, and tool blocks to EXAONE messages. */
 export function formatMessages(messages: Message[], options?: StreamOptions): WireMessage[] {
   const result: WireMessage[] = systemMessages(options?.systemPrompt)
-  for (const message of messages) {
+  for (const [index, message] of messages.entries()) {
+    const { role } = message
+    if (role !== 'assistant' && role !== 'user') throw new TypeError('Unsupported EXAONE message role')
     const blocks = modelContent(message.content)
-    if (!blocks.length && message.content.length) continue
-    if (message.role === 'assistant') result.push(assistantMessage(blocks))
-    else if (message.role === 'user') result.push(...userMessages(blocks))
-    else throw new TypeError('Unsupported EXAONE message role')
+    // The SDK can leave an earlier user turn empty after removing expired injected text.
+    const historicalUser = role === 'user' && index < messages.length - 1
+    if (!blocks.length && (message.content.length || historicalUser)) continue
+    if (role === 'assistant') result.push(assistantMessage(blocks))
+    else result.push(...userMessages(blocks))
   }
   return result
 }

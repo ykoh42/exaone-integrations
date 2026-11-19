@@ -4,17 +4,19 @@ Run a TypeScript Strands harness with the EXAONE model provider and a local exam
 
 ## Setup
 
-The provider runs on Node.js 22 or newer. For this checkout, use the Node.js version in `.node-version` and npm 11.20.0. This example installs `strands-exaone` from the local checkout so you can try source changes; the published package is also available on npm. From the repository root, install the workspace dependencies and build the provider:
+Strands CLI 0.3 requires Node.js 22.12 or newer. For this checkout, use the Node.js version in `.node-version` and npm 11.20.0. This example installs `strands-exaone` from the local checkout so you can try source changes. The published package is also available on npm. From the repository root, install the workspace dependencies and build the provider:
 
 ```bash
 npm ci
 npm run build --workspace=strands-exaone
 cd packages/strands-exaone-ts/examples/strands-cli
-npm install --install-links --no-package-lock
+npm install --install-links --no-package-lock --workspaces=false
 export EXAONE_API_KEY='your-api-key'
 ```
 
 `--install-links` packs the local provider as a regular dependency, allowing the example and CLI to share the installed Strands SDK. Provide the key through your environment or a trusted file selected with `--env-file`; the provider does not load `.env` files automatically.
+
+The CLI 0.3 loads the Harness version it depends on. This example uses its compatible Harness 0.3.x range. Run `npm run check` to type-check the example.
 
 ## Run
 
