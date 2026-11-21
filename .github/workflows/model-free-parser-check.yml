@@ -1,0 +1,39 @@
+name: Model-free parser fixture verification
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: verification/model-free/requirements.txt
+      - name: Install isolated parser dependencies
+        run: python -m pip install -r verification/model-free/requirements.txt
+      - name: Fetch pinned parser sources and tokenizer
+        run: |
+          mkdir -p "$RUNNER_TEMP/exaone-parser/sglang" "$RUNNER_TEMP/exaone-parser/vllm"
+          git -C "$RUNNER_TEMP/exaone-parser/sglang" init -q
+          git -C "$RUNNER_TEMP/exaone-parser/sglang" remote add origin https://github.com/lkm2835/sglang.git
+          git -C "$RUNNER_TEMP/exaone-parser/sglang" fetch --depth=1 origin 918653d22b2f1ae853b81fc0f5539b7c9311487e
+          git -C "$RUNNER_TEMP/exaone-parser/sglang" checkout -q --detach FETCH_HEAD
+          git -C "$RUNNER_TEMP/exaone-parser/vllm" init -q
+          git -C "$RUNNER_TEMP/exaone-parser/vllm" remote add origin https://github.com/lkm2835/vllm.git
+          git -C "$RUNNER_TEMP/exaone-parser/vllm" fetch --depth=1 origin 33fa995c084e1bf652b4a20130ed0f04d99c9381
+          git -C "$RUNNER_TEMP/exaone-parser/vllm" checkout -q --detach FETCH_HEAD
+          curl -fsSL --retry 2 'https://huggingface.co/LGAI-EXAONE/K-EXAONE-2.0-750B-A37B/resolve/fec0c8dd25fdd20ffd09869d5af5277966d5523d/tokenizer.json' -o "$RUNNER_TEMP/exaone-parser/tokenizer.json"
+      - name: Regenerate and compare parser fixtures
+        run: |
+          python verification/model-free/roundtrip/check-choice-sources.py sglang "$RUNNER_TEMP/exaone-parser/sglang"
+          python verification/model-free/roundtrip/check-choice-sources.py vllm "$RUNNER_TEMP/exaone-parser/vllm" --tokenizer "$RUNNER_TEMP/exaone-parser/tokenizer.json"

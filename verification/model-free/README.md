@@ -2,7 +2,7 @@
 
 These optional, CPU-only probes exercise selected upstream source code with **synthetic inputs and test doubles**. They do not start vLLM or SGLang, load model weights, call an API, or verify real model inference. They are deliberately separate from the provider test suites and are not required to install any package.
 
-The probes expect the exact source revisions below. Two probes execute selected functions extracted from those checkouts; only run them against source you trust. An assertion failure on another revision may mean the server changed; investigate the new behavior rather than treating the old observation as a requirement.
+The probes expect the exact source revisions below. Some probes execute selected functions extracted from those checkouts; only run them against source you trust. An assertion failure on another revision may mean the server changed; investigate the new behavior rather than treating the old observation as a requirement.
 
 Using Python 3.11, create an isolated environment and install the probe dependencies:
 
@@ -79,4 +79,13 @@ node verification/model-free/roundtrip/replay-choices.mjs strands
 node verification/model-free/roundtrip/replay-choices.mjs langchain
 ```
 
-The SGLang fixtures derive from its `qwen3_coder` detector and extracted choice-handling functions at revision `918653d22b2f1ae853b81fc0f5539b7c9311487e`. The vLLM fixtures derive from the Qwen3 parser at `33fa995c084e1bf652b4a20130ed0f04d99c9381`. Inputs, call IDs, finish envelopes and timestamps are synthetic; dependency doubles were used. CI replays these snapshots without running or regenerating the upstream parsers; it does not test a live server, constrained decoding, or model inference.
+The SGLang fixtures derive from its `qwen3_coder` detector and extracted choice-handling functions at revision `918653d22b2f1ae853b81fc0f5539b7c9311487e`. The vLLM fixtures derive from the Qwen3 parser at `33fa995c084e1bf652b4a20130ed0f04d99c9381`. Inputs, call IDs, finish envelopes and timestamps are synthetic; dependency doubles were used.
+
+Regenerate and compare the snapshots without overwriting them, using the parser environment, clean pinned checkouts, and K-EXAONE 2.0 tokenizer described above:
+
+```bash
+/tmp/exaone-parser-check/bin/python verification/model-free/roundtrip/check-choice-sources.py sglang /tmp/exaone-sglang-k2
+/tmp/exaone-parser-check/bin/python verification/model-free/roundtrip/check-choice-sources.py vllm /tmp/exaone-vllm-k2 --tokenizer /tmp/exaone-roundtrip-input/k2-tokenizer.json
+```
+
+The [manual workflow](../../.github/workflows/model-free-parser-check.yml) runs the same comparison. Regular CI replays the committed fixtures without fetching upstream sources. Neither check runs a server, constrained decoding, or model inference.
