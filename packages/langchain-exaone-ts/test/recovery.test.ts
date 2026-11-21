@@ -8,7 +8,7 @@ import { z } from "zod";
 import { ChatExaone } from "../src/chat_models.js";
 import { toolCallRecovery } from "../src/recovery.js";
 
-type Scenario = "normal" | "invalid" | "mixed" | "repeated" | "length" | "length-valid" | "length-empty" | "length-whitespace" | "split" | "repeated-id" |
+type Scenario = "normal" | "multi-valid" | "invalid" | "mixed" | "mixed-valid-first" | "repeated" | "length" | "length-valid" | "length-empty" | "length-whitespace" | "split" | "repeated-id" |
   "empty" | "whitespace" | "empty-object" | "fallback" | "bad-request" | "no-tool" | "wrong-tool" | "extra-tool" | "blank" | "array" | "multiline" |
   "tool-only" | "live-text" | "duplicate-finish" | "legacy-original" | "legacy-correction";
 type TestToolChoice = "auto" | "required" | { type: "function"; function: { name: string } };
@@ -36,13 +36,17 @@ function harness(
       return Response.json({ error: { message: scenario === "fallback" ? "Named tool choice is not supported" : "invalid request to model" } }, { status: 400 });
     }
     let calls: Array<ReturnType<typeof call>> | undefined;
-    const normal = scenario === "normal" || scenario === "duplicate-finish";
+    const normal = scenario === "normal" || scenario === "multi-valid" || scenario === "duplicate-finish";
     if (n === 1) {
       const argumentsText = scenario === "empty" || scenario === "length-empty" ? "" : scenario === "whitespace" || scenario === "length-whitespace" ? " \n\t" :
         scenario === "empty-object" ? "{}" : normal || scenario === "length-valid" ? '{"amount":123}' :
           scenario === "multiline" ? multilineArguments : '{"amount":123,}';
       calls = [call("original", argumentsText)];
-      if (scenario === "mixed") calls.push(call("other", '{"amount":7}'));
+      if (scenario === "multi-valid") calls.push(call("other", '{"amount":456}'));
+      if (scenario === "mixed" || scenario === "mixed-valid-first") {
+        calls.push(call("other", '{"amount":7}'));
+        if (scenario === "mixed-valid-first") calls.reverse();
+      }
     } else if (n === (scenario === "fallback" ? 3 : 2) && !normal && !["empty", "whitespace", "empty-object", "no-tool"].includes(scenario)) {
       calls = [call("corrected", scenario === "repeated" ? '{"amount":123,}' : scenario === "blank" ? " " : scenario === "array" ? "[]" : '{"amount":123}')];
       if (scenario === "wrong-tool") calls[0]!.function.name = "other";
@@ -530,6 +534,34 @@ describe("tool-call recovery", () => {
     expect(executed).toEqual([123]);
     expect(requests[1]!.messages.some((message: any) => message.role === "tool" && message.tool_call_id === "original"))
       .toBe(true);
+  });
+
+  it.each([false, true])("preserves multiple valid calls with optional recovery (stream=%s)", async (stream) => {
+    const baseline = harness("multi-valid", false);
+    const guarded = harness("multi-valid");
+    const invoke = async (agent: typeof baseline.agent) => {
+      if (!stream) {
+        await agent.invoke({ messages: [{ role: "user", content: "Record 123." }] });
+        return;
+      }
+      const updates = await agent.stream({ messages: [{ role: "user", content: "Record 123." }] }, { streamMode: "updates" });
+      for await (const _ of updates) { /* consume the stream */ }
+    };
+    await invoke(baseline.agent);
+    await invoke(guarded.agent);
+    expect(baseline.requests).toEqual(guarded.requests);
+    expect([...baseline.executed].sort()).toEqual([123, 456]);
+    expect([...guarded.executed].sort()).toEqual([123, 456]);
+  });
+
+  it.each(["mixed", "mixed-valid-first"] as const)("blocks mixed streamed calls (%s)", async (scenario) => {
+    const { agent, requests, executed } = harness(scenario);
+    await expect(async () => {
+      const updates = await agent.stream({ messages: [{ role: "user", content: "Record 123." }] }, { streamMode: "updates" });
+      for await (const _ of updates) { /* consume the stream */ }
+    }).rejects.toThrow();
+    expect(requests).toHaveLength(1);
+    expect(executed).toEqual([]);
   });
 
   it("does not execute sibling tools when a mixed response contains an invalid call", async () => {

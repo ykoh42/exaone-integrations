@@ -783,3 +783,102 @@ async def test_recovered_session_can_reload_without_placeholder(tmp_path: Any) -
         for message in requests[3]["messages"]
         for call in message.get("tool_calls", [])
     )
+
+
+@pytest.mark.parametrize("valid_first", [False, True])
+async def test_mixed_streamed_calls_never_execute(valid_first: bool) -> None:
+    requests: list[dict[str, Any]] = []
+    executions: list[int] = []
+
+    @tool
+    def transfer(amount: int) -> str:
+        """Record a synthetic amount."""
+        executions.append(amount)
+        return "Recorded."
+
+    def transport(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        calls = completion('{"amount":123,}')["choices"][0]["message"]["tool_calls"]
+        calls.append(
+            {"id": "call_2", "type": "function", "function": {"name": "transfer", "arguments": '{"amount":456}'}}
+        )
+        if valid_first:
+            calls.reverse()
+        chunks = [
+            {"choices": [{"index": 0, "delta": {"tool_calls": [{**call, "index": index}]}}]}
+            for index, call in enumerate(calls)
+        ]
+        chunks.append({"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]})
+        body = "".join(f"data: {json.dumps(chunk)}\n\n" for chunk in chunks) + "data: [DONE]\n\n"
+        return httpx.Response(200, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client:
+        model = ExaoneModel(api_key="fixture", http_client=client, stream=True, max_retries=0)
+        agent = Agent(
+            model=model, tools=[transfer], system_prompt="synthetic system", callback_handler=None, retry_strategy=None
+        )
+        agent.add_middleware(InvokeModelStage, recover_tool_calls)
+        with pytest.raises(ExaoneError):
+            await agent.invoke_async("synthetic user request")
+
+    assert executions == []
+    assert len(requests) == 1
+    assert [message["content"] for message in requests[0]["messages"] if message["role"] == "user"] == [
+        "synthetic user request"
+    ]
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_multiple_valid_calls_are_unchanged_by_optional_recovery(stream: bool) -> None:
+    async def run(enabled: bool) -> tuple[list[dict[str, Any]], list[int]]:
+        requests: list[dict[str, Any]] = []
+        executions: list[int] = []
+
+        @tool
+        def transfer(amount: int) -> str:
+            """Record a synthetic amount."""
+            executions.append(amount)
+            return "Recorded."
+
+        def transport(request: httpx.Request) -> httpx.Response:
+            requests.append(json.loads(request.content))
+            data = completion('{"amount":123}') if len(requests) == 1 else completion(None, finish="stop", text="done")
+            if len(requests) == 1:
+                data["choices"][0]["message"]["tool_calls"].append(
+                    {
+                        "id": "call_2",
+                        "type": "function",
+                        "function": {"name": "transfer", "arguments": '{"amount":456}'},
+                    }
+                )
+            if not stream:
+                return httpx.Response(200, json=data)
+            choice = data["choices"][0]
+            delta = dict(choice["message"])
+            if "tool_calls" in delta:
+                delta["tool_calls"] = [{**call, "index": index} for index, call in enumerate(delta["tool_calls"])]
+            chunks = [
+                {"choices": [{"index": 0, "delta": delta, "finish_reason": None}]},
+                {"choices": [{"index": 0, "delta": {}, "finish_reason": choice["finish_reason"]}]},
+            ]
+            body = "".join(f"data: {json.dumps(chunk)}\n\n" for chunk in chunks) + "data: [DONE]\n\n"
+            return httpx.Response(200, text=body)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client:
+            model = ExaoneModel(api_key="fixture", http_client=client, stream=stream, max_retries=0)
+            agent = Agent(
+                model=model,
+                tools=[transfer],
+                system_prompt="synthetic system",
+                callback_handler=None,
+                retry_strategy=None,
+            )
+            if enabled:
+                agent.add_middleware(InvokeModelStage, recover_tool_calls)
+            await agent.invoke_async("synthetic user request")
+        return requests, executions
+
+    baseline_requests, baseline_executions = await run(False)
+    guarded_requests, guarded_executions = await run(True)
+    assert baseline_requests == guarded_requests
+    assert sorted(baseline_executions) == sorted(guarded_executions) == [123, 456]

@@ -10,7 +10,7 @@ import { ExaoneModel, toolCallRecovery } from '../src/index.js'
 
 type Call = { id: string; type: 'function'; function: { name: string; arguments: string } }
 const call = (id: string, args: string): Call => ({ id, type: 'function', function: { name: 'transfer', arguments: args } })
-type Case = 'normal' | 'malformed' | 'repeat' | 'mixed' | 'length' | 'secret' | 'cancel' | 'cancel-correction' | 'partial' | 'usage_missing' |
+type Case = 'normal' | 'multi-valid' | 'malformed' | 'repeat' | 'mixed' | 'mixed-valid-first' | 'length' | 'secret' | 'cancel' | 'cancel-correction' | 'partial' | 'usage_missing' |
   'fallback' | 'bad-request' | 'no-tool' | 'wrong-tool' | 'extra-tool' | 'blank' | 'array' | 'multiline' | 'tool-only' | 'live-text' |
   'repeated-original-id' | 'repeated-correction-id' | 'refusal-with-tool' | 'filtered-initial' | 'correction-length' |
   'routed-wrong-tool' | 'routed-required-wrong-tool'
@@ -41,7 +41,7 @@ async function run(scenario: Case, streaming: boolean, enabled = true, requireTo
   const fetcher: typeof fetch = async (_input, init) => {
     const body = JSON.parse(String(init?.body)) as Record<string, any>
     requests.push(body)
-    const normalToolCall = scenario === 'normal' || scenario === 'refusal-with-tool'
+    const normalToolCall = scenario === 'normal' || scenario === 'multi-valid' || scenario === 'refusal-with-tool'
     if (requests.length === 2 && !normalToolCall) exposedBeforeRetry = observed.length
     const first = requests.length === 1
     if (requests.length === 2 && (fallback || scenario === 'bad-request')) {
@@ -60,7 +60,7 @@ async function run(scenario: Case, streaming: boolean, enabled = true, requireTo
       : scenario === 'blank' || scenario === 'array' ? [call('corrected', scenario === 'blank' ? ' ' : '[]')]
       : [good]
     const calls = first
-      ? normalToolCall ? [good] : scenario === 'mixed' ? [bad, good] : [bad]
+      ? normalToolCall ? (scenario === 'multi-valid' ? [good, call('other-valid', '{"amount":456}')] : [good]) : scenario === 'mixed' ? [bad, good] : scenario === 'mixed-valid-first' ? [good, bad] : [bad]
       : correcting ? replacement : null
     const truncated = (first && scenario === 'length') || (correcting && scenario === 'correction-length')
     const finish = truncated ? 'length' : calls ? 'tool_calls' : 'stop'
@@ -249,6 +249,25 @@ describe('toolCallRecovery', () => {
     expect(result.executions).toEqual([])
     expect(result.requests).toHaveLength(scenario === 'repeat' ? 2 : 1)
     expect(inspect(result.failure)).not.toContain('{"amount":123,}')
+  })
+
+  it.each([false, true])('preserves multiple valid calls with optional recovery (stream=%s)', async (streaming) => {
+    const baseline = await run('multi-valid', streaming, false)
+    const guarded = await run('multi-valid', streaming, true)
+    expect(baseline.failure).toBeUndefined()
+    expect(guarded.failure).toBeUndefined()
+    expect(baseline.requests).toEqual(guarded.requests)
+    expect([...baseline.executions].sort()).toEqual([123, 456])
+    expect([...guarded.executions].sort()).toEqual([123, 456])
+    expect(baseline.observed).toEqual(guarded.observed)
+  })
+
+  it.each(['mixed', 'mixed-valid-first'] as const)('does not execute mixed streamed calls (%s)', async (scenario) => {
+    const result = await run(scenario, true)
+    expect(result.failure).toBeDefined()
+    expect(result.requests).toHaveLength(1)
+    expect(result.executions).toEqual([])
+    expect(result.observed).not.toContain('modelMessageStopEvent')
   })
 
   it('does not send encoded credentials back in the recovery request', async () => {

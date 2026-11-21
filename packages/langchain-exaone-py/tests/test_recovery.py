@@ -726,12 +726,15 @@ def test_recovery_delimits_multiline_arguments_and_uses_original_character_locat
     assert result["executions"] == [123]
 
 
+@pytest.mark.parametrize("valid_first", [False, True])
 @pytest.mark.parametrize("stream", [False, True])
-def test_mixed_valid_and_invalid_calls_fail_before_tool_execution(stream: bool) -> None:
+def test_mixed_valid_and_invalid_calls_fail_before_tool_execution(stream: bool, valid_first: bool) -> None:
     first = completion('{"amount":123,}')
     first["choices"][0]["message"]["tool_calls"].append(
         {"id": "call_good", "type": "function", "function": {"name": "transfer", "arguments": '{"amount":123}'}}
     )
+    if valid_first:
+        first["choices"][0]["message"]["tool_calls"].reverse()
     result = run_agent(first, stream=stream)
     assert len(result["requests"]) == 1
     assert result["executions"] == []

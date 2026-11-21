@@ -67,3 +67,16 @@ node verification/model-free/roundtrip/replay-langchain-ts.mjs /tmp/exaone-round
 ```
 
 The source revision check reads Git `HEAD`; use clean checkouts to ensure local edits do not change the parser. The test inputs and output files are synthetic. Never substitute real model responses or credentials in these fixtures.
+
+## Tool-choice regression fixtures
+
+The committed K-EXAONE 2.0 choice fixtures feed the model-card forks' isolated parser output to each provider in CI, with named and required choices and streaming or non-streaming responses:
+
+```bash
+python verification/model-free/roundtrip/replay-choices.py strands
+python verification/model-free/roundtrip/replay-choices.py langchain
+node verification/model-free/roundtrip/replay-choices.mjs strands
+node verification/model-free/roundtrip/replay-choices.mjs langchain
+```
+
+The SGLang fixtures derive from its `qwen3_coder` detector and extracted choice-handling functions at revision `918653d22b2f1ae853b81fc0f5539b7c9311487e`. The vLLM fixtures derive from the Qwen3 parser at `33fa995c084e1bf652b4a20130ed0f04d99c9381`. Inputs, call IDs, finish envelopes and timestamps are synthetic; dependency doubles were used. CI replays these snapshots without running or regenerating the upstream parsers; it does not test a live server, constrained decoding, or model inference.
