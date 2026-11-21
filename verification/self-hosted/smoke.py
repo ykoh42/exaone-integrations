@@ -7,13 +7,20 @@ import functools
 import importlib.metadata
 import json
 import os
-import re
 import sys
 
 import httpx
 
-IMAGE = base64.b64decode(
-    "iVBORw0KGgoAAAANSUhEUgAAABgAAAAYCAIAAABvFaqvAAAAIElEQVR4nGP4z8BAFUQdU0YNGjVo1KBRg0YNGjWIIgQABMo93z5bbNQAAAAASUVORK5CYII="
+IMAGES = {
+    "red": base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAABgAAAAYCAIAAABvFaqvAAAAIElEQVR4nGP4z8BAFUQdU0YNGjVo1KBRg0YNGjWIIgQABMo93z5bbNQAAAAASUVORK5CYII="
+    ),
+    "blue": base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAABgAAAAYCAIAAABvFaqvAAAAHklEQVR4nGNgYPhPJTRq0KhBowaNGjRq0KhBA24QAIj/Pd8vm/oqAAAAAElFTkSuQmCC"
+    ),
+}
+IMAGE_PROMPT = (
+    "What is the main color of this image? Reply with exactly one word in English."
 )
 current_case = "setup"
 
@@ -82,6 +89,10 @@ def report(name):
 def check(condition):
     if not condition:
         raise AssertionError("smoke assertion failed")
+
+
+def matches_color(text, color):
+    return text.strip().lower().rstrip(".!?").strip() == color
 
 
 async def strands(args, client, audit):
@@ -161,27 +172,19 @@ async def strands(args, client, audit):
         report("tool_stream" if stream else "tool_nonstream")
 
     if args.image:
-        current_case = "image"
-        image_agent = Agent(model=model, callback_handler=None, retry_strategy=None)
-        result = await image_agent.invoke_async(
-            [
-                {"text": "What is the main color of this image? Answer in English."},
-                {"image": {"format": "png", "source": {"bytes": IMAGE}}},
-            ]
-        )
-        check(result.stop_reason == "end_turn")
-        check(
-            bool(
-                re.search(
-                    r"\bred\b",
-                    "".join(
-                        block.get("text", "") for block in result.message["content"]
-                    ),
-                    re.IGNORECASE,
-                )
+        for color, image in IMAGES.items():
+            current_case = f"image_{color}"
+            image_agent = Agent(model=model, callback_handler=None, retry_strategy=None)
+            result = await image_agent.invoke_async(
+                [
+                    {"text": IMAGE_PROMPT},
+                    {"image": {"format": "png", "source": {"bytes": image}}},
+                ]
             )
-        )
-        report("image")
+            check(result.stop_reason == "end_turn")
+            text = "".join(block.get("text", "") for block in result.message["content"])
+            check(matches_color(text, color))
+            report(current_case)
 
 
 async def langchain(args, client, audit):
@@ -264,26 +267,24 @@ async def langchain(args, client, audit):
         report("tool_stream" if stream else "tool_nonstream")
 
     if args.image:
-        current_case = "image"
-        image = HumanMessage(
-            content=[
-                {
-                    "type": "text",
-                    "text": "What is the main color of this image? Answer in English.",
-                },
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": "data:image/png;base64,"
-                        + base64.b64encode(IMAGE).decode()
+        for color, image in IMAGES.items():
+            current_case = f"image_{color}"
+            message = HumanMessage(
+                content=[
+                    {"type": "text", "text": IMAGE_PROMPT},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": "data:image/png;base64,"
+                            + base64.b64encode(image).decode()
+                        },
                     },
-                },
-            ]
-        )
-        result = await model.ainvoke([image])
-        check(result.response_metadata.get("finish_reason") == "stop")
-        check(bool(re.search(r"\bred\b", result.text, re.IGNORECASE)))
-        report("image")
+                ]
+            )
+            result = await model.ainvoke([message])
+            check(result.response_metadata.get("finish_reason") == "stop")
+            check(matches_color(result.text, color))
+            report(current_case)
 
 
 async def main():

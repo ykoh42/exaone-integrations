@@ -6,12 +6,48 @@ import json
 import os
 import subprocess
 import threading
+import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import ClassVar
+
+IMAGES = {
+    "red": base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAABgAAAAYCAIAAABvFaqvAAAAIElEQVR4nGP4z8BAFUQdU0YNGjVo1KBRg0YNGjWIIgQABMo93z5bbNQAAAAASUVORK5CYII="
+    ),
+    "blue": base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAABgAAAAYCAIAAABvFaqvAAAAHklEQVR4nGNgYPhPJTRq0KhBowaNGjRq0KhBA24QAIj/Pd8vm/oqAAAAAElFTkSuQmCC"
+    ),
+}
+
+
+def check_image_fixtures():
+    for color, pixel in (("red", b"\xff\x00\x00"), ("blue", b"\x00\x00\xff")):
+        image = IMAGES[color]
+        assert image.startswith(b"\x89PNG\r\n\x1a\n")
+        position = 8
+        data = bytearray()
+        header = None
+        while position < len(image):
+            size = int.from_bytes(image[position : position + 4], "big")
+            kind = image[position + 4 : position + 8]
+            chunk = image[position + 8 : position + 8 + size]
+            crc = int.from_bytes(
+                image[position + 8 + size : position + 12 + size], "big"
+            )
+            assert zlib.crc32(kind + chunk) == crc
+            position += 12 + size
+            if kind == b"IHDR":
+                header = chunk
+            elif kind == b"IDAT":
+                data.extend(chunk)
+        assert header == bytes.fromhex("00000018000000180802000000")
+        assert zlib.decompress(data) == (b"\x00" + pixel * 24) * 24
 
 
 class Handler(BaseHTTPRequestHandler):
     fault = ""
+    image_requests: ClassVar[list[str]] = []
 
     def log_message(self, *_args):
         pass
@@ -28,14 +64,27 @@ class Handler(BaseHTTPRequestHandler):
             if isinstance(content, str)
             else " ".join(p.get("text", "") for p in content if isinstance(p, dict))
         )
+        image_color = None
         if "main color" in text:
             assert [p.get("type") for p in content] == ["text", "image_url"]
+            assert (
+                text.strip()
+                == "What is the main color of this image? Reply with exactly one word in English."
+            )
             url = content[1]["image_url"]["url"]
             assert url.startswith("data:image/png;base64,")
-            assert base64.b64decode(url.split(",", 1)[1]) == base64.b64decode(
-                "iVBORw0KGgoAAAANSUhEUgAAABgAAAAYCAIAAABvFaqvAAAAIElEQVR4nGP4z8BAFUQdU0YNGjVo1KBRg0YNGjWIIgQABMo93z5bbNQAAAAASUVORK5CYII="
+            image = base64.b64decode(url.split(",", 1)[1], validate=True)
+            image_color = next(
+                (name for name, expected in IMAGES.items() if image == expected), None
             )
-            answer = "red"
+            assert image_color is not None
+            self.image_requests.append(image_color)
+            if self.fault == "image-always-red":
+                answer = "red"
+            elif self.fault == f"image-negated-{image_color}":
+                answer = f"not {image_color}"
+            else:
+                answer = f" {image_color.upper()}. "
         elif "Repeat the word" in text:
             answer = "amber"
         elif any(m.get("role") == "tool" for m in messages):
@@ -88,7 +137,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.fault == "tool-result-length"
                 and any(m.get("role") == "tool" for m in messages)
             )
-            or (self.fault == "image-length" and "main color" in text)
+            or (self.fault == "image-length" and image_color == "red")
+            or (self.fault == "image-blue-length" and image_color == "blue")
         ):
             finish = "length"
         message = {"role": "assistant", "content": None if calls else answer}
@@ -160,6 +210,7 @@ def main():
     parser.add_argument("--langchain-python", required=True)
     parser.add_argument("--node", default="node")
     args = parser.parse_args()
+    check_image_fixtures()
     root = Path(__file__).resolve().parent
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -200,8 +251,13 @@ def main():
                 ("on", "multiturn-second-length"),
                 ("on", "tool-result-length"),
                 ("on", "image-length"),
+                ("on", "image-blue-length"),
+                ("on", "image-always-red"),
+                ("on", "image-negated-red"),
+                ("on", "image-negated-blue"),
             ]:
                 Handler.fault = fault
+                Handler.image_requests = []
                 metadata = (
                     [
                         "--server",
@@ -271,8 +327,10 @@ def main():
                         "multiturn",
                         "tool_stream",
                         "tool_nonstream",
-                        "image",
+                        "image_red",
+                        "image_blue",
                     } <= cases
+                    assert Handler.image_requests == ["red", "blue"]
                 else:
                     error = json.loads(result.stderr.splitlines()[-1])
                     assert error["status"] == "failed"
@@ -288,9 +346,17 @@ def main():
                         "multiturn-first-length": "multiturn",
                         "multiturn-second-length": "multiturn",
                         "tool-result-length": "tool_nonstream",
-                        "image-length": "image",
+                        "image-length": "image_red",
+                        "image-blue-length": "image_blue",
+                        "image-always-red": "image_blue",
+                        "image-negated-red": "image_red",
+                        "image-negated-blue": "image_blue",
                     }[fault]
                     assert error["case"] == expected_case
+                    if expected_case == "image_blue":
+                        assert Handler.image_requests == ["red", "blue"]
+                    elif expected_case == "image_red":
+                        assert Handler.image_requests == ["red"]
                 print(
                     f"{language} {framework} thinking={thinking} fault={fault or 'none'}: OK",
                     flush=True,

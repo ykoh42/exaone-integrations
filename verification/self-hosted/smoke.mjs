@@ -9,7 +9,10 @@ import { dirname, join } from 'node:path'
 import { ExaoneModel } from 'strands-exaone'
 import { ChatExaone } from 'langchain-exaone'
 
-const image = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAABgAAAAYCAIAAABvFaqvAAAAIElEQVR4nGP4z8BAFUQdU0YNGjVo1KBRg0YNGjWIIgQABMo93z5bbNQAAAAASUVORK5CYII=', 'base64')
+const images = {
+  red: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAABgAAAAYCAIAAABvFaqvAAAAIElEQVR4nGP4z8BAFUQdU0YNGjVo1KBRg0YNGjWIIgQABMo93z5bbNQAAAAASUVORK5CYII=', 'base64'),
+  blue: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAABgAAAAYCAIAAABvFaqvAAAAHklEQVR4nGNgYPhPJTRq0KhBowaNGjRq0KhBA24QAIj/Pd8vm/oqAAAAAElFTkSuQmCC', 'base64'),
+}
 const names = new Set(['framework', 'base-url', 'model', 'thinking', 'server', 'server-version', 'model-revision', 'reasoning-parser', 'tool-parser', 'server-options', 'max-tokens'])
 const args = {}
 for (let i = 2; i < process.argv.length; i++) {
@@ -55,7 +58,8 @@ const userText = 'Reply with the single word READY.'
 const memoryText = 'Remember the word amber. Reply briefly.'
 const followupText = 'Repeat the word I asked you to remember.'
 const toolText = 'Call lookup with value 7, then report its result.'
-const imageText = 'What is the main color of this image? Answer in English.'
+const imageText = 'What is the main color of this image? Reply with exactly one word in English.'
+const matchesColor = (text, color) => text.trim().toLowerCase().replace(/[.!?]+$/u, '').trim() === color
 
 async function strands() {
   const model = new ExaoneModel({
@@ -104,13 +108,16 @@ async function strands() {
     report(stream ? 'tool_stream' : 'tool_nonstream')
   }
   if (args.image) {
-    currentCase = 'image'
-    const result = await new Agent({ model, printer: false, retryStrategy: null }).invoke([
-      new TextBlock(imageText), new ImageBlock({ format: 'png', source: { bytes: image } }),
-    ])
-    check(result.stopReason === 'endTurn')
-    check(result.lastMessage.content.some((b) => b.type === 'textBlock' && /\bred\b/i.test(b.text)))
-    report('image')
+    for (const [color, image] of Object.entries(images)) {
+      currentCase = `image_${color}`
+      const result = await new Agent({ model, printer: false, retryStrategy: null }).invoke([
+        new TextBlock(imageText), new ImageBlock({ format: 'png', source: { bytes: image } }),
+      ])
+      check(result.stopReason === 'endTurn')
+      const text = result.lastMessage.content.filter((b) => b.type === 'textBlock').map((b) => b.text).join('')
+      check(matchesColor(text, color))
+      report(currentCase)
+    }
   }
 }
 
@@ -165,14 +172,16 @@ async function langchain() {
     report(stream ? 'tool_stream' : 'tool_nonstream')
   }
   if (args.image) {
-    currentCase = 'image'
-    const result = await model.invoke([new HumanMessage({ content: [
-      { type: 'text', text: imageText },
-      { type: 'image_url', image_url: { url: `data:image/png;base64,${image.toString('base64')}` } },
-    ] })])
-    check(result.response_metadata.finish_reason === 'stop')
-    check(typeof result.content === 'string' && /\bred\b/i.test(result.content))
-    report('image')
+    for (const [color, image] of Object.entries(images)) {
+      currentCase = `image_${color}`
+      const result = await model.invoke([new HumanMessage({ content: [
+        { type: 'text', text: imageText },
+        { type: 'image_url', image_url: { url: `data:image/png;base64,${image.toString('base64')}` } },
+      ] })])
+      check(result.response_metadata.finish_reason === 'stop')
+      check(typeof result.content === 'string' && matchesColor(result.content, color))
+      report(currentCase)
+    }
   }
 }
 
