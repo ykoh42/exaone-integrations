@@ -24,11 +24,13 @@ def arguments():
     parser.add_argument("--base-url", required=True)
     parser.add_argument("--model", required=True)
     parser.add_argument("--thinking", required=True, choices=("on", "off"))
-    parser.add_argument("--server", required=True, choices=("vllm", "sglang"))
-    parser.add_argument("--server-version", required=True)
-    parser.add_argument("--model-revision", required=True)
-    parser.add_argument("--reasoning-parser", required=True)
-    parser.add_argument("--tool-parser", required=True)
+    parser.add_argument(
+        "--server", default="unknown", choices=("vllm", "sglang", "unknown")
+    )
+    parser.add_argument("--server-version", default="unknown")
+    parser.add_argument("--model-revision", default="unknown")
+    parser.add_argument("--reasoning-parser", default="unknown")
+    parser.add_argument("--tool-parser", default="unknown")
     parser.add_argument(
         "--server-options", default="", help="Non-secret server settings to record"
     )
@@ -107,7 +109,12 @@ async def strands(args, client, audit):
             event.get("contentBlockDelta", {}).get("delta", {}) for event in events
         ]
         check(any(d.get("text", "").strip() for d in deltas))
-        check(any("messageStop" in event for event in events))
+        check(
+            any(
+                event.get("messageStop", {}).get("stopReason") == "end_turn"
+                for event in events
+            )
+        )
         check(audit.requests[-1]["stream"] is stream)
         reasoning_present = any(
             d.get("reasoningContent", {}).get("text") for d in deltas
@@ -118,8 +125,10 @@ async def strands(args, client, audit):
     model.update_config(stream=True)
     current_case = "multiturn"
     conversation = Agent(model=model, callback_handler=None, retry_strategy=None)
-    await conversation.invoke_async("Remember the word amber. Reply briefly.")
+    first = await conversation.invoke_async("Remember the word amber. Reply briefly.")
+    check(first.stop_reason == "end_turn")
     answer = await conversation.invoke_async("Repeat the word I asked you to remember.")
+    check(answer.stop_reason == "end_turn")
     check(
         "amber"
         in "".join(block.get("text", "") for block in answer.message["content"]).lower()
@@ -144,9 +153,10 @@ async def strands(args, client, audit):
             model=model, tools=[lookup], callback_handler=None, retry_strategy=None
         )
         start = len(audit.requests)
-        await agent.invoke_async(
+        result = await agent.invoke_async(
             "Call lookup with value 7, then report its result.", limits={"turns": 4}
         )
+        check(result.stop_reason == "end_turn")
         check(used == [7] and any(r["tool_result"] for r in audit.requests[start:]))
         report("tool_stream" if stream else "tool_nonstream")
 
@@ -159,6 +169,7 @@ async def strands(args, client, audit):
                 {"image": {"format": "png", "source": {"bytes": IMAGE}}},
             ]
         )
+        check(result.stop_reason == "end_turn")
         check(
             bool(
                 re.search(
@@ -199,6 +210,7 @@ async def langchain(args, client, audit):
         else:
             result = await model.ainvoke([user])
         check(bool(result.text.strip()) and audit.requests[-1]["stream"] is stream)
+        check(result.response_metadata.get("finish_reason") == "stop")
         check(
             bool(result.additional_kwargs.get("reasoning_content"))
             == (args.thinking == "on")
@@ -208,9 +220,11 @@ async def langchain(args, client, audit):
     current_case = "multiturn"
     first_user = HumanMessage("Remember the word amber. Reply briefly.")
     first = await model.ainvoke([first_user])
+    check(first.response_metadata.get("finish_reason") == "stop")
     answer = await model.ainvoke(
         [first_user, first, HumanMessage("Repeat the word I asked you to remember.")]
     )
+    check(answer.response_metadata.get("finish_reason") == "stop")
     check("amber" in answer.text.lower())
     if args.thinking == "on":
         check(audit.requests[-1]["reasoning_history"])
@@ -238,13 +252,14 @@ async def langchain(args, client, audit):
         check(len(call.tool_calls) == 1 and call.tool_calls[0]["name"] == "lookup")
         check(call.tool_calls[0]["args"] == {"value": 7})
         tool_result = lookup.invoke(call.tool_calls[0]["args"])
-        await model.ainvoke(
+        result = await model.ainvoke(
             [
                 tool_user,
                 call,
                 ToolMessage(tool_result, tool_call_id=call.tool_calls[0]["id"]),
             ]
         )
+        check(result.response_metadata.get("finish_reason") == "stop")
         check(audit.requests[-1]["tool_result"])
         report("tool_stream" if stream else "tool_nonstream")
 
@@ -266,6 +281,7 @@ async def langchain(args, client, audit):
             ]
         )
         result = await model.ainvoke([image])
+        check(result.response_metadata.get("finish_reason") == "stop")
         check(bool(re.search(r"\bred\b", result.text, re.IGNORECASE)))
         report("image")
 

@@ -72,6 +72,25 @@ class Handler(BaseHTTPRequestHandler):
             or (self.fault == "length-nonstream" and not stream)
         ):
             finish = "length"
+        if (
+            not calls
+            and "single word READY" in text
+            and (
+                (self.fault == "text-length-stream" and stream)
+                or (self.fault == "text-length-nonstream" and not stream)
+            )
+        ):
+            finish = "length"
+        if not calls and (
+            (self.fault == "multiturn-first-length" and "Remember the word" in text)
+            or (self.fault == "multiturn-second-length" and "Repeat the word" in text)
+            or (
+                self.fault == "tool-result-length"
+                and any(m.get("role") == "tool" for m in messages)
+            )
+            or (self.fault == "image-length" and "main color" in text)
+        ):
+            finish = "length"
         message = {"role": "assistant", "content": None if calls else answer}
         if reasoning:
             message["reasoning_content"] = reasoning
@@ -151,16 +170,6 @@ def main():
         base,
         "--model",
         "synthetic",
-        "--server",
-        "vllm",
-        "--server-version",
-        "fixture",
-        "--model-revision",
-        "fixture",
-        "--reasoning-parser",
-        "fixture",
-        "--tool-parser",
-        "fixture",
         "--image",
     ]
     env = {**os.environ, "SELF_HOSTED_API_KEY": "EMPTY"}
@@ -185,8 +194,30 @@ def main():
                 ("on", "length-nonstream"),
                 ("on", "length-stream"),
                 ("on", "json-stream"),
+                ("on", "text-length-nonstream"),
+                ("on", "text-length-stream"),
+                ("on", "multiturn-first-length"),
+                ("on", "multiturn-second-length"),
+                ("on", "tool-result-length"),
+                ("on", "image-length"),
             ]:
                 Handler.fault = fault
+                metadata = (
+                    [
+                        "--server",
+                        "sglang",
+                        "--server-version",
+                        "test-version",
+                        "--model-revision",
+                        "test-revision",
+                        "--reasoning-parser",
+                        "test-reasoning",
+                        "--tool-parser",
+                        "test-tool",
+                    ]
+                    if thinking == "on" and not fault
+                    else []
+                )
                 result = subprocess.run(
                     [
                         executable,
@@ -196,6 +227,7 @@ def main():
                         "--thinking",
                         thinking,
                         *common,
+                        *metadata,
                     ],
                     env=env,
                     capture_output=True,
@@ -211,6 +243,27 @@ def main():
                     )
                 if not fault:
                     rows = [json.loads(line) for line in result.stdout.splitlines()]
+                    expected_metadata = (
+                        {
+                            "server": "sglang",
+                            "server_version": "test-version",
+                            "model_revision": "test-revision",
+                            "reasoning_parser": "test-reasoning",
+                            "tool_parser": "test-tool",
+                        }
+                        if metadata
+                        else {
+                            "server": "unknown",
+                            "server_version": "unknown",
+                            "model_revision": "unknown",
+                            "reasoning_parser": "unknown",
+                            "tool_parser": "unknown",
+                        }
+                    )
+                    assert all(
+                        rows[0].get(key) == value
+                        for key, value in expected_metadata.items()
+                    )
                     cases = {r.get("case") for r in rows}
                     assert {
                         "text_stream",
@@ -230,6 +283,12 @@ def main():
                         "length-nonstream": "tool_nonstream",
                         "length-stream": "tool_stream",
                         "json-stream": "tool_stream",
+                        "text-length-nonstream": "text_nonstream",
+                        "text-length-stream": "text_stream",
+                        "multiturn-first-length": "multiturn",
+                        "multiturn-second-length": "multiturn",
+                        "tool-result-length": "tool_nonstream",
+                        "image-length": "image",
                     }[fault]
                     assert error["case"] == expected_case
                 print(

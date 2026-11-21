@@ -18,8 +18,8 @@ for (let i = 2; i < process.argv.length; i++) {
   if (!process.argv[i].startsWith('--') || !names.has(name) || !process.argv[i + 1] || process.argv[i + 1].startsWith('--')) throw Error('Invalid option')
   args[name] = process.argv[++i]
 }
-for (const name of names) if (!['max-tokens', 'server-options'].includes(name) && !args[name]) throw Error('Missing required option')
-if (!['strands', 'langchain'].includes(args.framework) || !['on', 'off'].includes(args.thinking) || !['vllm', 'sglang'].includes(args.server)) throw Error('Invalid option')
+for (const name of ['framework', 'base-url', 'model', 'thinking']) if (!args[name]) throw Error('Missing required option')
+if (!['strands', 'langchain'].includes(args.framework) || !['on', 'off'].includes(args.thinking) || (args.server && !['vllm', 'sglang', 'unknown'].includes(args.server))) throw Error('Invalid option')
 const maxTokens = Number(args['max-tokens'] ?? 1024)
 if (!Number.isSafeInteger(maxTokens) || maxTokens <= 0) throw Error('Invalid max tokens')
 const apiKey = process.env.SELF_HOSTED_API_KEY ?? 'EMPTY'
@@ -72,6 +72,7 @@ async function strands() {
       if (next.done) { result = next.value; break }
     }
     check(result.message.content.some((b) => b.type === 'textBlock' && b.text?.trim()))
+    check(result.stopReason === 'endTurn')
     check(requests.at(-1).stream === stream)
     check(result.message.content.some((b) => b.type === 'reasoningBlock' && b.text) === (args.thinking === 'on'))
     report(stream ? 'text_stream' : 'text_nonstream')
@@ -79,8 +80,10 @@ async function strands() {
   model.updateConfig({ stream: true })
   currentCase = 'multiturn'
   const conversation = new Agent({ model, printer: false, retryStrategy: null })
-  await conversation.invoke(memoryText)
+  const first = await conversation.invoke(memoryText)
+  check(first.stopReason === 'endTurn')
   const answer = await conversation.invoke(followupText)
+  check(answer.stopReason === 'endTurn')
   check(answer.lastMessage.content.some((b) => b.type === 'textBlock' && b.text.toLowerCase().includes('amber')))
   if (args.thinking === 'on') check(requests.at(-1).reasoningHistory)
   report('multiturn')
@@ -95,7 +98,8 @@ async function strands() {
     model.updateConfig({ stream })
     used.length = 0
     const start = requests.length
-    await new Agent({ model, tools: [lookup], printer: false, retryStrategy: null }).invoke(toolText, { limits: { turns: 4 } })
+    const result = await new Agent({ model, tools: [lookup], printer: false, retryStrategy: null }).invoke(toolText, { limits: { turns: 4 } })
+    check(result.stopReason === 'endTurn')
     check(used.length === 1 && used[0] === 7 && requests.slice(start).some((r) => r.toolResult))
     report(stream ? 'tool_stream' : 'tool_nonstream')
   }
@@ -104,6 +108,7 @@ async function strands() {
     const result = await new Agent({ model, printer: false, retryStrategy: null }).invoke([
       new TextBlock(imageText), new ImageBlock({ format: 'png', source: { bytes: image } }),
     ])
+    check(result.stopReason === 'endTurn')
     check(result.lastMessage.content.some((b) => b.type === 'textBlock' && /\bred\b/i.test(b.text)))
     report('image')
   }
@@ -122,13 +127,16 @@ async function langchain() {
       for await (const chunk of await model.stream([user])) result = result ? result.concat(chunk) : chunk
     } else result = await model.invoke([user])
     check(typeof result?.content === 'string' && result.content.trim() && requests.at(-1).stream === stream)
+    check(result.response_metadata.finish_reason === 'stop')
     check(Boolean(result.additional_kwargs.reasoning_content) === (args.thinking === 'on'))
     report(stream ? 'text_stream' : 'text_nonstream')
   }
   currentCase = 'multiturn'
   const firstUser = new HumanMessage(memoryText)
   const first = await model.invoke([firstUser])
+  check(first.response_metadata.finish_reason === 'stop')
   const answer = await model.invoke([firstUser, first, new HumanMessage(followupText)])
+  check(answer.response_metadata.finish_reason === 'stop')
   check(typeof answer.content === 'string' && answer.content.toLowerCase().includes('amber'))
   if (args.thinking === 'on') check(requests.at(-1).reasoningHistory)
   report('multiturn')
@@ -151,7 +159,8 @@ async function langchain() {
     }
     check(call.tool_calls?.length === 1 && call.tool_calls[0].name === 'lookup' && call.tool_calls[0].args.value === 7)
     const result = await lookup.invoke(call.tool_calls[0].args)
-    await model.invoke([toolUser, call, new ToolMessage({ content: result, tool_call_id: call.tool_calls[0].id })])
+    const answer = await model.invoke([toolUser, call, new ToolMessage({ content: result, tool_call_id: call.tool_calls[0].id })])
+    check(answer.response_metadata.finish_reason === 'stop')
     check(requests.at(-1).toolResult)
     report(stream ? 'tool_stream' : 'tool_nonstream')
   }
@@ -161,15 +170,16 @@ async function langchain() {
       { type: 'text', text: imageText },
       { type: 'image_url', image_url: { url: `data:image/png;base64,${image.toString('base64')}` } },
     ] })])
+    check(result.response_metadata.finish_reason === 'stop')
     check(typeof result.content === 'string' && /\bred\b/i.test(result.content))
     report('image')
   }
 }
 
 console.log(JSON.stringify({
-  framework: args.framework, language: 'typescript', server: args.server, server_version: args['server-version'],
-  model: args.model, model_revision: args['model-revision'], reasoning_parser: args['reasoning-parser'],
-  tool_parser: args['tool-parser'], thinking: args.thinking, image_requested: Boolean(args.image),
+  framework: args.framework, language: 'typescript', server: args.server ?? 'unknown', server_version: args['server-version'] ?? 'unknown',
+  model: args.model, model_revision: args['model-revision'] ?? 'unknown', reasoning_parser: args['reasoning-parser'] ?? 'unknown',
+  tool_parser: args['tool-parser'] ?? 'unknown', thinking: args.thinking, image_requested: Boolean(args.image),
   server_options: args['server-options'] ?? '',
   provider_version: packageVersion(`${args.framework}-exaone`),
   sdk_version: packageVersion(args.framework === 'strands' ? '@strands-agents/sdk' : '@langchain/core'),

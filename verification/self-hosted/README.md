@@ -11,12 +11,6 @@ LANGCHAIN_PY=/path/to/langchain/venv/bin/python
 common=(
   --base-url http://127.0.0.1:8000/v1
   --model YOUR_SERVED_MODEL_NAME
-  --server vllm
-  --server-version YOUR_SERVER_VERSION
-  --model-revision YOUR_MODEL_REVISION
-  --reasoning-parser qwen3
-  --tool-parser YOUR_TOOL_PARSER
-  --server-options 'context length and other non-secret settings'
   --thinking on
 )
 "$STRANDS_PY" verification/self-hosted/smoke.py --framework strands "${common[@]}"
@@ -27,13 +21,15 @@ node verification/self-hosted/smoke.mjs --framework langchain "${common[@]}"
 
 Repeat with `--thinking off` and the SGLang deployment when supported. The explicit thinking value is sent as `chat_template_kwargs.enable_thinking`; this does not assume that `reasoning_effort` has equivalent semantics. Add `--image` only for an image-capable EXAONE 4.5 server. The optional `--max-tokens` defaults to 1024. The provided key is sent to the selected endpoint; the scripts use the placeholder `EMPTY` if `SELF_HOSTED_API_KEY` is unset, never the hosted EXAONE key automatically.
 
+When known, record the deployment with `--server` (`vllm` or `sglang`), `--server-version`, `--model-revision`, `--reasoning-parser`, `--tool-parser` and `--server-options`. These labels do not configure the server; omitted values are reported as `unknown` except for the optional free-text server options. Provide the actual values when documenting verified configurations.
+
 The checks cover non-streaming and streaming text and reasoning, a two-turn conversation, automatic tool selection and tool-result history in both modes, and optionally a small synthetic red PNG. They make serial requests and do not perform load testing. Tool choice `required` and named tool choice, malformed-call recovery, comprehensive image understanding, caching, and every server/parser version are outside this smoke check. A model can fail the expected answer or tool choice without a provider defect; investigate server responses separately.
 
 The scripts output status and caller-supplied deployment metadata, plus installed provider and SDK versions. They do not intentionally print prompts, model output, reasoning, keys or the endpoint URL. Do not put credentials or sensitive values in metadata arguments or commit output that contains sensitive information; servers and framework logging may retain additional data.
 
 ## Model-free verification of the checks
 
-This starts a local deterministic HTTP fixture, runs all four smoke programs serially with thinking on/off and image input, and verifies that missing or unexpected reasoning, a wrong tool argument, truncated tool calls and malformed streamed arguments fail. It makes no model calls:
+This starts a local deterministic HTTP fixture, runs all four smoke programs serially with thinking on/off and image input, and verifies that missing or unexpected reasoning, truncated text, a wrong tool argument, truncated tool calls and malformed streamed arguments fail. It makes no model calls:
 
 ```bash
 python verification/self-hosted/check-mock.py \
