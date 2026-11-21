@@ -9,5 +9,4 @@ See [model and server compatibility](COMPATIBILITY.md) for model-card configurat
 
 ## Reasoning and tools
 
-- Evaluate misplaced reasoning in model output.
 - Verify Strands cancellation during tool approval with a released SDK containing the upstream fix.
