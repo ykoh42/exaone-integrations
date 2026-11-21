@@ -1,6 +1,7 @@
 /** Replay pinned-source synthetic tool-choice fixtures through one TypeScript provider. */
 import assert from 'node:assert/strict';
 import { readFile, readdir } from 'node:fs/promises';
+import { createRequire } from 'node:module';
 
 const framework = process.argv[2];
 const base = new URL('./choice-fixtures/', import.meta.url);
@@ -21,7 +22,8 @@ for (const name of files) {
       return new Response(frames + 'data: [DONE]\n\n');
     };
     if (framework === 'strands') {
-      const { Message } = await import('@strands-agents/sdk');
+      const requireFromProvider = createRequire(import.meta.resolve('strands-exaone'));
+      const { Message } = await import(requireFromProvider.resolve('@strands-agents/sdk'));
       const { ExaoneModel } = await import('strands-exaone');
       const model = new ExaoneModel({ apiKey: 'EMPTY', modelId: 'synthetic', baseURL: 'http://fixture/v1', stream, fetch });
       const user = Message.fromMessageData({ role: 'user', content: [{ text: 'lookup' }] });
@@ -40,7 +42,6 @@ for (const name of files) {
       assert.equal(call.toolUseId, 'call_0');
       assert.deepEqual(call.input, fixture.expected);
     } else if (framework === 'langchain') {
-      const { HumanMessage } = await import('@langchain/core/messages');
       const { ChatExaone } = await import('langchain-exaone');
       const model = new ChatExaone({ apiKey: 'EMPTY', model: 'synthetic', baseUrl: 'http://fixture/v1', outputVersion: 'v1', fetch });
       const bound = model.bindTools([{
@@ -48,8 +49,8 @@ for (const name of files) {
       }], { tool_choice: choice === 'named' ? 'lookup' : 'required' });
       let result;
       if (stream) {
-        for await (const part of await bound.stream([new HumanMessage('lookup')])) result = result ? result.concat(part) : part;
-      } else result = await bound.invoke([new HumanMessage('lookup')]);
+        for await (const part of await bound.stream('lookup')) result = result ? result.concat(part) : part;
+      } else result = await bound.invoke('lookup');
       assert.equal(result.tool_calls.length, 1);
       assert.equal(result.tool_calls[0].name, 'lookup');
       assert.equal(result.tool_calls[0].id, 'call_0');
