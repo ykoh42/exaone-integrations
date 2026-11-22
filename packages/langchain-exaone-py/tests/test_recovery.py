@@ -124,6 +124,7 @@ def run_agent(
     stream_mode: str = "messages",
     split_id: bool = False,
     correction: dict[str, Any] | None = None,
+    correction_response: httpx.Response | None = None,
     named_rejection: str | None = None,
     include_failure_text: bool = True,
     observe_first_frame: bool = False,
@@ -161,6 +162,8 @@ def run_agent(
     def respond(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
         requests.append(body)
+        if len(requests) == 2 and correction_response is not None:
+            return correction_response
         if len(requests) == 2 and named_rejection is not None:
             return httpx.Response(400, json={"error": {"message": named_rejection}})
         if len(requests) == 1 or (repeat and len(requests) == 2):
@@ -665,6 +668,95 @@ def test_required_fallback_needs_explicit_named_choice_rejection(stream: bool) -
     assert failed["error"] is not None
     assert len(failed["requests"]) == 2
     assert failed["executions"] == []
+
+
+@pytest.mark.parametrize(
+    ("stream", "failure"),
+    [(False, "bad_json"), (True, "bad_json"), (False, "http_error"), (True, "http_error"), (True, "sse_error")],
+)
+def test_failed_correction_exposes_known_usage_on_sdk_error(stream: bool, failure: str) -> None:
+    first = completion('{"amount":123,}')
+    correction = completion('{"amount":123,}')
+    correction_usage = {"prompt_tokens": 6, "completion_tokens": 7, "total_tokens": 13}
+    correction["usage"] = correction_usage
+    envelope = {"error": {"message": "invalid request to model"}, "usage": correction_usage}
+    response = None
+    if failure == "http_error":
+        response = httpx.Response(400, json=envelope)
+    elif failure == "sse_error":
+        response = httpx.Response(
+            200, content=f"data: {json.dumps(envelope)}\n\n".encode(), headers={"content-type": "text/event-stream"}
+        )
+    result = run_agent(first, stream=stream, correction=correction, correction_response=response)
+    expected = {"failed_usage": first["usage"], "correction_usage": correction_usage}
+    assert result["executions"] == []
+    assert len(result["requests"]) == 2
+    assert result["error"].exaone_recovery_usage == expected
+    assert result["observed_errors"][-1].exaone_recovery_usage == expected
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_failed_correction_does_not_invent_missing_usage(stream: bool) -> None:
+    first = completion('{"amount":123,}')
+    correction = completion('{"amount":123,}')
+    del first["usage"]
+    del correction["usage"]
+    result = run_agent(first, stream=stream, correction=correction)
+    assert result["error"] is not None
+    assert not hasattr(result["error"], "exaone_recovery_usage")
+    assert result["executions"] == []
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_async_failed_correction_keeps_usage_on_sanitized_transport_error(stream: bool) -> None:
+    requests = 0
+    original_error = httpx.ConnectError("synthetic transport failure")
+    observed: list[BaseException] = []
+
+    class Observer(BaseCallbackHandler):
+        def on_llm_error(self, error: BaseException, **kwargs: Any) -> None:
+            observed.append(error)
+
+    @tool
+    def transfer(amount: int) -> str:
+        """Record a synthetic amount."""
+        raise AssertionError("A failed correction must not execute the tool")
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        if requests == 2:
+            original_error.request = request
+            raise original_error
+        first = completion('{"amount":123,}')
+        if json.loads(request.content)["stream"]:
+            return httpx.Response(200, content=sse(first), headers={"content-type": "text/event-stream"})
+        return httpx.Response(200, json=first)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        agent = create_agent(
+            model=ChatEXAONE(api_key="fixture", http_async_client=client, max_retries=0),
+            tools=[transfer],
+            middleware=[ToolCallRecoveryMiddleware()],
+        )
+        with pytest.raises(httpx.ConnectError) as caught:
+            if stream:
+                async for _ in agent.astream(
+                    {"messages": [{"role": "user", "content": "Record 123."}]},
+                    config={"callbacks": [Observer()]},
+                    stream_mode="messages",
+                ):
+                    pass
+            else:
+                await agent.ainvoke(
+                    {"messages": [{"role": "user", "content": "Record 123."}]},
+                    config={"callbacks": [Observer()]},
+                )
+    expected = {"failed_usage": {"prompt_tokens": 5, "completion_tokens": 7, "total_tokens": 12}}
+    assert caught.value.exaone_recovery_usage == expected
+    assert observed[-1].exaone_recovery_usage == expected
+    assert not hasattr(original_error, "exaone_recovery_usage")
+    assert requests == 2
 
 
 @pytest.mark.parametrize("stream", [False, True])

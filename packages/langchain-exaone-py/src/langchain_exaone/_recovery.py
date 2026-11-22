@@ -96,6 +96,41 @@ def _numeric_usage(value: Any, secret: str) -> dict[str, Any] | None:
     return result or None
 
 
+def attach_recovery_usage(error: Exception, failed: Any, correction: Any, secret: str) -> None:
+    """Keep received accounting on a failed correction without changing the error type."""
+    original = _numeric_usage(failed, secret)
+    retried = _numeric_usage(correction, secret)
+    if original is None and retried is None:
+        return
+    usage = {}
+    if original is not None:
+        usage["failed_usage"] = original
+    if retried is not None:
+        usage["correction_usage"] = retried
+    try:
+        error.exaone_recovery_usage = usage  # type: ignore[attr-defined]
+    except (AttributeError, TypeError):
+        pass
+
+
+@dataclass
+class CorrectionFailureUsage:
+    """Remember the last reported usage before correction validation can fail."""
+
+    failed: Any
+    secret: str = field(repr=False)
+    correction: dict[str, Any] | None = None
+
+    def record(self, payload: Any) -> None:
+        if isinstance(payload, dict):
+            usage = _numeric_usage(payload.get("usage"), self.secret)
+            if usage is not None:
+                self.correction = usage
+
+    def attach(self, error: Exception) -> None:
+        attach_recovery_usage(error, self.failed, self.correction, self.secret)
+
+
 def _has_malformed_json(arguments: list[Any]) -> bool:
     """Detect a syntax error without retaining decoder exceptions or input."""
     return any(_syntax_diagnostic(raw) is not None for raw in arguments)

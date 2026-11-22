@@ -50,9 +50,11 @@ from pydantic import ConfigDict, Field, SecretStr, ValidationInfo, field_validat
 
 from langchain_exaone._profiles import get_model_profile
 from langchain_exaone._recovery import (
+    CorrectionFailureUsage,
     MalformedToolArguments,
     RecoveryState,
     RecoveryStream,
+    attach_recovery_usage,
     check_completed_message,
     check_message,
     check_stream,
@@ -180,6 +182,15 @@ def _safe_request(error: Exception, api_key: str) -> httpx.Request | None:
     return httpx.Request(request.method, _redact_secret(str(safe_url), api_key))
 
 
+def _safe_recovery_transport_error(error: Exception, api_key: str) -> Exception:
+    safe_error = _copy_transport_error(error, api_key)
+    state = recovery_state.get()
+    usage = getattr(error, "exaone_recovery_usage", None) if state is not None and state.failure is not None else None
+    if isinstance(usage, dict):
+        attach_recovery_usage(safe_error, usage.get("failed_usage"), usage.get("correction_usage"), api_key)
+    return safe_error
+
+
 def _safe_transport_errors(method: Any) -> Any:
     """Replace propagated HTTPX errors after the request scope has unwound."""
     if isasyncgenfunction(method):
@@ -192,7 +203,7 @@ def _safe_transport_errors(method: Any) -> Any:
                     async for item in events:
                         yield item
             except _HTTPX_ERRORS as error:
-                safe_error = _copy_transport_error(error, self.api_key.get_secret_value())
+                safe_error = _safe_recovery_transport_error(error, self.api_key.get_secret_value())
             if safe_error is not None:
                 raise safe_error
 
@@ -206,7 +217,7 @@ def _safe_transport_errors(method: Any) -> Any:
             try:
                 yield from method(self, *args, **kwargs)
             except _HTTPX_ERRORS as error:
-                safe_error = _copy_transport_error(error, self.api_key.get_secret_value())
+                safe_error = _safe_recovery_transport_error(error, self.api_key.get_secret_value())
             if safe_error is not None:
                 raise safe_error
 
@@ -220,7 +231,7 @@ def _safe_transport_errors(method: Any) -> Any:
             try:
                 return await method(self, *args, **kwargs)
             except _HTTPX_ERRORS as error:
-                safe_error = _copy_transport_error(error, self.api_key.get_secret_value())
+                safe_error = _safe_recovery_transport_error(error, self.api_key.get_secret_value())
             assert safe_error is not None
             raise safe_error
 
@@ -232,7 +243,7 @@ def _safe_transport_errors(method: Any) -> Any:
         try:
             return method(self, *args, **kwargs)
         except _HTTPX_ERRORS as error:
-            safe_error = _copy_transport_error(error, self.api_key.get_secret_value())
+            safe_error = _safe_recovery_transport_error(error, self.api_key.get_secret_value())
         assert safe_error is not None
         raise safe_error
 
@@ -263,11 +274,41 @@ def _retry_after(headers: Mapping[str, str]) -> float | None:
     return max(hints) if hints else None
 
 
-def _api_error(status: int, headers: Mapping[str, str], body: bytes, api_key: str) -> ExaoneAPIError:
+def _nonstream_correction_usage(key: str) -> CorrectionFailureUsage | None:
+    state = recovery_state.get()
+    if state is not None and state.expected_tool is not None and state.failure is not None:
+        return CorrectionFailureUsage(state.failure[0].usage, key)
+    return None
+
+
+@contextmanager
+def _preserve_correction_usage(usage: CorrectionFailureUsage | None) -> Iterator[None]:
+    if usage is None:
+        yield
+        return
+    try:
+        yield
+    except _HTTPX_ERRORS as error:
+        # The caller's transport may reuse its exception. Keep per-call data on a copy.
+        safe_error = _copy_transport_error(error, usage.secret)
+    except Exception as error:
+        usage.attach(error)
+        raise
+    else:
+        return
+    usage.attach(safe_error)
+    raise safe_error
+
+
+def _api_error(
+    status: int, headers: Mapping[str, str], body: bytes, api_key: str, usage: CorrectionFailureUsage | None = None
+) -> ExaoneAPIError:
     try:
         payload = json.loads(body)
     except (ValueError, UnicodeDecodeError):
         payload = {}
+    if usage is not None:
+        usage.record(payload)
     return _api_error_from_payload(status, headers, payload, api_key)
 
 
@@ -918,13 +959,17 @@ class ChatEXAONE(BaseChatModel):
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 yield client
 
-    def _raise_api_error(self, response: httpx.Response, api_key: str) -> ExaoneAPIError:
+    def _raise_api_error(
+        self, response: httpx.Response, api_key: str, usage: CorrectionFailureUsage | None = None
+    ) -> ExaoneAPIError:
         body = response.content if response.is_stream_consumed else response.read()
-        return _api_error(response.status_code, response.headers, body, api_key)
+        return _api_error(response.status_code, response.headers, body, api_key, usage)
 
-    async def _araise_api_error(self, response: httpx.Response, api_key: str) -> ExaoneAPIError:
+    async def _araise_api_error(
+        self, response: httpx.Response, api_key: str, usage: CorrectionFailureUsage | None = None
+    ) -> ExaoneAPIError:
         body = response.content if response.is_stream_consumed else await response.aread()
-        return _api_error(response.status_code, response.headers, body, api_key)
+        return _api_error(response.status_code, response.headers, body, api_key, usage)
 
     def _delay(self, error: ExaoneAPIError, attempt: int) -> float | None:
         hint = _retry_after(error.headers)
@@ -1027,7 +1072,8 @@ class ChatEXAONE(BaseChatModel):
     ) -> ChatResult:
         del run_manager
         key, body = self._key(), self._body(messages, stop, False, kwargs)
-        with self._sync_client() as client:
+        usage = _nonstream_correction_usage(key)
+        with _preserve_correction_usage(usage), self._sync_client() as client:
             for attempt in range(self.max_retries + 1):
                 response = client.post(
                     f"{self.base_url.rstrip('/')}/chat/completions",
@@ -1035,7 +1081,7 @@ class ChatEXAONE(BaseChatModel):
                     json=body,
                 )
                 if response.is_error:
-                    error = self._raise_api_error(response, key)
+                    error = self._raise_api_error(response, key, usage)
                     response.close()
                     if error.status_code in _RETRYABLE_STATUSES and attempt < self.max_retries:
                         delay = self._delay(error, attempt)
@@ -1045,6 +1091,8 @@ class ChatEXAONE(BaseChatModel):
                     raise error
                 try:
                     payload = _load_response_json(response.content, "response body")
+                    if usage is not None:
+                        usage.record(payload)
                 finally:
                     response.close()
                 return self._parse_result(payload, key, body)
@@ -1060,27 +1108,31 @@ class ChatEXAONE(BaseChatModel):
     ) -> ChatResult:
         del run_manager
         key, body = self._key(), self._body(messages, stop, False, kwargs)
-        async with self._async_client() as client:
-            for attempt in range(self.max_retries + 1):
-                response = await client.post(
-                    f"{self.base_url.rstrip('/')}/chat/completions",
-                    headers={"Authorization": f"Bearer {key}"},
-                    json=body,
-                )
-                if response.is_error:
-                    error = await self._araise_api_error(response, key)
-                    await response.aclose()
-                    if error.status_code in _RETRYABLE_STATUSES and attempt < self.max_retries:
-                        delay = self._delay(error, attempt)
-                        if delay is not None:
-                            await asyncio.sleep(delay)
-                            continue
-                    raise error
-                try:
-                    payload = _load_response_json(response.content, "response body")
-                finally:
-                    await response.aclose()
-                return self._parse_result(payload, key, body)
+        usage = _nonstream_correction_usage(key)
+        with _preserve_correction_usage(usage):
+            async with self._async_client() as client:
+                for attempt in range(self.max_retries + 1):
+                    response = await client.post(
+                        f"{self.base_url.rstrip('/')}/chat/completions",
+                        headers={"Authorization": f"Bearer {key}"},
+                        json=body,
+                    )
+                    if response.is_error:
+                        error = await self._araise_api_error(response, key, usage)
+                        await response.aclose()
+                        if error.status_code in _RETRYABLE_STATUSES and attempt < self.max_retries:
+                            delay = self._delay(error, attempt)
+                            if delay is not None:
+                                await asyncio.sleep(delay)
+                                continue
+                        raise error
+                    try:
+                        payload = _load_response_json(response.content, "response body")
+                        if usage is not None:
+                            usage.record(payload)
+                    finally:
+                        await response.aclose()
+                    return self._parse_result(payload, key, body)
         raise RuntimeError("EXAONE retry loop exited without a response")
 
     def bind_tools(
@@ -1196,7 +1248,12 @@ class ChatEXAONE(BaseChatModel):
                         await run_manager.on_llm_new_token(chunk.text, chunk=chunk)
 
     def _stream_wire(
-        self, client: httpx.Client, body: dict[str, Any], key: str, complete: list[bool]
+        self,
+        client: httpx.Client,
+        body: dict[str, Any],
+        key: str,
+        complete: list[bool],
+        usage: CorrectionFailureUsage | None = None,
     ) -> Iterator[dict[str, Any]]:
         for attempt in range(self.max_retries + 1):
             with client.stream(
@@ -1207,11 +1264,13 @@ class ChatEXAONE(BaseChatModel):
             ) as response:
                 if not response.is_error:
                     for payload in _decode_sse(response.iter_lines(), complete):
+                        if usage is not None:
+                            usage.record(payload)
                         if payload.get("error") is not None:
                             raise _api_error_from_payload(response.status_code, response.headers, payload, key)
                         yield payload
                     return
-                error = self._raise_api_error(response, key)
+                error = self._raise_api_error(response, key, usage)
             if error.status_code not in _RETRYABLE_STATUSES or attempt == self.max_retries:
                 raise error
             delay = self._delay(error, attempt)
@@ -1220,7 +1279,12 @@ class ChatEXAONE(BaseChatModel):
             time.sleep(delay)
 
     async def _astream_wire(
-        self, client: httpx.AsyncClient, body: dict[str, Any], key: str, complete: list[bool]
+        self,
+        client: httpx.AsyncClient,
+        body: dict[str, Any],
+        key: str,
+        complete: list[bool],
+        usage: CorrectionFailureUsage | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         for attempt in range(self.max_retries + 1):
             async with client.stream(
@@ -1231,11 +1295,13 @@ class ChatEXAONE(BaseChatModel):
             ) as response:
                 if not response.is_error:
                     async for payload in _decode_sse_async(response.aiter_lines(), complete):
+                        if usage is not None:
+                            usage.record(payload)
                         if payload.get("error") is not None:
                             raise _api_error_from_payload(response.status_code, response.headers, payload, key)
                         yield payload
                     return
-                error = await self._araise_api_error(response, key)
+                error = await self._araise_api_error(response, key, usage)
             if error.status_code not in _RETRYABLE_STATUSES or attempt == self.max_retries:
                 raise error
             delay = self._delay(error, attempt)
@@ -1261,13 +1327,15 @@ class ChatEXAONE(BaseChatModel):
             assert state.failure is not None
             request = correction_request(body, state.failure[1], error)
             for required in (False, True):
+                correction = self._correction_router(state.failure[1])
+                usage = CorrectionFailureUsage(error.usage, key)
                 try:
-                    done = [False]
-                    correction = self._correction_router(state.failure[1])
-                    for payload in self._stream_wire(client, request, key, done):
-                        self._inspect_correction_frame(correction, payload, key)
-                    held = self._finish_correction(held, correction, done[0], state.failure[1], error, key)
-                    break
+                    with _preserve_correction_usage(usage):
+                        done = [False]
+                        for payload in self._stream_wire(client, request, key, done, usage):
+                            self._inspect_correction_frame(correction, payload, key)
+                        held = self._finish_correction(held, correction, done[0], state.failure[1], error, key)
+                        break
                 except ExaoneAPIError as rejection:
                     if required or not _named_choice_unsupported(rejection):
                         raise
@@ -1295,14 +1363,16 @@ class ChatEXAONE(BaseChatModel):
             assert state.failure is not None
             request = correction_request(body, state.failure[1], error)
             for required in (False, True):
+                correction = self._correction_router(state.failure[1])
+                usage = CorrectionFailureUsage(error.usage, key)
                 try:
-                    done = [False]
-                    correction = self._correction_router(state.failure[1])
-                    async with aclosing(self._astream_wire(client, request, key, done)) as wire:
-                        async for payload in wire:
-                            self._inspect_correction_frame(correction, payload, key)
-                    held = self._finish_correction(held, correction, done[0], state.failure[1], error, key)
-                    break
+                    with _preserve_correction_usage(usage):
+                        done = [False]
+                        async with aclosing(self._astream_wire(client, request, key, done, usage)) as wire:
+                            async for payload in wire:
+                                self._inspect_correction_frame(correction, payload, key)
+                        held = self._finish_correction(held, correction, done[0], state.failure[1], error, key)
+                        break
                 except ExaoneAPIError as rejection:
                     if required or not _named_choice_unsupported(rejection):
                         raise

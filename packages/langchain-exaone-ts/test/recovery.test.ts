@@ -10,7 +10,7 @@ import { toolCallRecovery } from "../src/recovery.js";
 
 type Scenario = "normal" | "multi-valid" | "invalid" | "mixed" | "mixed-valid-first" | "repeated" | "length" | "length-valid" | "length-empty" | "length-whitespace" | "split" | "repeated-id" |
   "empty" | "whitespace" | "empty-object" | "fallback" | "bad-request" | "no-tool" | "wrong-tool" | "extra-tool" | "blank" | "array" | "multiline" |
-  "tool-only" | "live-text" | "duplicate-finish" | "legacy-original" | "legacy-correction";
+  "tool-only" | "live-text" | "duplicate-finish" | "legacy-original" | "legacy-correction" | "transport" | "missing-usage" | "null-correction" | "malformed-sse";
 type TestToolChoice = "auto" | "required" | { type: "function"; function: { name: string } };
 const namedRecord = { type: "function", function: { name: "record" } };
 const multilineArguments = '{\n"note":"😀```","amount":123,,}';
@@ -32,8 +32,18 @@ function harness(
     const body = JSON.parse(String(init?.body));
     requests.push(body);
     const n = requests.length;
-    if (n === 2 && (scenario === "fallback" || scenario === "bad-request")) {
-      return Response.json({ error: { message: scenario === "fallback" ? "Named tool choice is not supported" : "invalid request to model" } }, { status: 400 });
+    const correctionUsage = { prompt_tokens: 7, completion_tokens: 8, total_tokens: 15 };
+    if (n === 2 && scenario === "null-correction") return Response.json(null);
+    if (n === 2 && scenario === "malformed-sse") {
+      const frame = JSON.stringify({ choices: [], usage: correctionUsage });
+      return new Response(`data: ${frame}\n\ndata: {invalid\n\n`, { headers: { "content-type": "text/event-stream" } });
+    }
+    if (n === 2 && scenario === "transport") throw new TypeError("synthetic transport failure");
+    if (n === 2 && (scenario === "fallback" || scenario === "bad-request" || scenario === "missing-usage")) {
+      return Response.json({
+        error: { message: scenario === "fallback" ? "Named tool choice is not supported" : "invalid request to model" },
+        ...(scenario === "bad-request" ? { usage: correctionUsage } : {}),
+      }, { status: 400 });
     }
     let calls: Array<ReturnType<typeof call>> | undefined;
     const normal = scenario === "normal" || scenario === "multi-valid" || scenario === "duplicate-finish";
@@ -54,7 +64,8 @@ function harness(
     }
     const finish = scenario.startsWith("length") && n === 1 ? "length" : calls ? "tool_calls" : "stop";
     if (!body.stream) {
-      const usage = n === 1 && failedUsage ? failedUsage : { prompt_tokens: 4, completion_tokens: 6, total_tokens: 10 };
+      const usage = scenario === "missing-usage" ? undefined
+        : n === 1 && failedUsage ? failedUsage : { prompt_tokens: 4, completion_tokens: 6, total_tokens: 10 };
       return Response.json({ id: "fixture", model: "fixture", usage, choices: [{ index: 0, finish_reason: finish,
         message: { role: "assistant", content: calls ? (n === 1 && scenario === "invalid" ? "failure-only-content" : null) : "done", ...(calls ? { tool_calls: calls } : {}) } }] });
     }
@@ -100,8 +111,8 @@ function harness(
     if (n === 1 && scenario === "duplicate-finish") frames.push(terminal);
     frames.push(terminal);
     if (n === 1 && failedUsage) frames.push({ id: "fixture", choices: [], usage: failedUsage });
-    if (n === 2 && scenario === "live-text") {
-      frames.push({ choices: [], usage: { prompt_tokens: 7, completion_tokens: 8, total_tokens: 15 } });
+    if (n === 2 && (scenario === "live-text" || scenario === "repeated")) {
+      frames.push({ choices: [], usage: correctionUsage }, { choices: [], usage: null });
     }
     return new Response(`${frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join("")}data: [DONE]\n\n`,
       { headers: { "content-type": "text/event-stream" } });
@@ -621,6 +632,53 @@ describe("tool-call recovery", () => {
       }
     },
   );
+
+  it.each(["invoke", "stream"] as const)(
+    "exposes received usage on failed corrections through SDK error callbacks in %s mode", async (mode) => {
+      const scenarios = ["repeated", "bad-request", "transport", mode === "stream" ? "malformed-sse" : "null-correction"] as const;
+      for (const scenario of scenarios) {
+        const firstUsage = { prompt_tokens: 5, completion_tokens: 7, total_tokens: 12 };
+        const { agent, executed, requests } = harness(scenario, true, false, undefined, undefined, firstUsage);
+        const observed: unknown[] = [];
+        const callbacks = [{ name: "accounting", handleLLMError(error: unknown) { observed.push(error); } }];
+        let failure: unknown;
+        try {
+          const input = { messages: [{ role: "user" as const, content: "Record 123." }] };
+          if (mode === "invoke") await agent.invoke(input, { callbacks });
+          else for await (const _ of await agent.stream(input, { callbacks, streamMode: "messages" })) { /* consume */ }
+        } catch (error) {
+          failure = error;
+        }
+        const expected = {
+          failed_usage: firstUsage,
+          ...(scenario === "transport" || scenario === "null-correction" ? {} : {
+            correction_usage: scenario === "repeated" && mode === "invoke"
+              ? { prompt_tokens: 4, completion_tokens: 6, total_tokens: 10 }
+              : { prompt_tokens: 7, completion_tokens: 8, total_tokens: 15 },
+          }),
+        };
+        expect(failure).toMatchObject({ exaone_recovery_usage: expected });
+        expect(observed.at(-1)).toMatchObject({ exaone_recovery_usage: expected });
+        expect(requests).toHaveLength(2);
+        expect(executed).toEqual([]);
+      }
+    },
+  );
+
+  it.each(["invoke", "stream"] as const)("does not invent usage when none is reported in %s mode", async (mode) => {
+    const { agent, executed } = harness("missing-usage");
+    let failure: unknown;
+    try {
+      const input = { messages: [{ role: "user" as const, content: "Record 123." }] };
+      if (mode === "invoke") await agent.invoke(input);
+      else for await (const _ of await agent.stream(input, { streamMode: "messages" })) { /* consume */ }
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(Error);
+    expect(failure).not.toHaveProperty("exaone_recovery_usage");
+    expect(executed).toEqual([]);
+  });
 
   it.each(["length", "length-valid", "length-empty", "length-whitespace"] as const)(
     "does not execute or retry a %s response", async (scenario) => {

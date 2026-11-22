@@ -308,48 +308,57 @@ export class ChatExaone extends BaseChatModel<
     const body = this.requestBody(messages, options, false);
     const recovery = recoveryForCall();
     const tools = recovery && recoverableTools(body, recovery);
-    const response = await this.request(body, options.signal, options.maxRetries ?? this.retryCount);
-    const payload = await readJsonResponse<ChatCompletionResponse>(response, this.#apiKey);
-    if (payload.error !== undefined && payload.error !== null) {
-      throw new ExaoneAPIError(response.status, safeHeaders(response.headers), payload, this.#apiKey);
-    }
-    const choices = payload.choices;
-    if (!Array.isArray(choices) || choices.length === 0) {
-      throw new Error("EXAONE Chat Completions must return at least one choice.");
-    }
-    options.signal?.throwIfAborted();
-    if (recovery?.expectedTool !== undefined) {
-      validateReplacement(choices, recovery.expectedTool);
-    } else if (tools) validateRecoveryResponse(choices, this.#apiKey, tools, payload.usage);
-    const usage = mapUsage(payload.usage);
-    const generations = choices.map((choice) => {
-      if (!isRecord(choice) || !isRecord(choice.message)) {
-        throw new Error("EXAONE Chat Completions returned a choice without an assistant message.");
+    const accounting = recovery?.expectedTool === undefined
+      ? undefined
+      : new CorrectionFailureUsage(recovery.failedUsage, this.#apiKey);
+    try {
+      const response = await this.request(body, options.signal, options.maxRetries ?? this.retryCount, false, accounting);
+      const payload = await readJsonResponse<ChatCompletionResponse>(response, this.#apiKey);
+      accounting?.record(payload);
+      if (payload.error !== undefined && payload.error !== null) {
+        throw new ExaoneAPIError(response.status, safeHeaders(response.headers), payload, this.#apiKey);
       }
-      const message = createAssistantMessage(choice.message, payload, choice, response.headers);
-      if ((options.outputVersion ?? this.outputVersion) === "v1") setStandardContent(message);
-      // EXAONE reports request-level usage, shared by all candidates.
-      if (usage) message.usage_metadata = usage;
+      const choices = payload.choices;
+      if (!Array.isArray(choices) || choices.length === 0) {
+        throw new Error("EXAONE Chat Completions must return at least one choice.");
+      }
+      options.signal?.throwIfAborted();
+      if (recovery?.expectedTool !== undefined) {
+        validateReplacement(choices, recovery.expectedTool);
+      } else if (tools) validateRecoveryResponse(choices, this.#apiKey, tools, payload.usage);
+      const usage = mapUsage(payload.usage);
+      const generations = choices.map((choice) => {
+        if (!isRecord(choice) || !isRecord(choice.message)) {
+          throw new Error("EXAONE Chat Completions returned a choice without an assistant message.");
+        }
+        const message = createAssistantMessage(choice.message, payload, choice, response.headers);
+        if ((options.outputVersion ?? this.outputVersion) === "v1") setStandardContent(message);
+        // EXAONE reports request-level usage, shared by all candidates.
+        if (usage) message.usage_metadata = usage;
+        return {
+          text: typeof message.content === "string" ? message.content : "",
+          message,
+          generationInfo: responseMetadata(payload, choice, response.headers),
+        };
+      });
       return {
-        text: typeof message.content === "string" ? message.content : "",
-        message,
-        generationInfo: responseMetadata(payload, choice, response.headers),
-      };
-    });
-    return {
-      generations,
-      ...(usage
-        ? {
-            llmOutput: {
-              tokenUsage: {
-                promptTokens: usage.input_tokens,
-                completionTokens: usage.output_tokens,
-                totalTokens: usage.total_tokens,
+        generations,
+        ...(usage
+          ? {
+              llmOutput: {
+                tokenUsage: {
+                  promptTokens: usage.input_tokens,
+                  completionTokens: usage.output_tokens,
+                  totalTokens: usage.total_tokens,
+                },
               },
-            },
-          }
-        : {}),
-    };
+            }
+          : {}),
+      };
+    } catch (error) {
+      accounting?.attach(error, options.signal);
+      throw error;
+    }
   }
 
   override async *_streamResponseChunks(
@@ -403,23 +412,30 @@ export class ChatExaone extends BaseChatModel<
       tool_choice: { type: "function", function: { name: call.name } },
     };
     let response: Response;
+    let usage = new CorrectionFailureUsage(call.usage, this.#apiKey);
     try {
-      response = await this.request(request, signal, retries, true);
-    } catch (error) {
-      if (!namedChoiceUnsupported(error)) throw error;
+      try {
+        response = await this.request(request, signal, retries, true, usage);
+      } catch (error) {
+        if (!namedChoiceUnsupported(error)) throw error;
+        signal?.throwIfAborted();
+        request.tool_choice = "required";
+        usage = new CorrectionFailureUsage(call.usage, this.#apiKey);
+        response = await this.request(request, signal, retries, true, usage);
+      }
+      if (!response.body) throw new Error("EXAONE returned an empty correction stream.");
+      const router = new RecoveryPayloadRouter(false);
+      for await (const payload of parseSse<ChatCompletionChunk>(response.body, signal, this.#apiKey, true, usage)) {
+        for (const early of router.accept(payload)) validateStreamFrame(early, response, this.#apiKey);
+      }
       signal?.throwIfAborted();
-      request.tool_choice = "required";
-      response = await this.request(request, signal, retries, true);
+      const replacement = validateRecoveryPayloads(router.finish(), response, this.#apiKey, new Set(), call.name, router);
+      if (!replacement) throw new Error("EXAONE returned no validated correction.");
+      return replacement;
+    } catch (error) {
+      usage.attach(error, signal);
+      throw error;
     }
-    if (!response.body) throw new Error("EXAONE returned an empty correction stream.");
-    const router = new RecoveryPayloadRouter(false);
-    for await (const payload of parseSse<ChatCompletionChunk>(response.body, signal, this.#apiKey, true)) {
-      for (const early of router.accept(payload)) validateStreamFrame(early, response, this.#apiKey);
-    }
-    signal?.throwIfAborted();
-    const replacement = validateRecoveryPayloads(router.finish(), response, this.#apiKey, new Set(), call.name, router);
-    if (!replacement) throw new Error("EXAONE returned no validated correction.");
-    return replacement;
   }
 
   override async *_streamChatModelEvents(
@@ -486,14 +502,17 @@ export class ChatExaone extends BaseChatModel<
     return body;
   }
 
-  private async request(body: Record<string, unknown>, signal: AbortSignal | undefined, maxRetries: number, hasDeadline = false): Promise<Response> {
+  private async request(
+    body: Record<string, unknown>, signal: AbortSignal | undefined, maxRetries: number, hasDeadline = false,
+    accounting?: CorrectionFailureUsage,
+  ): Promise<Response> {
     const url = `${this.baseUrl}/chat/completions`;
     const requestSignal = hasDeadline ? signal : this.createRequestSignal(signal);
     for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
       const response = await this.sendRequest(url, body, requestSignal, attempt, maxRetries);
       if (!response) continue;
       if (response.ok) return response;
-      await this.retryResponse(response, requestSignal, attempt, maxRetries);
+      await this.retryResponse(response, requestSignal, attempt, maxRetries, accounting);
     }
     throw new Error("EXAONE request retry loop ended unexpectedly.");
   }
@@ -531,9 +550,11 @@ export class ChatExaone extends BaseChatModel<
     response: Response,
     signal: AbortSignal | undefined,
     attempt: number,
-    maxRetries: number
+    maxRetries: number,
+    accounting?: CorrectionFailureUsage,
   ): Promise<void> {
     const payload = await readErrorBody(response, this.#apiKey);
+    accounting?.record(payload);
     const error = new ExaoneAPIError(response.status, safeHeaders(response.headers), payload, this.#apiKey);
     if (!RETRYABLE_STATUSES.has(response.status) || attempt >= maxRetries) throw error;
     const delay = retryDelayMs(
@@ -1408,6 +1429,52 @@ function safeHeaders(headers: Headers): Record<string, string> {
   }));
 }
 
+function numericRecoveryUsage(value: unknown, secret: string): Record<string, unknown> | undefined {
+  if (!isRecord(value)) return undefined;
+  const result: Record<string, unknown> = {};
+  for (const key of ["prompt_tokens", "completion_tokens", "total_tokens", "reasoning_tokens"]) {
+    if (validUsageCount(value[key])) result[key] = value[key];
+  }
+  for (const key of ["prompt_tokens_details", "completion_tokens_details"]) {
+    const details = value[key];
+    if (!isRecord(details)) continue;
+    const safe = Object.fromEntries(Object.entries(details).filter(
+      ([name, count]) => redactSecretText(name, secret) === name && validUsageCount(count),
+    ));
+    if (Object.keys(safe).length) result[key] = safe;
+  }
+  return Object.keys(result).length ? result : undefined;
+}
+
+class CorrectionFailureUsage {
+  private correction?: Record<string, unknown>;
+
+  constructor(private readonly failed: unknown, private readonly secret: string) {}
+
+  record(payload: unknown): void {
+    if (!isRecord(payload)) return;
+    const usage = numericRecoveryUsage(payload.usage, this.secret);
+    if (usage) this.correction = usage;
+  }
+
+  attach(error: unknown, signal: AbortSignal | undefined): void {
+    // An abort reason belongs to the caller and can be reused across requests.
+    if (signal?.aborted && error === signal.reason) return;
+    if (!(error instanceof Error) || !Object.isExtensible(error)) return;
+    const failedUsage = numericRecoveryUsage(this.failed, this.secret);
+    const correctionUsage = this.correction;
+    if (!failedUsage && !correctionUsage) return;
+    try {
+      Object.defineProperty(error, "exaone_recovery_usage", {
+        value: { ...(failedUsage && { failed_usage: failedUsage }), ...(correctionUsage && { correction_usage: correctionUsage }) },
+        configurable: true,
+      });
+    } catch {
+      // Preserve the original error when its properties cannot be changed.
+    }
+  }
+}
+
 function validUsageCount(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
@@ -1482,6 +1549,7 @@ async function readErrorBody(response: Response, apiKey: string): Promise<unknow
 
 async function* parseSse<T>(
   body: ReadableStream<Uint8Array>, signal: AbortSignal | undefined, apiKey: string, requireDone = false,
+  accounting?: CorrectionFailureUsage,
 ): AsyncGenerator<T> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
@@ -1503,7 +1571,7 @@ async function* parseSse<T>(
       buffer += normalized.text;
       const frames = takeSseFrames(buffer);
       buffer = frames.remaining;
-      const parsed = parseSseFrames<T>(frames.complete);
+      const parsed = parseSseFrames<T>(frames.complete, accounting);
       yield* parsed.events;
       if (parsed.done) return;
       if (streamEnded) {
@@ -1535,12 +1603,16 @@ function normalizeSseChunk(text: string, pendingCR: boolean): { text: string; pe
   return { text: text.replace(/\r\n/g, "\n").replace(/\r/g, "\n"), pendingCR: text.endsWith("\r") };
 }
 
-function parseSseFrames<T>(frames: string[]): { events: T[]; done: boolean } {
+function parseSseFrames<T>(frames: string[], accounting?: CorrectionFailureUsage): { events: T[]; done: boolean } {
   const events: T[] = [];
   for (const frame of frames) {
     const payload = ssePayload(frame);
     if (payload === "[DONE]") return { events, done: true };
-    if (payload) events.push(parseResponseJson<T>(payload));
+    if (payload) {
+      const event = parseResponseJson<T>(payload);
+      accounting?.record(event);
+      events.push(event);
+    }
   }
   return { events, done: false };
 }
