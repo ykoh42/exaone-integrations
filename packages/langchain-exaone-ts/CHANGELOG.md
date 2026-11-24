@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.1 (2026-11-24)
+
+- Prefer the Retry-After-Ms header when calculating retries, falling back to Retry-After.
+- Preserve reported usage in errors when a tool-call correction fails.
+
 ## 0.2.0 (2026-11-20)
 
 - **Breaking change.** Remove the `bufferResponse` option. Use `toolCallRecovery()` with `createMiddleware`.

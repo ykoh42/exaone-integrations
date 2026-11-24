@@ -8,7 +8,7 @@ import { describe, expect, it, vi, afterEach } from "vitest";
 import { z } from "zod";
 import { ChatExaone } from "../src/chat_models.js";
 import { ExaoneAPIError } from "../src/errors.js";
-import { sleepWithSignal } from "../src/retry.js";
+import { retryDelayMs, sleepWithSignal } from "../src/retry.js";
 
 const completion = (message: Record<string, unknown>, usage?: Record<string, unknown>) =>
   new Response(
@@ -1419,6 +1419,26 @@ describe("ChatExaone", () => {
     const message = await stream;
     expect(message.content).toEqual(expect.arrayContaining([expect.objectContaining({ type: "refusal", refusal: "No thanks" })]));
     expect(message.tool_calls).toEqual([{ id: "call-1", name: "lookup", args: { x: 2 }, type: "tool_call" }]);
+  });
+
+  it.each([
+    [{ "retry-after": "1", "retry-after-ms": "186" }, 186],
+    [{ "retry-after": "1", "retry-after-ms": "invalid" }, 1_000],
+    [{ "retry-after": "1", "retry-after-ms": "0" }, 0],
+  ])("exposes the preferred retry delay on the API error", (headers, expected) => {
+    const error = new ExaoneAPIError(429, headers, {}, "synthetic-key");
+    expect(error.retryAfterMs).toBe(expected);
+  });
+
+  it.each([
+    [{ "retry-after": "1", "retry-after-ms": "186" }, 2_000, 186],
+    [{ "retry-after": "0.1", "retry-after-ms": "600" }, 2_000, 600],
+    [{ "retry-after": "1", "retry-after-ms": "0" }, 2_000, 0],
+    [{ "retry-after": "1", "retry-after-ms": "invalid" }, 2_000, 1_000],
+    [{ "retry-after": "1" }, 2_000, 1_000],
+    [{ "retry-after": "0.1", "retry-after-ms": "600" }, 500, null],
+  ])("uses the preferred retry hint and cap", (headers, cap, expected) => {
+    expect(retryDelayMs(new Headers(headers), 0, 1_000, cap)).toBe(expected);
   });
 
   it("honors Retry-After without a short default timeout", async () => {

@@ -37,15 +37,11 @@ def _parse_retry_after_seconds(value: str | None, *, milliseconds: bool = False)
 
 
 def retry_delay(headers: Mapping[str, str], attempt: int, base: float, maximum: float) -> float | None:
-    """Honor the longer valid server hint; give up rather than retry too early."""
-    hints = (
-        _parse_retry_after_seconds(headers.get("retry-after")),
-        _parse_retry_after_seconds(headers.get("retry-after-ms"), milliseconds=True),
-    )
-    valid_hints = [hint for hint in hints if hint is not None]
-    if valid_hints:
-        longest_hint = max(valid_hints)
-        return longest_hint if longest_hint <= maximum else None
+    """Prefer the millisecond hint and respect the configured retry cap."""
+    milliseconds = _parse_retry_after_seconds(headers.get("retry-after-ms"), milliseconds=True)
+    hint = milliseconds if milliseconds is not None else _parse_retry_after_seconds(headers.get("retry-after"))
+    if hint is not None:
+        return hint if hint <= maximum else None
     delay_ceiling = min(maximum, base * 2 ** min(attempt, 60))
     if delay_ceiling < base:
         return None

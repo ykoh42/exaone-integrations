@@ -41,9 +41,7 @@ export class ExaoneAPIError extends Error {
     this.param = asStringOrNull(error.param);
     const retryAfter = parseRetryAfterHeader(safeHeaders["retry-after"] ?? null);
     const retryAfterMs = parseRetryAfterMsHeader(safeHeaders["retry-after-ms"] ?? null);
-    this.retryAfterMs = retryAfter === undefined && retryAfterMs === undefined
-      ? undefined
-      : Math.max(retryAfter ?? 0, retryAfterMs ?? 0);
+    this.retryAfterMs = retryAfterMs ?? retryAfter;
   }
 }
 

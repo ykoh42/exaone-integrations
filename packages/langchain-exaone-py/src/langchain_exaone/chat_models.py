@@ -251,9 +251,8 @@ def _safe_transport_errors(method: Any) -> Any:
 
 
 def _retry_after(headers: Mapping[str, str]) -> float | None:
-    """Honor the longer valid retry-after hint, including EXAONE milliseconds."""
-    hints: list[float] = []
-    for name, divisor in (("retry-after", 1.0), ("retry-after-ms", 1000.0)):
+    """Prefer the millisecond retry hint when it is valid."""
+    for name, divisor in (("retry-after-ms", 1000.0), ("retry-after", 1.0)):
         raw = headers.get(name)
         if raw is None:
             continue
@@ -270,8 +269,8 @@ def _retry_after(headers: Mapping[str, str]) -> float | None:
             except (TypeError, ValueError, OverflowError):
                 continue
         if value >= 0.0:
-            hints.append(value / divisor)
-    return max(hints) if hints else None
+            return value / divisor
+    return None
 
 
 def _nonstream_correction_usage(key: str) -> CorrectionFailureUsage | None:

@@ -181,7 +181,7 @@ The configured API key is sent to the selected endpoint; if omitted, it comes fr
 
 The default model's documented context window is 524,288 tokens. The selected endpoint validates its own input and output token budget.
 
-The provider retries HTTP 408, 429, 500, 502, 503, and 504 errors up to two times by default; set `max_retries=0` to disable retries. It honors the longer valid `Retry-After` or `Retry-After-Ms` delay. If neither header is present, the first retry waits at least one second to respect the API's per-second rate limit; a `max_retry_delay` below one second disables that retry. It does not retry after streaming output has started.
+The provider retries HTTP 408, 429, 500, 502, 503, and 504 errors up to two times by default; set `max_retries=0` to disable retries. It uses a valid `Retry-After-Ms` delay first, falling back to `Retry-After`. If neither header is present, the first retry waits at least one second to respect the API's per-second rate limit; a `max_retry_delay` below one second disables that retry. It does not retry after streaming output has started.
 
 The default hosted K-EXAONE 2.5 API is text-only. For an already-running compatible EXAONE 4.5 endpoint, set `base_url`, `model`, and `api_key` to its connection details and use LangChain image content blocks:
 

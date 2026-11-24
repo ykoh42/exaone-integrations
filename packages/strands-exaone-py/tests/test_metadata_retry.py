@@ -35,7 +35,7 @@ async def events(model: ExaoneModel, **kwargs: Any) -> list[dict[str, Any]]:
     return [event async for event in model.stream(MESSAGE, **kwargs)]
 
 
-async def test_retry_429_honors_longer_header_and_success() -> None:
+async def test_retry_429_honors_millisecond_header_and_success() -> None:
     times: list[float] = []
     closed = []
 
@@ -58,9 +58,9 @@ async def test_retry_429_honors_longer_header_and_success() -> None:
 
 @pytest.mark.parametrize(
     ("retry_after", "retry_after_ms", "delay"),
-    [("10", "9598", 10.0), ("16", "15659", 16.0)],
+    [("10", "9598", 9.598), ("16", "15659", 15.659), ("1", "186", 0.186)],
 )
-async def test_captured_exaone_retry_hints_honor_the_longer_value(
+async def test_captured_exaone_retry_hints_prefer_milliseconds(
     retry_after: str, retry_after_ms: str, delay: float, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     attempts = 0
@@ -137,6 +137,21 @@ async def test_captured_429_without_retry_hints_uses_bounded_backoff(monkeypatch
     assert attempts == 2
     assert random_bounds == [(1, 1)]
     assert delays == [1]
+
+
+@pytest.mark.parametrize(
+    ("headers", "maximum", "expected"),
+    [
+        ({"retry-after": "1", "retry-after-ms": "186"}, 2, 0.186),
+        ({"retry-after": "0.1", "retry-after-ms": "600"}, 2, 0.6),
+        ({"retry-after": "1", "retry-after-ms": "0"}, 2, 0),
+        ({"retry-after": "1", "retry-after-ms": "invalid"}, 2, 1),
+        ({"retry-after": "1"}, 2, 1),
+        ({"retry-after": "0.1", "retry-after-ms": "600"}, 0.5, None),
+    ],
+)
+def test_retry_hint_precedence_and_cap(headers: dict[str, str], maximum: float, expected: float | None) -> None:
+    assert retry_module.retry_delay(headers, attempt=0, base=1, maximum=maximum) == expected
 
 
 def test_retry_without_hints_stops_when_cap_is_below_minimum() -> None:

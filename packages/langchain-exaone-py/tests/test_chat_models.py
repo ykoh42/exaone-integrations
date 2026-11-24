@@ -1915,7 +1915,23 @@ async def test_api_error_preserves_numeric_top_level_result_code(operation: str)
     assert type(error.value.code) is int
 
 
-def test_retry_honors_longest_retry_after_hint(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    ("headers", "expected"),
+    [
+        ({"retry-after": "1", "retry-after-ms": "186"}, 0.186),
+        ({"retry-after": "0.1", "retry-after-ms": "600"}, 0.6),
+        ({"retry-after": "1", "retry-after-ms": "0"}, 0),
+        ({"retry-after": "1", "retry-after-ms": "invalid"}, 1),
+        ({"retry-after": "1"}, 1),
+    ],
+)
+def test_retry_hint_precedence(headers: dict[str, str], expected: float) -> None:
+    from langchain_exaone.chat_models import _retry_after
+
+    assert _retry_after(headers) == expected
+
+
+def test_retry_prefers_millisecond_retry_after_hint(monkeypatch: pytest.MonkeyPatch) -> None:
     requests = 0
     delays: list[float] = []
 
@@ -1925,7 +1941,7 @@ def test_retry_honors_longest_retry_after_hint(monkeypatch: pytest.MonkeyPatch) 
         if requests == 1:
             return httpx.Response(
                 429,
-                headers={"retry-after": "0.05", "retry-after-ms": "100"},
+                headers={"retry-after": "1", "retry-after-ms": "100"},
                 json={"error": {"message": "Try again."}},
             )
         return httpx.Response(200, json=_completion())

@@ -28,8 +28,7 @@ function retryAfterDelay(headers: Headers): number | undefined {
   const rawMilliseconds = headers.get('retry-after-ms')?.trim()
   const millisecondsHint = rawMilliseconds && /^\d+(\.\d+)?$/.test(rawMilliseconds) ? Number(rawMilliseconds) : undefined
   const standardHint = parseRetryAfter(headers.get('retry-after'))
-  const hints = [millisecondsHint, standardHint].filter((value): value is number => value !== undefined && !Number.isNaN(value))
-  return hints.length ? Math.max(...hints) : undefined
+  return millisecondsHint ?? standardHint
 }
 
 /** Return a bounded retry delay, or undefined when the server hint exceeds the cap. */

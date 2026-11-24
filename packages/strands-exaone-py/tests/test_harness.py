@@ -121,7 +121,7 @@ async def test_exaone_retry_strategy_honors_retry_after_in_harness(monkeypatch: 
 
     assert result.message["content"]
     assert requests == 2
-    assert delays == [1.0]
+    assert delays == [0.631]
 
 
 async def test_exaone_retry_strategy_surfaces_retry_after_above_cap() -> None:

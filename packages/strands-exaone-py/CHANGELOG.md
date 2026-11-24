@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.1 (2026-11-24)
+
+- Prefer the Retry-After-Ms header when calculating retries, falling back to Retry-After.
+
 ## 0.2.0 (2026-11-20)
 
 - **Breaking change.** Remove the `buffer_response` argument. Register `recover_tool_calls` directly.

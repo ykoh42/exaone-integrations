@@ -10,11 +10,8 @@ export function retryDelayMs(
 ): number | null {
   const standard = parseRetryAfter(headers.get("retry-after"));
   const milliseconds = parseRetryAfterMs(headers.get("retry-after-ms"));
-  const hints = [standard, milliseconds].filter((value): value is number => value !== undefined);
-  if (hints.length > 0) {
-    const delay = Math.max(...hints);
-    return delay <= maxDelayMs ? delay : null;
-  }
+  const delay = milliseconds ?? standard;
+  if (delay !== undefined) return delay <= maxDelayMs ? delay : null;
 
   if (minimumDelayMs > maxDelayMs) return null;
   const ceiling = Math.min(maxDelayMs, baseDelayMs * 2 ** Math.min(attempt, 30));

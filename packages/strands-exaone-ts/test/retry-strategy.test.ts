@@ -57,7 +57,7 @@ describe('EXAONE retry strategy through Strands Harness', () => {
     await agent.shutdown()
   })
 
-  it('waits for the longest Retry-After hint before retrying a throttled request', async () => {
+  it('prefers the millisecond Retry-After hint when retrying a throttled request', async () => {
     let attempts = 0
     const requestTimes: number[] = []
     const fetcher: typeof fetch = async () => {
@@ -80,7 +80,7 @@ describe('EXAONE retry strategy through Strands Harness', () => {
     await agent.invoke('Say ok.')
 
     expect(attempts).toBe(2)
-    expect(requestTimes[1] - requestTimes[0]).toBeGreaterThanOrEqual(950)
+    expect(requestTimes[1] - requestTimes[0]).toBeGreaterThanOrEqual(600)
   })
 
   it('surfaces a Retry-After hint above the configured cap without retrying early', async () => {

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Message, ModelError, ModelNetworkError, ModelThrottledError } from '@strands-agents/sdk'
 import { ExaoneAPIError, ExaoneModel } from '../src/index.js'
+import { retryDelayMs } from '../src/retry.js'
 
 const user = () => Message.fromMessageData({ role: 'user', content: [{ text: 'hello' }] })
 const ok = () => new Response(JSON.stringify({ choices: [{ index: 0, message: { content: 'ok' }, finish_reason: 'stop' }] }))
@@ -228,7 +229,7 @@ describe('opt-in retry policy', () => {
     expect(fetcher).toHaveBeenCalledOnce()
   })
 
-  it('honors the longer of retry headers before emitting any result', async () => {
+  it('honors the millisecond retry header before emitting any result', async () => {
     vi.useFakeTimers()
     const cancel = vi.fn()
     let attempts = 0
@@ -248,8 +249,9 @@ describe('opt-in retry policy', () => {
   })
 
   it.each([
-    { retryAfter: '10', retryAfterMs: '9598', delay: 10_000 },
-    { retryAfter: '16', retryAfterMs: '15659', delay: 16_000 },
+    { retryAfter: '10', retryAfterMs: '9598', delay: 9_598 },
+    { retryAfter: '16', retryAfterMs: '15659', delay: 15_659 },
+    { retryAfter: '1', retryAfterMs: '186', delay: 186 },
   ])('honors captured EXAONE retry headers for at least $delay ms', async ({ retryAfter, retryAfterMs, delay }) => {
     vi.useFakeTimers()
     let attempts = 0
@@ -274,6 +276,17 @@ describe('opt-in retry policy', () => {
     await vi.advanceTimersByTimeAsync(1)
     await result
     expect(attempts).toBe(2)
+  })
+
+  it.each([
+    [{ 'retry-after': '1', 'retry-after-ms': '186' }, 2_000, 186],
+    [{ 'retry-after': '0.1', 'retry-after-ms': '600' }, 2_000, 600],
+    [{ 'retry-after': '1', 'retry-after-ms': '0' }, 2_000, 0],
+    [{ 'retry-after': '1', 'retry-after-ms': 'invalid' }, 2_000, 1_000],
+    [{ 'retry-after': '1' }, 2_000, 1_000],
+    [{ 'retry-after': '0.1', 'retry-after-ms': '600' }, 500, undefined],
+  ])('uses the preferred retry hint with the configured cap', (headers, cap, expected) => {
+    expect(retryDelayMs(new Headers(headers), 0, 1_000, cap)).toBe(expected)
   })
 
   it('uses bounded backoff when captured 429 responses omit retry hints', async () => {
@@ -355,7 +368,7 @@ describe('opt-in retry policy', () => {
     }
   })
 
-  it('accepts HTTP-date retry hints and uses the longer delay', async () => {
+  it('prefers a millisecond retry hint over an HTTP date', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-11-11T00:00:00.000Z'))
     let attempts = 0
@@ -363,7 +376,7 @@ describe('opt-in retry policy', () => {
       ? new Response('{}', { status: 503, headers: { 'retry-after': 'Wed, 11 Nov 2026 00:00:03 GMT', 'retry-after-ms': '1000' } })
       : ok())
     const result = collect(new ExaoneModel({ apiKey: 'key', fetch: fetcher, stream: false, maxRetries: 1 }))
-    await vi.advanceTimersByTimeAsync(2999)
+    await vi.advanceTimersByTimeAsync(999)
     expect(attempts).toBe(1)
     await vi.advanceTimersByTimeAsync(1)
     await result
