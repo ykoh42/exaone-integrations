@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.3 (2026-11-25)
 
 - Allow development with Strands Harness 0.5 and newer 0.x releases.
 

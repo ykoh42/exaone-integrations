@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.2 (2026-11-25)
+
+- Update the Harness examples for Strands SDK 1.26 and Harness 0.5, and the CLI example for Strands CLI 0.4.
+
 ## 0.2.1 (2026-11-24)
 
 - Prefer the Retry-After-Ms header when calculating retries, falling back to Retry-After.

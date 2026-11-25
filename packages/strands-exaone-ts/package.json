@@ -1,6 +1,6 @@
 {
   "name": "strands-exaone",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "EXAONE model provider for Strands Agents",
   "type": "module",
   "files": [
