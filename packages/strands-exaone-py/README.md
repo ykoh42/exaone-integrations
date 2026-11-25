@@ -39,7 +39,7 @@ for block in result.message["content"]:
         print(block["text"])
 ```
 
-See the [Harness examples](examples/harness/) for tools and conversation history. For the model provider alone, install `strands-exaone` and see the [Strands SDK examples](examples/sdk/). The provider supports `strands-agents` 1.63.x through 1.65.x.
+See the [Harness examples](examples/harness/) for tools and conversation history. For the model provider alone, install `strands-exaone` and see the [Strands SDK examples](examples/sdk/). The provider supports `strands-agents` 1.63.0 and newer 1.x releases.
 
 Load any application `.env` file before constructing the model, or pass `api_key` explicitly.
 

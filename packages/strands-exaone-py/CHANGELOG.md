@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Allow Strands SDK 1.x releases from 1.63.0 onward.
+
 ## 0.2.1 (2026-11-24)
 
 - Prefer the Retry-After-Ms header when calculating retries, falling back to Retry-After.

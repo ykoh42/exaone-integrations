@@ -28,28 +28,28 @@ jobs:
         include:
           - python-version: '3.10'
             harness-version: '0.1.2'
-            sdk-version: '1.63.0'
+            sdk-spec: '==1.63.0'
           - python-version: '3.10'
             harness-version: '0.3.4'
-            sdk-version: '1.63.0'
+            sdk-spec: '==1.63.0'
           - python-version: '3.10'
             harness-version: '0.4.0'
-            sdk-version: '1.65.0'
+            sdk-spec: '>=1.63.0,<2'
           - python-version: '3.11'
             harness-version: '0.4.0'
-            sdk-version: '1.65.0'
+            sdk-spec: '>=1.63.0,<2'
           - python-version: '3.12'
             harness-version: '0.4.0'
-            sdk-version: '1.65.0'
+            sdk-spec: '>=1.63.0,<2'
           - python-version: '3.13'
             harness-version: '0.4.0'
-            sdk-version: '1.65.0'
+            sdk-spec: '>=1.63.0,<2'
           - python-version: '3.14'
             harness-version: '0.4.0'
-            sdk-version: '1.65.0'
+            sdk-spec: '>=1.63.0,<2'
           - python-version: '3.15'
             harness-version: '0.4.0'
-            sdk-version: '1.65.0'
+            sdk-spec: '>=1.63.0,<2'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -60,7 +60,10 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
           cache-dependency-path: packages/strands-exaone-py/pyproject.toml
-      - run: python -m pip install -e './packages/strands-exaone-py[dev]' 'strands-agents==${{ matrix.sdk-version }}' 'strands-harness==${{ matrix.harness-version }}'
+      - run: python -m pip install 'strands-agents${{ matrix.sdk-spec }}'
+      - run: |
+          sdk_version=$(python -c 'from importlib.metadata import version; print(version("strands-agents"))')
+          python -m pip install -e './packages/strands-exaone-py[dev]' "strands-agents==$sdk_version" 'strands-harness==${{ matrix.harness-version }}'
       - run: ruff check packages/strands-exaone-py
       - run: ruff format --check packages/strands-exaone-py
       - run: complexipy packages/strands-exaone-py/src --max-complexity-allowed 15
@@ -69,6 +72,7 @@ jobs:
       - run: python -c 'import strands_exaone'
       - run: cd packages/strands-exaone-py && hatch build
       - run: python -m pip install --force-reinstall --no-deps packages/strands-exaone-py/dist/*.whl
+      - run: python -m pip check
       - run: python -c 'from strands_exaone import ExaoneModel; print(ExaoneModel.__name__)'
       - run: python -c 'from importlib.resources import files; assert files("strands_exaone").joinpath("py.typed").is_file()'
 
@@ -131,6 +135,10 @@ jobs:
             module: strands_exaone
             model: ExaoneModel
             sdk: 'strands-agents==1.63.0'
+          - package: strands-exaone-py
+            module: strands_exaone
+            model: ExaoneModel
+            sdk: 'strands-agents>=1.63.0,<2'
           - package: langchain-exaone-py
             module: langchain_exaone
             model: ChatEXAONE
@@ -218,7 +226,9 @@ jobs:
               assert 'LICENSE' in info.get_all('License-File', [])
           PY
           uv venv --python 3.10 "$RUNNER_TEMP/hatch-minimum-runtime"
-          uv pip install --python "$RUNNER_TEMP/hatch-minimum-runtime/bin/python" "$RUNNER_TEMP"/hatch-minimum-rebuilt/*.whl "$SDK"
+          uv pip install --python "$RUNNER_TEMP/hatch-minimum-runtime/bin/python" "$SDK"
+          sdk_pin=$("$RUNNER_TEMP/hatch-minimum-runtime/bin/python" -c 'import os, re; from importlib.metadata import version; name = re.split("[<>=!~]", os.environ["SDK"], 1)[0]; print(f"{name}=={version(name)}")')
+          uv pip install --python "$RUNNER_TEMP/hatch-minimum-runtime/bin/python" "$RUNNER_TEMP"/hatch-minimum-rebuilt/*.whl "$sdk_pin"
           "$RUNNER_TEMP/hatch-minimum-runtime/bin/python" - <<'PY'
           import importlib
           import os
@@ -237,7 +247,9 @@ jobs:
           for artifact in "$RUNNER_TEMP"/python-package-dist/*.whl "$RUNNER_TEMP"/python-package-dist/*.tar.gz; do
             venv="$RUNNER_TEMP/$(basename "$artifact").venv"
             uv venv --python 3.10 "$venv"
-            uv pip install --python "$venv/bin/python" "$artifact" "$SDK"
+            uv pip install --python "$venv/bin/python" "$SDK"
+            sdk_pin=$("$venv/bin/python" -c 'import os, re; from importlib.metadata import version; name = re.split("[<>=!~]", os.environ["SDK"], 1)[0]; print(f"{name}=={version(name)}")')
+            uv pip install --python "$venv/bin/python" "$artifact" "$sdk_pin"
             "$venv/bin/python" - <<'PY'
           import importlib
           import os
