@@ -1,6 +1,6 @@
 # EXAONE Integrations
 
-Community-maintained providers for the EXAONE Chat Completions API. They preserve EXAONE reasoning history and expose model capabilities and token usage through Strands and LangChain.
+Community-maintained providers for the EXAONE Chat Completions API. They preserve EXAONE reasoning history and expose model capabilities and token usage through Strands, LangChain, and Hermes.
 
 ## Get started
 
@@ -10,6 +10,7 @@ Get an API key from the [EXAONE API Platform](https://docs.exaone.ai/en/docs/ove
 | --- | --- | --- |
 | Strands Harness | [Python quick start](packages/strands-exaone-py/#quick-start) | [TypeScript quick start](packages/strands-exaone-ts/#quick-start) |
 | LangChain Deep Agents | [Python quick start](packages/langchain-exaone-py/#quick-start) | [TypeScript quick start](packages/langchain-exaone-ts/#quick-start) |
+| Hermes Agent | [Installation](packages/hermes-exaone/) | — |
 
 The providers default to hosted K-EXAONE 2.5. See [model and server compatibility](COMPATIBILITY.md) for self-hosted endpoints, the [roadmap](ROADMAP.md) for planned work, and [contributing](CONTRIBUTING.md) for development.
 

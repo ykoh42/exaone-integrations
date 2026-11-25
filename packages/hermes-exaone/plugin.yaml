@@ -1,0 +1,11 @@
+name: exaone-provider
+kind: model-provider
+version: 0.1.0
+description: K-EXAONE models through the EXAONE API Platform
+author: ykoh42
+requires_hermes: ">=0.23.3"
+requires_env:
+  - name: EXAONE_API_KEY
+    description: EXAONE API Platform API key
+    url: https://docs.exaone.ai/en/docs/overview
+    secret: true
