@@ -1,6 +1,7 @@
 # Repository guidance
 
 - Keep each framework package independently buildable and installable. Test the built package when changing its packaging or public exports.
+- **Provider scope:** Implement provider-owned protocol and SDK adaptation; leave framework, model, and server behavior to their owners unless required by the provider contract.
 - Preserve EXAONE reasoning, content, and metadata that the framework can represent. Reject unsupported input or response shapes explicitly, and document framework and API limitations separately.
 - **No task-specific overfitting:** Treat one-off prompts, outputs, and harness traces as observations. Change provider behavior only when an API/SDK contract or repeatable evidence across representative tasks supports a general rule; preserve model capability and avoid task-specific branches.
 - Keep equivalent Python and TypeScript behavior aligned when their framework interfaces allow it.
