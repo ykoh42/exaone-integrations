@@ -8,7 +8,7 @@ Python 3.10 or newer is required. From this example directory, create an environ
 
 ```bash
 python3 -m venv .venv
-.venv/bin/python -m pip install 'strands-harness~=0.4.0' ../..
+.venv/bin/python -m pip install 'strands-harness~=0.5.0' ../..
 export EXAONE_API_KEY='your-api-key'
 ```
 

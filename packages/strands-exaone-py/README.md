@@ -15,7 +15,7 @@ export EXAONE_API_KEY='your-api-key'
 Use Python 3.10 or newer. Install the provider and Strands Harness.
 
 ```bash
-python -m pip install strands-exaone 'strands-harness~=0.4.0'
+python -m pip install strands-exaone 'strands-harness~=0.5.0'
 ```
 
 ```python

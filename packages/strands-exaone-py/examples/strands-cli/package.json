@@ -2,6 +2,6 @@
   "name": "strands-exaone-python-cli-example",
   "private": true,
   "dependencies": {
-    "@strands-agents/cli": "~0.3.0"
+    "@strands-agents/cli": "~0.4.0"
   }
 }

@@ -17,7 +17,7 @@ export EXAONE_API_KEY='your-api-key'
 Use Node.js 22 or newer. Install the provider and Strands Harness.
 
 ```bash
-npm install strands-exaone '@strands-agents/harness@~0.4.0'
+npm install strands-exaone '@strands-agents/harness@~0.5.0'
 ```
 
 ```typescript

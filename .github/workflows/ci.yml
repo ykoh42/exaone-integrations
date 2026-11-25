@@ -27,28 +27,28 @@ jobs:
       matrix:
         include:
           - python-version: '3.10'
-            harness-version: '0.1.2'
+            harness-spec: '==0.1.2'
             sdk-spec: '==1.63.0'
           - python-version: '3.10'
-            harness-version: '0.3.4'
+            harness-spec: '==0.3.4'
             sdk-spec: '==1.63.0'
           - python-version: '3.10'
-            harness-version: '0.4.0'
+            harness-spec: '>=0.1.2,<1'
             sdk-spec: '>=1.63.0,<2'
           - python-version: '3.11'
-            harness-version: '0.4.0'
+            harness-spec: '>=0.1.2,<1'
             sdk-spec: '>=1.63.0,<2'
           - python-version: '3.12'
-            harness-version: '0.4.0'
+            harness-spec: '>=0.1.2,<1'
             sdk-spec: '>=1.63.0,<2'
           - python-version: '3.13'
-            harness-version: '0.4.0'
+            harness-spec: '>=0.1.2,<1'
             sdk-spec: '>=1.63.0,<2'
           - python-version: '3.14'
-            harness-version: '0.4.0'
+            harness-spec: '>=0.1.2,<1'
             sdk-spec: '>=1.63.0,<2'
           - python-version: '3.15'
-            harness-version: '0.4.0'
+            harness-spec: '>=0.1.2,<1'
             sdk-spec: '>=1.63.0,<2'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -60,10 +60,12 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
           cache-dependency-path: packages/strands-exaone-py/pyproject.toml
-      - run: python -m pip install 'strands-agents${{ matrix.sdk-spec }}'
+      - run: python -m pip install --no-deps 'strands-agents${{ matrix.sdk-spec }}'
+      - run: python -m pip install --no-deps 'strands-harness${{ matrix.harness-spec }}'
       - run: |
           sdk_version=$(python -c 'from importlib.metadata import version; print(version("strands-agents"))')
-          python -m pip install -e './packages/strands-exaone-py[dev]' "strands-agents==$sdk_version" 'strands-harness==${{ matrix.harness-version }}'
+          harness_version=$(python -c 'from importlib.metadata import version; print(version("strands-harness"))')
+          python -m pip install -e './packages/strands-exaone-py[dev]' "strands-agents==$sdk_version" "strands-harness==$harness_version"
       - run: ruff check packages/strands-exaone-py
       - run: ruff format --check packages/strands-exaone-py
       - run: complexipy packages/strands-exaone-py/src --max-complexity-allowed 15
@@ -123,6 +125,34 @@ jobs:
           "$RUNNER_TEMP/langchain-exaone-minimum-core-venv/bin/python" -m pip install 'langchain-core==1.3.3' 'langchain-tests==1.1.5' 'pytest>=9,<10' 'pytest-asyncio>=1,<2' dist/*.whl
           "$RUNNER_TEMP/langchain-exaone-minimum-core-venv/bin/python" -c 'from langchain_core.language_models import BaseChatModel; from langchain_exaone import ChatEXAONE; model = ChatEXAONE(api_key="package-check"); assert isinstance(model, BaseChatModel); assert model.profile["max_input_tokens"] == 524288'
           "$RUNNER_TEMP/langchain-exaone-minimum-core-venv/bin/python" -m pytest tests
+
+  langchain-python-latest:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          version: 0.13.7
+      - name: Test the built package with the latest compatible LangChain versions
+        run: |
+          uv build --wheel --directory packages/langchain-exaone-py --out-dir "$RUNNER_TEMP/langchain-latest-dist"
+          uv venv --python 3.12 "$RUNNER_TEMP/langchain-latest"
+          py="$RUNNER_TEMP/langchain-latest/bin/python"
+          uv pip install --python "$py" --no-deps 'langchain-core>=1.3.3,<2'
+          core_version=$("$py" -c 'from importlib.metadata import version; print(version("langchain-core"))')
+          uv pip install --python "$py" --no-deps 'langchain>=1.5,<2'
+          langchain_version=$("$py" -c 'from importlib.metadata import version; print(version("langchain"))')
+          uv pip install --python "$py" "$RUNNER_TEMP"/langchain-latest-dist/*.whl "langchain-core==$core_version" "langchain==$langchain_version" 'langchain-tests==1.1.9' 'pytest>=9,<10' 'pytest-asyncio>=1,<2'
+          uv pip check --python "$py"
+          "$py" -m pytest packages/langchain-exaone-py/tests
+          "$py" verification/model-free/roundtrip/replay-choices.py langchain
 
   python-package-boundaries:
     runs-on: ubuntu-24.04
@@ -268,7 +298,7 @@ jobs:
       fail-fast: false
       matrix:
         node-version: ['22.18.0', '24', '26']
-        harness-version: ['0.1.1', '0.4.0']
+        harness-version: ['0.1.1', '0.5.0']
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -344,6 +374,9 @@ jobs:
           - sdk: '1.25.0'
             harness: '0.4.0'
             zod: '4.6.6'
+          - sdk: '1'
+            harness: '>=0.1.1 <1'
+            zod: '^4.5.4'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -357,9 +390,14 @@ jobs:
       - run: npm ci
       - name: Install the SDK, Harness, and Zod in an independent dependency tree
         run: |
+          npm install --prefix "$RUNNER_TEMP/strands-sdk-selector" --ignore-scripts '@strands-agents/sdk@${{ matrix.sdk }}'
+          npm install --prefix "$RUNNER_TEMP/strands-harness-selector" --ignore-scripts '@strands-agents/harness@${{ matrix.harness }}'
+          sdk_version=$(node -p "require('$RUNNER_TEMP/strands-sdk-selector/node_modules/@strands-agents/sdk/package.json').version")
+          harness_version=$(node -p "require('$RUNNER_TEMP/strands-harness-selector/node_modules/@strands-agents/harness/package.json').version")
+          echo "STRANDS_SDK_VERSION=$sdk_version" >> "$GITHUB_ENV"
           mkdir "$RUNNER_TEMP/strands-latest"
           printf '%s\n' '{"private":true}' > "$RUNNER_TEMP/strands-latest/package.json"
-          npm install --prefix "$RUNNER_TEMP/strands-latest" --ignore-scripts '@strands-agents/sdk@${{ matrix.sdk }}' '@strands-agents/harness@${{ matrix.harness }}' 'zod@${{ matrix.zod }}'
+          npm install --prefix "$RUNNER_TEMP/strands-latest" --ignore-scripts "@strands-agents/sdk@$sdk_version" "@strands-agents/harness@$harness_version" 'zod@${{ matrix.zod }}'
           mv node_modules/@strands-agents/sdk "$RUNNER_TEMP/strands-sdk-minimum"
           mv node_modules/@strands-agents/harness "$RUNNER_TEMP/strands-harness-minimum"
           mv node_modules/zod "$RUNNER_TEMP/zod-workspace"
@@ -373,7 +411,7 @@ jobs:
           mkdir "$RUNNER_TEMP/strands-peer-check"
           cd "$RUNNER_TEMP/strands-peer-check"
           printf '%s\n' '{"private":true,"type":"module"}' > package.json
-          npm install --ignore-scripts --engine-strict "$RUNNER_TEMP"/strands-exaone-*.tgz '@strands-agents/sdk@${{ matrix.sdk }}' 'zod@${{ matrix.zod }}'
+          npm install --ignore-scripts --engine-strict "$RUNNER_TEMP"/strands-exaone-*.tgz "@strands-agents/sdk@$STRANDS_SDK_VERSION" 'zod@${{ matrix.zod }}'
           node --input-type=module -e "import { ExaoneModel } from 'strands-exaone'; import { Model } from '@strands-agents/sdk'; if (!(new ExaoneModel() instanceof Model)) process.exit(1)"
 
   strands-typescript-package:
@@ -550,6 +588,30 @@ jobs:
           EOF
           ./node_modules/.bin/tsc --strict --noEmit --target ES2022 --lib ESNext,DOM --module NodeNext --moduleResolution NodeNext smoke.ts
 
+  langchain-typescript-latest:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+      - run: npm install --global npm@11.20.0
+      - name: Test with the latest compatible LangChain versions
+        run: |
+          cp -R packages/langchain-exaone-ts "$RUNNER_TEMP/langchain-latest-source"
+          npm install --prefix "$RUNNER_TEMP/langchain-core-latest" --ignore-scripts '@langchain/core@1'
+          npm install --prefix "$RUNNER_TEMP/langchain-latest" --ignore-scripts 'langchain@1'
+          core_version=$(node -p "require('$RUNNER_TEMP/langchain-core-latest/node_modules/@langchain/core/package.json').version")
+          langchain_version=$(node -p "require('$RUNNER_TEMP/langchain-latest/node_modules/langchain/package.json').version")
+          cd "$RUNNER_TEMP/langchain-latest-source"
+          npm ci --ignore-scripts --workspaces=false
+          npm install --ignore-scripts --no-save --workspaces=false "@langchain/core@$core_version" "langchain@$langchain_version"
+          npm run check --workspaces=false
+
   langchain-node20:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -596,6 +658,9 @@ jobs:
           - sdk: '1.25.0'
             harness: '0.4.0'
             zod: '4.6.6'
+          - sdk: '1'
+            harness: '>=0.1.1 <1'
+            zod: '^4.5.4'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -616,6 +681,10 @@ jobs:
           cp -R packages/strands-exaone-ts/src packages/strands-exaone-ts/test packages/strands-exaone-ts/dist "$RUNNER_TEMP/strands-node22/"
           cd "$RUNNER_TEMP/strands-node22"
           printf '%s\n' '{"private":true,"type":"module"}' > package.json
-          npm install --ignore-scripts --engine-strict "$RUNNER_TEMP"/strands-exaone-*.tgz '@strands-agents/sdk@${{ matrix.sdk }}' '@strands-agents/harness@${{ matrix.harness }}' 'zod@${{ matrix.zod }}' vitest@2.1.9
+          npm install --prefix "$RUNNER_TEMP/strands-node22-sdk" --ignore-scripts --engine-strict '@strands-agents/sdk@${{ matrix.sdk }}'
+          npm install --prefix "$RUNNER_TEMP/strands-node22-harness" --ignore-scripts --engine-strict '@strands-agents/harness@${{ matrix.harness }}'
+          sdk_version=$(node -p "require('$RUNNER_TEMP/strands-node22-sdk/node_modules/@strands-agents/sdk/package.json').version")
+          harness_version=$(node -p "require('$RUNNER_TEMP/strands-node22-harness/node_modules/@strands-agents/harness/package.json').version")
+          npm install --ignore-scripts --engine-strict "$RUNNER_TEMP"/strands-exaone-*.tgz "@strands-agents/sdk@$sdk_version" "@strands-agents/harness@$harness_version" 'zod@${{ matrix.zod }}' vitest@2.1.9
           node --input-type=module -e "import { ExaoneModel } from 'strands-exaone'; import { Model } from '@strands-agents/sdk'; if (!(new ExaoneModel({ apiKey: 'package-check' }) instanceof Model)) process.exit(1)"
           ./node_modules/.bin/vitest run
