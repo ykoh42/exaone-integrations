@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.2 (2026-11-25)
 
 - Allow Strands SDK 1.x releases from 1.63.0 onward.
 
